@@ -1,4 +1,4 @@
-# ESP++ Template
+# five_bar
 
 Template repository for building an ESP app with ESP++ (espp) components and
 ESP-IDF components.
@@ -6,10 +6,8 @@ ESP-IDF components.
 <!-- markdown-toc start - Don't edit this section. Run M-x markdown-toc-refresh-toc -->
 **Table of Contents**
 
-- [ESP++ Template](#esp-template)
+- [five_bar](#five_bar)
   - [Template](#template)
-    - [Automated Setup](#automated-setup)
-    - [Manual Setup](#manual-setup)
     - [Use within a Private Repository](#use-within-a-private-repository)
     - [Additional Dependencies](#additional-dependencies)
   - [Development](#development)
@@ -26,48 +24,6 @@ ESP-IDF components.
 This repository is designed to be used as a template repository - so you can
 specify this as the template repository type when creating a new repository on
 GitHub.
-
-### Automated Setup
-
-After setting this as the template:
-
-- Open a terminal in the project root and run:
-  - ```console
-    python scripts/setup_project.py
-    ```
-
-  - The script will prompt you for the project name, target chip, ESP-IDF version, GitHub workflow permissions, automatically update the corresponding files (including the logger tag in `main/main.cpp` and this README) and setup pre-commit.
-
-- Open an **ESP-IDF Terminal** to build, flash and test.
-  - The serial monitor should print `Hello World!`
-
-> **Note:** If you need non-default build outputs (e.g., littlefs images), update [./.github/workflows/package_main.yml](./.github/workflows/package_main.yml) manually.
-
-
-### Manual Setup
-
-After setting this as the template, make sure to update the following:
-- [This README](./README.md) to contain the relevant description and images of
-  your project
-
-- The [./CMakeLists.txt](./CMakeLists.txt) file to update the project name.
-- The [./main/main.cpp](./main/main.cpp) To run the main code for your app. The
-  [main folder](./main) is also where you can put additional header and source
-  files that you don't think belong in their own components but help keep the
-  main code clean.
-- The [./sdkconfig.defaults](./sdkconfig.defaults) to configure the defaults for
-  your project / processor.
-- Update the [./.github/workflows/build.yml](./.github/workflows/build.yml) file
-  to have the correct information for your project.
-- Update the [./.github/workflows/package_main.yml](./.github/workflows/package_main.yml) file
-  to:
-  - have the correct target architecture (e.g. `esp32s3`) for your project
-  - include all the build outputs you may want (e.g. littlefs file system images)
-  - have the right name for the generated 1-click programmer executable
-- Enable `Read and Write permissions` under `Workflow Permissions` on the
-  `Settings->Actions` subpage of the repository. that will allow the static
-  analysis tool to put its results into a comment on any pull requests in your
-  repository.
 
 ### Use within a Private Repository
 

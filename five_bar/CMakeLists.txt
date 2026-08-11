@@ -38,12 +38,12 @@ set(
   # e.g.
   #
   # `idf.py add-dependency "espp/task>=1.0"`
-  "main esptool_py"
+  "main esptool_py motorgo-plink"
   CACHE STRING
   "List of components to include"
   )
 
 # TODO: update this with your project's name
-project(template)
+project(five_bar)
 
 set(CMAKE_CXX_STANDARD 20)

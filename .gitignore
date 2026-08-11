@@ -34,3 +34,6 @@ build/
 sdkconfig
 sdkconfig.old
 managed_components/
+
+# vs code
+.vscode/
