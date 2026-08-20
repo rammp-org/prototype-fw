@@ -29,6 +29,15 @@ public:
   bool is_connected(uint32_t timeout_ms = 100);
 
   bool read_status(Status &status, uint32_t timeout_ms = 100);
+  // Unsupported by the current motor firmware: command 0xB5 gets no response.
+  bool read_motor_model(std::array<char, 8> &model, uint32_t timeout_ms = 100);
+  // Unsupported by the current motor firmware: command 0xB2 gets no response.
+  bool read_software_version_date(uint32_t &version_date, uint32_t timeout_ms = 100);
+  bool read_multi_turn_position(int32_t &position_raw, uint32_t timeout_ms = 100);
+  // Unsupported by the current motor firmware: command 0x61 gets no response.
+  bool read_multi_turn_raw_position(int32_t &position_raw, uint32_t timeout_ms = 100);
+  // Unsupported by the current motor firmware: command 0x62 gets no response.
+  bool read_multi_turn_zero_offset(int32_t &offset_raw, uint32_t timeout_ms = 100);
   bool read_temperature(int &temperature_c, uint32_t timeout_ms = 100);
   bool read_angle(int32_t &angle_raw, uint32_t timeout_ms = 100);
   bool read_velocity(int16_t &velocity_raw, uint32_t timeout_ms = 100);
@@ -36,6 +45,12 @@ public:
 
   bool send_torque(int16_t torque_raw);
   bool send_velocity(int32_t velocity_raw);
+  bool zero_position(uint32_t timeout_ms = 100);
+  bool write_multi_turn_zero_offset(int32_t offset_raw, uint32_t timeout_ms = 100);
+  bool write_current_position_as_zero(uint32_t timeout_ms = 100);
+  bool set_position(int32_t position_centidegrees, uint16_t max_speed_dps);
+  bool send_incremental_position(int32_t delta_centidegrees, uint16_t max_speed_dps);
+  bool stop();
   bool disable();
   bool hold();
   bool release_brake();
@@ -53,6 +68,7 @@ private:
   };
 
   static constexpr uint32_t motor_can_id_ = 0x141;
+  static constexpr uint32_t motor_reply_can_id_ = 0x241;
   static constexpr size_t packet_length_ = 8;
 
   static bool on_receive(twai_node_handle_t handle, const twai_rx_done_event_data_t *event,

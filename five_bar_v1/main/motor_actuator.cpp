@@ -54,7 +54,7 @@ bool MotorActuator::start(uint32_t bitrate) {
   config.io_cfg.quanta_clk_out = kUnusedGpio;
   config.io_cfg.bus_off_indicator = kUnusedGpio;
   config.bit_timing.bitrate = bitrate;
-  config.tx_queue_depth = 1;
+  config.tx_queue_depth = 3;
 
   esp_err_t result = twai_new_node_onchip(&config, &node_);
   if (result != ESP_OK) {
@@ -117,7 +117,9 @@ bool MotorActuator::request(uint8_t command_code, CanPacket &response, uint32_t 
     if (xQueueReceive(receive_queue_, &response, timeout_ticks - elapsed) != pdTRUE) {
       break;
     }
-    if (response.id == motor_can_id_ && !response.extended && response.length == packet_length_ &&
+    const bool expected_reply_id = response.id == motor_reply_can_id_ || response.id == motor_can_id_;
+    if (expected_reply_id && !response.extended &&
+      response.length == packet_length_ &&
         response.data[0] == command_code) {
       return true;
     }
@@ -136,6 +138,71 @@ bool MotorActuator::read_status(Status &status, uint32_t timeout_ms) {
   status.torque_raw = read_i16(response.data, 2);
   status.velocity_raw = read_i16(response.data, 4);
   status.angle_raw = read_i16(response.data, 6);
+  return true;
+}
+
+bool MotorActuator::read_motor_model(std::array<char, 8> &model, uint32_t timeout_ms) {
+  CanPacket response{};
+  if (!request(0xB5, response, timeout_ms)) {
+    logger_.warn("No motor model response received");
+    return false;
+  }
+  for (size_t index = 0; index < 7; ++index) {
+    model[index] = static_cast<char>(response.data[index + 1]);
+  }
+  model[7] = '\0';
+  return true;
+}
+
+bool MotorActuator::read_software_version_date(uint32_t &version_date, uint32_t timeout_ms) {
+  CanPacket response{};
+  if (!request(0xB2, response, timeout_ms)) {
+    logger_.warn("No software version response received");
+    return false;
+  }
+  version_date = static_cast<uint32_t>(read_i32(response.data, 4));
+  return true;
+}
+
+// The current motor firmware returns zero for the 0x92/0x60 multi-turn reads;
+// use the working 0x9C status angle for position feedback instead.
+bool MotorActuator::read_multi_turn_position(int32_t &position_raw, uint32_t timeout_ms) {
+  CanPacket response{};
+  // 0x92 is the multi-turn absolute angle used by the original actuator code
+  // and provides the 0.01-degree units required by the 0xA4 command.
+  if (request(0x92, response, timeout_ms)) {
+    position_raw = read_i32(response.data, 4);
+    return true;
+  }
+
+  // Fall back to the encoder-pulse command for firmware that supports 0x60
+  // but not the multi-turn angle command.
+  if (request(0x60, response, timeout_ms)) {
+    position_raw = read_i32(response.data, 4);
+    return true;
+  }
+
+  logger_.warn("No multi-turn encoder or angle response received");
+  return false;
+}
+
+bool MotorActuator::read_multi_turn_raw_position(int32_t &position_raw, uint32_t timeout_ms) {
+  CanPacket response{};
+  if (!request(0x61, response, timeout_ms)) {
+    logger_.warn("No 0x61 multi-turn raw position response received");
+    return false;
+  }
+  position_raw = read_i32(response.data, 4);
+  return true;
+}
+
+bool MotorActuator::read_multi_turn_zero_offset(int32_t &offset_raw, uint32_t timeout_ms) {
+  CanPacket response{};
+  if (!request(0x62, response, timeout_ms)) {
+    logger_.warn("No 0x62 multi-turn zero offset response received");
+    return false;
+  }
+  offset_raw = read_i32(response.data, 4);
   return true;
 }
 
@@ -183,6 +250,74 @@ bool MotorActuator::send_velocity(int32_t velocity_raw) {
   std::array<uint8_t, packet_length_> command{};
   command[0] = 0xA2;
   set_i32(command, 4, velocity_raw);
+  return send_command(command);
+}
+
+bool MotorActuator::zero_position(uint32_t timeout_ms) {
+  CanPacket response{};
+  if (!request(0x64, response, timeout_ms)) {
+    logger_.warn("Motor did not acknowledge position zero command");
+    return false;
+  }
+  logger_.info("Motor current position saved as zero");
+  return true;
+}
+
+bool MotorActuator::write_multi_turn_zero_offset(int32_t offset_raw, uint32_t timeout_ms) {
+  std::array<uint8_t, packet_length_> command{};
+  command[0] = 0x63;
+  set_i32(command, 4, offset_raw);
+  CanPacket response{};
+  while (xQueueReceive(receive_queue_, &response, 0) == pdTRUE) {
+  }
+  if (!send_command(command)) {
+    return false;
+  }
+  const TickType_t start_tick = xTaskGetTickCount();
+  const TickType_t timeout_ticks = pdMS_TO_TICKS(timeout_ms);
+  while (xTaskGetTickCount() - start_tick < timeout_ticks) {
+    const TickType_t elapsed = xTaskGetTickCount() - start_tick;
+    if (xQueueReceive(receive_queue_, &response, timeout_ticks - elapsed) != pdTRUE) {
+      break;
+    }
+    if ((response.id == motor_reply_can_id_ || response.id == motor_can_id_) &&
+        !response.extended && response.length == packet_length_ && response.data[0] == 0x63) {
+      return true;
+    }
+  }
+  logger_.warn("No 0x63 write zero offset response received");
+  return false;
+}
+
+bool MotorActuator::write_current_position_as_zero(uint32_t timeout_ms) {
+  CanPacket response{};
+  if (!request(0x64, response, timeout_ms)) {
+    logger_.warn("No 0x64 write current position as zero response received");
+    return false;
+  }
+  return true;
+}
+
+bool MotorActuator::set_position(int32_t position_centidegrees, uint16_t max_speed_dps) {
+  std::array<uint8_t, packet_length_> command{};
+  command[0] = 0xA4;
+  set_i16(command, 2, static_cast<int16_t>(max_speed_dps));
+  set_i32(command, 4, position_centidegrees);
+  return send_command(command);
+}
+
+bool MotorActuator::send_incremental_position(int32_t delta_centidegrees,
+                                               uint16_t max_speed_dps) {
+  std::array<uint8_t, packet_length_> command{};
+  command[0] = 0xA8;
+  set_i16(command, 2, static_cast<int16_t>(max_speed_dps));
+  set_i32(command, 4, delta_centidegrees);
+  return send_command(command);
+}
+
+bool MotorActuator::stop() {
+  std::array<uint8_t, packet_length_> command{};
+  command[0] = 0x81;
   return send_command(command);
 }
 
