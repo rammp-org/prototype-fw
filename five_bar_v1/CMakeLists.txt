@@ -8,7 +8,7 @@ set(EXTRA_COMPONENT_DIRS)
 
 set(
   COMPONENTS
-  "main esptool_py esp32-p4-eth"
+  "main esptool_py esp_driver_twai esp32-p4-eth"
   CACHE STRING
   "List of components to include"
   )
