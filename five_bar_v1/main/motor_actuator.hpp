@@ -15,8 +15,8 @@ public:
     std::array<uint8_t, 8> data{};
     int temperature_c{0};
     int16_t torque_raw{0};
-    int16_t velocity_raw{0};
-    int32_t angle_raw{0};
+    float velocity_rpm{0.0f};
+    float angle_degrees{0.0f};
   };
 
   MotorActuator(espp::Logger &logger, gpio_num_t rx_gpio, gpio_num_t tx_gpio);
@@ -29,27 +29,17 @@ public:
   bool is_connected(uint32_t timeout_ms = 100);
 
   bool read_status(Status &status, uint32_t timeout_ms = 100);
-  // Unsupported by the current motor firmware: command 0xB5 gets no response.
-  bool read_motor_model(std::array<char, 8> &model, uint32_t timeout_ms = 100);
-  // Unsupported by the current motor firmware: command 0xB2 gets no response.
-  bool read_software_version_date(uint32_t &version_date, uint32_t timeout_ms = 100);
-  bool read_multi_turn_position(int32_t &position_raw, uint32_t timeout_ms = 100);
-  // Unsupported by the current motor firmware: command 0x61 gets no response.
-  bool read_multi_turn_raw_position(int32_t &position_raw, uint32_t timeout_ms = 100);
-  // Unsupported by the current motor firmware: command 0x62 gets no response.
-  bool read_multi_turn_zero_offset(int32_t &offset_raw, uint32_t timeout_ms = 100);
   bool read_temperature(int &temperature_c, uint32_t timeout_ms = 100);
-  bool read_angle(int32_t &angle_raw, uint32_t timeout_ms = 100);
-  bool read_velocity(int16_t &velocity_raw, uint32_t timeout_ms = 100);
+  bool read_angle(float &angle_degrees, uint32_t timeout_ms = 100);
+  bool read_velocity(float &velocity_rpm, uint32_t timeout_ms = 100);
   bool read_torque(int16_t &torque_raw, uint32_t timeout_ms = 100);
 
   bool send_torque(int16_t torque_raw);
-  bool send_velocity(int32_t velocity_raw);
-  bool zero_position(uint32_t timeout_ms = 100);
-  bool write_multi_turn_zero_offset(int32_t offset_raw, uint32_t timeout_ms = 100);
-  bool write_current_position_as_zero(uint32_t timeout_ms = 100);
-  bool set_position(int32_t position_centidegrees, uint16_t max_speed_dps);
-  bool send_incremental_position(int32_t delta_centidegrees, uint16_t max_speed_dps);
+  bool send_velocity(float velocity_rpm);
+  // Reset the software-only position reference; this does not write motor ROM.
+  void zero_position();
+  bool set_position(float position_degrees, float max_speed_rpm);
+  bool send_incremental_position(float delta_degrees, float max_speed_rpm);
   bool stop();
   bool disable();
   bool hold();
@@ -70,6 +60,7 @@ private:
   static constexpr uint32_t motor_can_id_ = 0x141;
   static constexpr uint32_t motor_reply_can_id_ = 0x241;
   static constexpr size_t packet_length_ = 8;
+  static constexpr float gear_ratio_ = 36.0f;
 
   static bool on_receive(twai_node_handle_t handle, const twai_rx_done_event_data_t *event,
                          void *context);
@@ -85,4 +76,5 @@ private:
   gpio_num_t tx_gpio_;
   twai_node_handle_t node_{nullptr};
   QueueHandle_t receive_queue_{nullptr};
+  float virtual_position_degrees_{0.0f};
 };

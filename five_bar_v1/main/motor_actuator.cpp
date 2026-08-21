@@ -136,73 +136,8 @@ bool MotorActuator::read_status(Status &status, uint32_t timeout_ms) {
   status.data = response.data;
   status.temperature_c = response.data[1];
   status.torque_raw = read_i16(response.data, 2);
-  status.velocity_raw = read_i16(response.data, 4);
-  status.angle_raw = read_i16(response.data, 6);
-  return true;
-}
-
-bool MotorActuator::read_motor_model(std::array<char, 8> &model, uint32_t timeout_ms) {
-  CanPacket response{};
-  if (!request(0xB5, response, timeout_ms)) {
-    logger_.warn("No motor model response received");
-    return false;
-  }
-  for (size_t index = 0; index < 7; ++index) {
-    model[index] = static_cast<char>(response.data[index + 1]);
-  }
-  model[7] = '\0';
-  return true;
-}
-
-bool MotorActuator::read_software_version_date(uint32_t &version_date, uint32_t timeout_ms) {
-  CanPacket response{};
-  if (!request(0xB2, response, timeout_ms)) {
-    logger_.warn("No software version response received");
-    return false;
-  }
-  version_date = static_cast<uint32_t>(read_i32(response.data, 4));
-  return true;
-}
-
-// The current motor firmware returns zero for the 0x92/0x60 multi-turn reads;
-// use the working 0x9C status angle for position feedback instead.
-bool MotorActuator::read_multi_turn_position(int32_t &position_raw, uint32_t timeout_ms) {
-  CanPacket response{};
-  // 0x92 is the multi-turn absolute angle used by the original actuator code
-  // and provides the 0.01-degree units required by the 0xA4 command.
-  if (request(0x92, response, timeout_ms)) {
-    position_raw = read_i32(response.data, 4);
-    return true;
-  }
-
-  // Fall back to the encoder-pulse command for firmware that supports 0x60
-  // but not the multi-turn angle command.
-  if (request(0x60, response, timeout_ms)) {
-    position_raw = read_i32(response.data, 4);
-    return true;
-  }
-
-  logger_.warn("No multi-turn encoder or angle response received");
-  return false;
-}
-
-bool MotorActuator::read_multi_turn_raw_position(int32_t &position_raw, uint32_t timeout_ms) {
-  CanPacket response{};
-  if (!request(0x61, response, timeout_ms)) {
-    logger_.warn("No 0x61 multi-turn raw position response received");
-    return false;
-  }
-  position_raw = read_i32(response.data, 4);
-  return true;
-}
-
-bool MotorActuator::read_multi_turn_zero_offset(int32_t &offset_raw, uint32_t timeout_ms) {
-  CanPacket response{};
-  if (!request(0x62, response, timeout_ms)) {
-    logger_.warn("No 0x62 multi-turn zero offset response received");
-    return false;
-  }
-  offset_raw = read_i32(response.data, 4);
+  status.velocity_rpm = static_cast<float>(read_i16(response.data, 4)) / (gear_ratio_ * 6.0f);
+  status.angle_degrees = static_cast<float>(read_i16(response.data, 6)) / gear_ratio_;
   return true;
 }
 
@@ -218,17 +153,17 @@ bool MotorActuator::read_temperature(int &temperature_c, uint32_t timeout_ms) {
   return true;
 }
 
-bool MotorActuator::read_angle(int32_t &angle_raw, uint32_t timeout_ms) {
+bool MotorActuator::read_angle(float &angle_degrees, uint32_t timeout_ms) {
   Status status{};
   if (!read_status(status, timeout_ms)) return false;
-  angle_raw = status.angle_raw;
+  angle_degrees = status.angle_degrees;
   return true;
 }
 
-bool MotorActuator::read_velocity(int16_t &velocity_raw, uint32_t timeout_ms) {
+bool MotorActuator::read_velocity(float &velocity_rpm, uint32_t timeout_ms) {
   Status status{};
   if (!read_status(status, timeout_ms)) return false;
-  velocity_raw = status.velocity_raw;
+  velocity_rpm = status.velocity_rpm;
   return true;
 }
 
@@ -246,72 +181,48 @@ bool MotorActuator::send_torque(int16_t torque_raw) {
   return send_command(command);
 }
 
-bool MotorActuator::send_velocity(int32_t velocity_raw) {
+bool MotorActuator::send_velocity(float velocity_rpm) {
+  const float motor_velocity_raw = velocity_rpm * gear_ratio_ * 6.0f * 100.0f;
+  if (motor_velocity_raw < static_cast<float>(INT32_MIN) ||
+      motor_velocity_raw > static_cast<float>(INT32_MAX)) {
+    logger_.error("Requested velocity is out of range");
+    return false;
+  }
   std::array<uint8_t, packet_length_> command{};
   command[0] = 0xA2;
-  set_i32(command, 4, velocity_raw);
+  set_i32(command, 4, static_cast<int32_t>(std::lround(motor_velocity_raw)));
   return send_command(command);
 }
 
-bool MotorActuator::zero_position(uint32_t timeout_ms) {
-  CanPacket response{};
-  if (!request(0x64, response, timeout_ms)) {
-    logger_.warn("Motor did not acknowledge position zero command");
+void MotorActuator::zero_position() {
+  virtual_position_degrees_ = 0.0f;
+  logger_.info("Virtual motor position set to zero");
+}
+
+bool MotorActuator::set_position(float position_degrees, float max_speed_rpm) {
+  const float delta_degrees = position_degrees - virtual_position_degrees_;
+  if (!send_incremental_position(delta_degrees, max_speed_rpm)) {
     return false;
   }
-  logger_.info("Motor current position saved as zero");
+  virtual_position_degrees_ = position_degrees;
   return true;
 }
 
-bool MotorActuator::write_multi_turn_zero_offset(int32_t offset_raw, uint32_t timeout_ms) {
-  std::array<uint8_t, packet_length_> command{};
-  command[0] = 0x63;
-  set_i32(command, 4, offset_raw);
-  CanPacket response{};
-  while (xQueueReceive(receive_queue_, &response, 0) == pdTRUE) {
-  }
-  if (!send_command(command)) {
+bool MotorActuator::send_incremental_position(float delta_degrees, float max_speed_rpm) {
+  const float motor_delta_centidegrees = delta_degrees * gear_ratio_ * 100.0f;
+  const float motor_speed_dps = max_speed_rpm * gear_ratio_ * 6.0f;
+  if (motor_delta_centidegrees < static_cast<float>(INT32_MIN) ||
+      motor_delta_centidegrees > static_cast<float>(INT32_MAX) || motor_speed_dps < 0.0f ||
+      motor_speed_dps > static_cast<float>(UINT16_MAX)) {
+    logger_.error("Requested incremental position or speed is out of range");
     return false;
   }
-  const TickType_t start_tick = xTaskGetTickCount();
-  const TickType_t timeout_ticks = pdMS_TO_TICKS(timeout_ms);
-  while (xTaskGetTickCount() - start_tick < timeout_ticks) {
-    const TickType_t elapsed = xTaskGetTickCount() - start_tick;
-    if (xQueueReceive(receive_queue_, &response, timeout_ticks - elapsed) != pdTRUE) {
-      break;
-    }
-    if ((response.id == motor_reply_can_id_ || response.id == motor_can_id_) &&
-        !response.extended && response.length == packet_length_ && response.data[0] == 0x63) {
-      return true;
-    }
-  }
-  logger_.warn("No 0x63 write zero offset response received");
-  return false;
-}
-
-bool MotorActuator::write_current_position_as_zero(uint32_t timeout_ms) {
-  CanPacket response{};
-  if (!request(0x64, response, timeout_ms)) {
-    logger_.warn("No 0x64 write current position as zero response received");
-    return false;
-  }
-  return true;
-}
-
-bool MotorActuator::set_position(int32_t position_centidegrees, uint16_t max_speed_dps) {
-  std::array<uint8_t, packet_length_> command{};
-  command[0] = 0xA4;
-  set_i16(command, 2, static_cast<int16_t>(max_speed_dps));
-  set_i32(command, 4, position_centidegrees);
-  return send_command(command);
-}
-
-bool MotorActuator::send_incremental_position(int32_t delta_centidegrees,
-                                               uint16_t max_speed_dps) {
   std::array<uint8_t, packet_length_> command{};
   command[0] = 0xA8;
-  set_i16(command, 2, static_cast<int16_t>(max_speed_dps));
-  set_i32(command, 4, delta_centidegrees);
+  const uint16_t speed_limit_dps = static_cast<uint16_t>(std::lround(motor_speed_dps));
+  command[2] = static_cast<uint8_t>(speed_limit_dps & 0xFF);
+  command[3] = static_cast<uint8_t>((speed_limit_dps >> 8) & 0xFF);
+  set_i32(command, 4, static_cast<int32_t>(std::lround(motor_delta_centidegrees)));
   return send_command(command);
 }
 
@@ -322,7 +233,7 @@ bool MotorActuator::stop() {
 }
 
 bool MotorActuator::disable() { return send_torque(0); }
-bool MotorActuator::hold() { return send_velocity(0); }
+bool MotorActuator::hold() { return send_velocity(0.0f); }
 
 bool MotorActuator::release_brake() {
   std::array<uint8_t, packet_length_> command{};

@@ -20,48 +20,29 @@ extern "C" void app_main(void) {
 
   MotorActuator actuator(logger, GPIO_NUM_16, GPIO_NUM_17);
   if (actuator.start()) {
-    std::array<char, 8> motor_model{};
-    if (actuator.read_motor_model(motor_model)) {
-      logger.info("Motor model: {}", motor_model.data());
-    }
-    uint32_t version_date = 0;
-    if (actuator.read_software_version_date(version_date)) {
-      logger.info("Motor software version date: {}", version_date);
-    }
-    int32_t raw_position = 0;
-    if (actuator.read_multi_turn_raw_position(raw_position)) {
-      logger.info("0x61 raw multi-turn position: {}", raw_position);
-    }
-    int32_t zero_offset = 0;
-    if (actuator.read_multi_turn_zero_offset(zero_offset)) {
-      logger.info("0x62 multi-turn zero offset: {}", zero_offset);
-    }
-    logger.info("0x63 and 0x64 write commands are available but not run automatically");
     MotorActuator::Status status{};
     if (actuator.read_status(status)) {
-      logger.info("Motor status: temperature={} C torque_raw={} velocity_raw={} angle_raw={}",
-                  status.temperature_c, status.torque_raw, status.velocity_raw,
-                  status.angle_raw);
-        constexpr int32_t kIncrementalPositionCentidegrees = 36000;
-        constexpr uint16_t kPositionSpeedDps = 1000;
+      logger.info("Motor status: temperature={} C torque_raw={} velocity={} RPM angle={} deg",
+                  status.temperature_c, status.torque_raw, status.velocity_rpm,
+                  status.angle_degrees);
+        constexpr float kTargetPositionDegrees = 360.0f;
+        constexpr float kPositionSpeedRpm = 1000.0f / (36.0f * 6.0f);
         constexpr int kTestDurationSeconds = 5;
       logger.warn("Releasing motor brake");
+        actuator.zero_position();
         if (actuator.release_brake() &&
-          actuator.send_incremental_position(kIncrementalPositionCentidegrees,
-                                              kPositionSpeedDps)) {
-        logger.warn("Moving motor incrementally by {} degrees at {} dps",
-                    kIncrementalPositionCentidegrees / 100.0f, kPositionSpeedDps);
+          actuator.set_position(kTargetPositionDegrees, kPositionSpeedRpm)) {
+        logger.warn("Moving output shaft to virtual position {} degrees at {} RPM",
+                    kTargetPositionDegrees, kPositionSpeedRpm);
         for (int second = 1; second <= kTestDurationSeconds; ++second) {
           std::this_thread::sleep_for(1s);
           MotorActuator::Status progress_status{};
           if (actuator.read_status(progress_status)) {
-            logger.info("Motor status after {}s: angle={} deg velocity={} dps", second,
-                        progress_status.angle_raw, progress_status.velocity_raw);
+            logger.info("Motor status after {}s: output angle={} deg velocity={} RPM", second,
+                        progress_status.angle_degrees, progress_status.velocity_rpm);
           } else {
             logger.warn("Motor status read failed after {}s", second);
           }
-          actuator.send_incremental_position(kIncrementalPositionCentidegrees,
-                                              kPositionSpeedDps);
         }
         if (actuator.stop()) {
           logger.info("Motor stopped after {} seconds", kTestDurationSeconds);
@@ -71,7 +52,7 @@ extern "C" void app_main(void) {
 
         MotorActuator::Status final_status{};
         if (actuator.read_status(final_status)) {
-          logger.info("Motor position after incremental move: {} deg", final_status.angle_raw);
+          logger.info("Output position after incremental move: {} deg", final_status.angle_degrees);
         } else {
           logger.warn("Failed to read motor position after the move");
         }
