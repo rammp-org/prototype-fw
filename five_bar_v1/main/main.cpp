@@ -18,8 +18,21 @@ extern "C" void app_main(void) {
     logger.info("Ethernet initialized");
   }
 
-  MotorActuator actuator(logger, GPIO_NUM_16, GPIO_NUM_17);
-  if (actuator.start()) {
+  MotorCanBus can_bus(GPIO_NUM_16, GPIO_NUM_17);
+  if (can_bus.start()) {
+    MotorActuator::CommunicationFunction communicate =
+        [&can_bus](const MotorPacket &command, MotorPacket &response, uint32_t timeout_ms) {
+          if (timeout_ms == 0) return can_bus.send(command);
+          return can_bus.request(command, response, timeout_ms);
+        };
+    MotorActuator actuators[] = {
+        MotorActuator(communicate, 1),
+        MotorActuator(communicate, 2),
+        MotorActuator(communicate, 3),
+        MotorActuator(communicate, 4),
+    };
+    logger.info("Four motor actuators configured with IDs 1-4");
+    MotorActuator &actuator = actuators[0];
     MotorActuator::Status status{};
     if (actuator.read_status(status)) {
       logger.info("Motor status: temperature={} C torque_raw={} velocity={} RPM angle={} deg",

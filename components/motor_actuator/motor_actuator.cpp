@@ -5,12 +5,14 @@
 
 namespace {
 constexpr gpio_num_t kUnusedGpio = GPIO_NUM_NC;
+constexpr size_t kPacketLength = 8;
 }
 
-MotorActuator::MotorActuator(espp::Logger &logger, gpio_num_t rx_gpio, gpio_num_t tx_gpio)
-    : logger_(logger), rx_gpio_(rx_gpio), tx_gpio_(tx_gpio) {}
+MotorCanBus::MotorCanBus(gpio_num_t rx_gpio, gpio_num_t tx_gpio)
+    : espp::BaseComponent("MotorCanBus", espp::Logger::Verbosity::INFO), rx_gpio_(rx_gpio),
+      tx_gpio_(tx_gpio) {}
 
-MotorActuator::~MotorActuator() {
+MotorCanBus::~MotorCanBus() {
   if (node_ != nullptr) {
     twai_node_disable(node_);
     twai_node_delete(node_);
@@ -20,10 +22,10 @@ MotorActuator::~MotorActuator() {
   }
 }
 
-bool MotorActuator::on_receive(twai_node_handle_t handle, const twai_rx_done_event_data_t *,
-                               void *context) {
-  auto *actuator = static_cast<MotorActuator *>(context);
-  CanPacket packet{};
+bool MotorCanBus::on_receive(twai_node_handle_t handle, const twai_rx_done_event_data_t *,
+                             void *context) {
+  auto *bus = static_cast<MotorCanBus *>(context);
+  MotorPacket packet{};
   twai_frame_t frame{};
   frame.buffer = packet.data.data();
   frame.buffer_len = packet.data.size();
@@ -32,19 +34,18 @@ bool MotorActuator::on_receive(twai_node_handle_t handle, const twai_rx_done_eve
   }
   packet.id = frame.header.id;
   packet.length = twaifd_dlc2len(frame.header.dlc);
-  packet.extended = frame.header.ide;
   BaseType_t higher_priority_task_woken = pdFALSE;
-  xQueueSendFromISR(actuator->receive_queue_, &packet, &higher_priority_task_woken);
+  xQueueSendFromISR(bus->receive_queue_, &packet, &higher_priority_task_woken);
   return higher_priority_task_woken == pdTRUE;
 }
 
-bool MotorActuator::start(uint32_t bitrate) {
+bool MotorCanBus::start(uint32_t bitrate) {
   if (node_ != nullptr) {
     return true;
   }
-  receive_queue_ = xQueueCreate(8, sizeof(CanPacket));
+  receive_queue_ = xQueueCreate(32, sizeof(MotorPacket));
   if (receive_queue_ == nullptr) {
-    logger_.error("Failed to create motor CAN receive queue");
+    logger_.error("Failed to create CAN receive queue");
     return false;
   }
 
@@ -75,21 +76,25 @@ bool MotorActuator::start(uint32_t bitrate) {
     return false;
   }
 
-  logger_.info("Motor CAN started: RX GPIO {}, TX GPIO {}, {} bit/s", static_cast<int>(rx_gpio_),
+  logger_.info("CAN bus started: RX GPIO {}, TX GPIO {}, {} bit/s", static_cast<int>(rx_gpio_),
                static_cast<int>(tx_gpio_), bitrate);
   return true;
 }
 
-bool MotorActuator::send_command(const std::array<uint8_t, packet_length_> &command) {
+bool MotorCanBus::send(const MotorPacket &command) {
   if (node_ == nullptr) {
     logger_.error("Motor CAN is not started");
     return false;
   }
+  if (command.id < 1 || command.id > 32 || command.length > kPacketLength) {
+    logger_.error("Invalid CAN motor packet: id={}, length={}", command.id, command.length);
+    return false;
+  }
   twai_frame_t frame{};
-  frame.header.id = motor_can_id_;
-  frame.header.dlc = packet_length_;
-  frame.buffer = const_cast<uint8_t *>(command.data());
-  frame.buffer_len = command.size();
+  frame.header.id = 0x140u + command.id;
+  frame.header.dlc = command.length;
+  frame.buffer = const_cast<uint8_t *>(command.data.data());
+  frame.buffer_len = command.length;
   esp_err_t result = twai_node_transmit(node_, &frame, 3);
   if (result == ESP_OK) {
     result = twai_node_transmit_wait_all_done(node_, 10);
@@ -101,12 +106,11 @@ bool MotorActuator::send_command(const std::array<uint8_t, packet_length_> &comm
   return true;
 }
 
-bool MotorActuator::request(uint8_t command_code, CanPacket &response, uint32_t timeout_ms) {
+bool MotorCanBus::request(const MotorPacket &command, MotorPacket &response,
+                          uint32_t timeout_ms) {
   while (xQueueReceive(receive_queue_, &response, 0) == pdTRUE) {
   }
-  std::array<uint8_t, packet_length_> command{};
-  command[0] = command_code;
-  if (!send_command(command)) {
+  if (!send(command)) {
     return false;
   }
 
@@ -117,19 +121,50 @@ bool MotorActuator::request(uint8_t command_code, CanPacket &response, uint32_t 
     if (xQueueReceive(receive_queue_, &response, timeout_ticks - elapsed) != pdTRUE) {
       break;
     }
-    logger_.info("CAN RX id=0x{:x} cmd=0x{:02x} length={} extended={}", response.id,
-                 response.data[0], response.length, response.extended);
-    const bool expected_reply_id = response.id == motor_reply_can_id_ || response.id == motor_can_id_;
-    if (expected_reply_id && !response.extended && response.length == packet_length_ &&
-        response.data[0] == command_code) {
+    logger_.info("CAN RX id=0x{:x} cmd=0x{:02x} length={}", response.id, response.data[0],
+           response.length);
+    const bool expected_reply_id = response.id == 0x240u + command.id ||
+                                   response.id == 0x140u + command.id;
+    if (expected_reply_id && response.length == kPacketLength &&
+      response.data[0] == command.data[0]) {
+      response.id = command.id;
       return true;
     }
   }
   return false;
 }
 
+MotorActuator::MotorActuator(CommunicationFunction communication, uint8_t motor_id)
+    : espp::BaseComponent("MotorActuator", espp::Logger::Verbosity::INFO),
+      communication_(std::move(communication)), motor_id_(motor_id) {
+  set_log_tag("MotorActuator-" + std::to_string(motor_id_));
+}
+
+bool MotorActuator::send_command(const std::array<uint8_t, packet_length_> &command) {
+  MotorPacket packet{};
+  packet.id = motor_id_;
+  packet.length = packet_length_;
+  packet.data = command;
+  MotorPacket response{};
+  return communication_ && communication_(packet, response, 0);
+}
+
+bool MotorActuator::request(uint8_t command_code, MotorPacket &response,
+                            uint32_t timeout_ms) {
+  std::array<uint8_t, packet_length_> command{};
+  command[0] = command_code;
+  MotorPacket packet{};
+  packet.id = motor_id_;
+  packet.length = packet_length_;
+  packet.data = command;
+  if (!communication_ || !communication_(packet, response, timeout_ms)) {
+    return false;
+  }
+  return true;
+}
+
 bool MotorActuator::read_status(Status &status, uint32_t timeout_ms) {
-  CanPacket response{};
+  MotorPacket response{};
   if (!request(0x9C, response, timeout_ms)) {
     logger_.warn("No motor status response received");
     return false;
