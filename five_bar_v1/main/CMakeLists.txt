@@ -1,3 +1,3 @@
-idf_component_register(SRCS "main.cpp" "motor_actuator.cpp"
+idf_component_register(SRCS "main.cpp"
                        INCLUDE_DIRS "."
-                       REQUIRES esp_driver_twai)
+                       REQUIRES motor_actuator)

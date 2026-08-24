@@ -117,9 +117,10 @@ bool MotorActuator::request(uint8_t command_code, CanPacket &response, uint32_t 
     if (xQueueReceive(receive_queue_, &response, timeout_ticks - elapsed) != pdTRUE) {
       break;
     }
+    logger_.info("CAN RX id=0x{:x} cmd=0x{:02x} length={} extended={}", response.id,
+                 response.data[0], response.length, response.extended);
     const bool expected_reply_id = response.id == motor_reply_can_id_ || response.id == motor_can_id_;
-    if (expected_reply_id && !response.extended &&
-      response.length == packet_length_ &&
+    if (expected_reply_id && !response.extended && response.length == packet_length_ &&
         response.data[0] == command_code) {
       return true;
     }
@@ -217,6 +218,8 @@ bool MotorActuator::send_incremental_position(float delta_degrees, float max_spe
     logger_.error("Requested incremental position or speed is out of range");
     return false;
   }
+  logger_.info("Sending incremental position command: delta={} deg, speed={} RPM",
+               delta_degrees, max_speed_rpm);
   std::array<uint8_t, packet_length_> command{};
   command[0] = 0xA8;
   const uint16_t speed_limit_dps = static_cast<uint16_t>(std::lround(motor_speed_dps));

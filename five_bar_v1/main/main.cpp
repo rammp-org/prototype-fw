@@ -25,9 +25,9 @@ extern "C" void app_main(void) {
       logger.info("Motor status: temperature={} C torque_raw={} velocity={} RPM angle={} deg",
                   status.temperature_c, status.torque_raw, status.velocity_rpm,
                   status.angle_degrees);
-        constexpr float kTargetPositionDegrees = 360.0f;
+        constexpr float kTargetPositionDegrees = -180.0f;
         constexpr float kPositionSpeedRpm = 1000.0f / (36.0f * 6.0f);
-        constexpr int kTestDurationSeconds = 5;
+        constexpr int kTestDurationSeconds = 25;
       logger.warn("Releasing motor brake");
         actuator.zero_position();
         if (actuator.release_brake() &&
