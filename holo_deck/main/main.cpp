@@ -1,27 +1,63 @@
 #include <array>
 #include <chrono>
-#include <cmath>
 #include <memory>
 #include <thread>
 
 #include "cli.hpp"
-#include "esp32-p4-eth.hpp"
-#include "holo_deck_platform.hpp"
 #include "logger.hpp"
+#include "m5stack-tab5.hpp"
+
+#include "gui.hpp"
+#include "holo_deck_controller.hpp"
+#include "holo_deck_platform.hpp"
+#include "hw_config.hpp"
+#include "joystick_input.hpp"
 #include "motor_actuator.hpp"
 
 using namespace std::chrono_literals;
 
-extern "C" void app_main(void) {
-  auto &board = espp::Esp32P4Eth::get();
-  espp::Logger logger({.tag = "holo_deck", .level = espp::Logger::Verbosity::INFO});
-
-  logger.info("Bootup");
-  if (!board.initialize_ethernet()) {
-    logger.error("Failed to initialize Ethernet");
+namespace {
+const char *source_name(HoloDeckController::Source source) {
+  switch (source) {
+  case HoloDeckController::Source::GUI:
+    return "GUI";
+  case HoloDeckController::Source::JOYSTICK:
+    return "JOYSTICK";
+  default:
+    return "STOPPED";
   }
+}
+} // namespace
 
-  MotorCanBus can_bus(GPIO_NUM_16, GPIO_NUM_17);
+extern "C" void app_main(void) {
+  espp::Logger logger({.tag = "holo_deck", .level = espp::Logger::Verbosity::INFO});
+  logger.info("Bootup");
+
+  // Board (M5Stack Tab5): IO expanders, LCD, LVGL display, touch
+  auto &tab5 = espp::M5StackTab5::get();
+  if (!tab5.initialize_io_expanders()) {
+    logger.error("Failed to initialize IO expanders");
+    return;
+  }
+  if (!tab5.initialize_lcd()) {
+    logger.error("Failed to initialize LCD");
+    return;
+  }
+  // full-frame LVGL draw buffer (in PSRAM) so full-screen redraws flush in a
+  // single pass
+  const size_t pixel_buffer_size = tab5.display_width() * tab5.display_height();
+  if (!tab5.initialize_display(pixel_buffer_size)) {
+    logger.error("Failed to initialize display");
+    return;
+  }
+  if (!tab5.initialize_touch()) {
+    logger.error("Failed to initialize touch");
+    return;
+  }
+  tab5.brightness(75.0f);
+
+  // Motors (four Reflex RMD-X6-S2 on the CAN bus, see hw_config.hpp)
+  MotorCanBus can_bus(hw_config::kCanRxGpio, hw_config::kCanTxGpio);
   if (!can_bus.start()) {
     logger.error("Failed to start motor CAN bus");
     return;
@@ -29,7 +65,8 @@ extern "C" void app_main(void) {
 
   MotorActuator::CommunicationFunction communicate =
       [&can_bus](const MotorPacket &command, MotorPacket &response, uint32_t timeout_ms) {
-        if (timeout_ms == 0) return can_bus.send(command);
+        if (timeout_ms == 0)
+          return can_bus.send(command);
         return can_bus.request(command, response, timeout_ms);
       };
 
@@ -57,13 +94,61 @@ extern "C" void app_main(void) {
   };
   HoloDeckPlatform platform(kPlatformConfiguration);
 
+  // Controller: owns the command state and the 50 Hz control loop. It boots
+  // e-stopped; enable via the GUI, the joystick button, or the CLI.
+  HoloDeckController controller({
+      .platform = platform,
+      .motors = motors,
+      .motor_ids_by_wheel = kMotorIdsByWheel,
+      .max_wheel_rpm = hw_config::kMaxWheelRpm,
+      .max_speed_mps = hw_config::kDefaultMaxSpeedMps,
+      .max_rotation_rpm = hw_config::kDefaultMaxRotationRpm,
+      .control_period = hw_config::kControlPeriod,
+      .status_poll_period = hw_config::kStatusPollPeriod,
+      .joystick_release_timeout = hw_config::kJoystickReleaseTimeout,
+      .status_stale_timeout = hw_config::kMotorStatusStaleTimeout,
+      .log_level = espp::Logger::Verbosity::INFO,
+  });
+
+  // Physical joystick: axes feed the controller's arbitration; the button
+  // toggles the shared enable / e-stop state.
+  JoystickInput joystick_input({
+      .callback = [&controller](float forward, float left,
+                                float ccw) { controller.set_joystick_input(forward, left, ccw); },
+      .button_callback =
+          [&controller, &logger]() {
+            const bool enable = !controller.is_enabled();
+            logger.info("Joystick button: {}", enable ? "ENABLE" : "E-STOP");
+            controller.set_enabled(enable);
+          },
+  });
+
+  // GUI: touch controls write to the controller; a 10 Hz refresh below reads
+  // the controller state back into the widgets.
+  Gui gui({});
+  // translation and rotation are commanded independently: the drag-pad
+  // leaves the rotation setpoint alone and vice versa
+  gui.set_translation_callback([&controller](float forward, float left) {
+    controller.set_gui_translation_normalized(forward, left);
+  });
+  gui.set_rotation_callback(
+      [&controller](float ccw) { controller.set_gui_rotation_normalized(ccw); });
+  gui.set_enable_callback([&controller](bool enable) { controller.set_enabled(enable); });
+  gui.set_max_speed_callback([&controller](float mps) { controller.set_max_speed(mps); });
+  gui.set_max_rotation_callback([&controller](float rpm) { controller.set_max_rotation(rpm); });
+
+  // CLI
   auto root_menu = std::make_unique<cli::Menu>("holo_deck");
   root_menu->Insert(
       "set_speed",
-      [&motors](std::ostream &out, int motor_id, float rpm) {
+      [&motors, &controller](std::ostream &out, int motor_id, float rpm) {
         if (motor_id < 1 || motor_id > static_cast<int>(motors.size())) {
           out << "Motor ID must be between 1 and " << motors.size() << ".\n";
           return;
+        }
+        if (controller.is_enabled()) {
+          out << "Controller is enabled; the control loop will override this within one "
+                 "cycle. Use `estop` first for direct motor control.\n";
         }
         if (motors[motor_id - 1].send_velocity(rpm)) {
           out << "Motor " << motor_id << " speed set to " << rpm << " RPM.\n";
@@ -71,59 +156,81 @@ extern "C" void app_main(void) {
           out << "Failed to set motor " << motor_id << " speed.\n";
         }
       },
-      "Set a motor speed: set_speed <motor_id> <rpm>");
+      "Set a single motor speed directly (debug; e-stop first): set_speed <motor_id> <rpm>");
+  auto set_velocity = [&controller](std::ostream &out, float x_mps, float y_mps, float w_rpm) {
+    controller.set_gui_velocity(x_mps, y_mps, w_rpm);
+    const auto state = controller.state();
+    out << "Setpoint: vx=" << state.gui_vx_mps << " m/s vy=" << state.gui_vy_mps
+        << " m/s w=" << state.gui_w_rpm << " RPM (clamped to limits).\n";
+    if (!state.enabled) {
+      out << "Controller is E-STOPPED; `enable` to apply.\n";
+    } else if (state.source == HoloDeckController::Source::JOYSTICK) {
+      out << "Physical joystick is active; the setpoint applies when it is released.\n";
+    }
+  };
   root_menu->Insert(
-      "platform_speed",
-      [&motors, &platform, &kMotorIdsByWheel](std::ostream &out, float x_mps, float y_mps,
-                           float w_rpm) {
-        const auto wheel_speeds = platform.calculate_wheel_speeds(x_mps, y_mps, w_rpm);
-        const std::array<float, 4> motor_rpms = {
-            wheel_speeds.top_left_rpm,
-            wheel_speeds.top_right_rpm,
-            wheel_speeds.bottom_left_rpm,
-            wheel_speeds.bottom_right_rpm,
-        };
-        float maximum_rpm = 0.0f;
-        for (float rpm : motor_rpms) {
-          maximum_rpm = std::max(maximum_rpm, std::abs(rpm));
-        }
-        const float speed_scale = maximum_rpm > 30.0f ? 30.0f / maximum_rpm : 1.0f;
-        bool success = true;
-        for (size_t wheel_index = 0; wheel_index < motor_rpms.size(); ++wheel_index) {
-          const size_t motor_index = kMotorIdsByWheel[wheel_index] - 1;
-          success = motors[motor_index].send_velocity(motor_rpms[wheel_index] * speed_scale) &&
-                    success;
-        }
-        out << "Motor RPM: top_left=" << motor_rpms[0] * speed_scale
-            << " top_right=" << motor_rpms[1] * speed_scale
-            << " bottom_left=" << motor_rpms[2] * speed_scale
-            << " bottom_right=" << motor_rpms[3] * speed_scale << "\n";
-        if (speed_scale < 1.0f) {
-          out << "Motor speeds scaled to the 30 RPM limit.\n";
-        }
-        if (!success) {
-          out << "Failed to apply one or more motor speeds.\n";
+      "velocity", set_velocity,
+      "Set the platform velocity setpoint (GUI/CLI source): velocity <x_mps> <y_mps> <w_rpm>");
+  root_menu->Insert("platform_speed", set_velocity,
+                    "Alias of `velocity` (kept for compatibility): platform_speed <x_mps> "
+                    "<y_mps> <w_rpm>");
+  root_menu->Insert(
+      "enable",
+      [&controller](std::ostream &out) {
+        controller.set_enabled(true);
+        out << "Enabled (setpoint zeroed).\n";
+      },
+      "Enable the platform (clears e-stop; setpoint starts at zero)");
+  root_menu->Insert(
+      "estop",
+      [&controller](std::ostream &out) {
+        controller.set_enabled(false);
+        out << "E-STOP: motors zeroed and disabled.\n";
+      },
+      "E-stop: zero all motors and disable the control loop");
+  root_menu->Insert(
+      "limits",
+      [&controller](std::ostream &out, float max_speed_mps, float max_rotation_rpm) {
+        controller.set_max_speed(max_speed_mps);
+        controller.set_max_rotation(max_rotation_rpm);
+        const auto state = controller.state();
+        out << "Limits: " << state.max_speed_mps << " m/s, " << state.max_rotation_rpm << " RPM.\n";
+      },
+      "Set the max translation speed / rotation rate: limits <max_speed_mps> <max_rot_rpm>");
+  root_menu->Insert(
+      "status",
+      [&controller](std::ostream &out) {
+        const auto state = controller.state();
+        out << "enabled: " << (state.enabled ? "true" : "false")
+            << "\nsource:  " << source_name(state.source) << "\ncommand: vx=" << state.vx_mps
+            << " m/s vy=" << state.vy_mps << " m/s w=" << state.w_rpm
+            << " RPM\nsetpoint (GUI/CLI): vx=" << state.gui_vx_mps << " m/s vy=" << state.gui_vy_mps
+            << " m/s w=" << state.gui_w_rpm << " RPM\nlimits:  " << state.max_speed_mps << " m/s, "
+            << state.max_rotation_rpm << " RPM, wheel " << state.max_wheel_rpm << " RPM\n";
+        for (const auto &motor : state.motors) {
+          out << "motor " << static_cast<int>(motor.id) << ": cmd=" << motor.commanded_rpm
+              << " RPM";
+          if (motor.valid) {
+            out << " meas=" << motor.velocity_rpm << " RPM temp=" << motor.temperature_c << " C "
+                << (motor.stale ? "[STALE]" : "[OK]");
+          } else {
+            out << " [NO DATA]";
+          }
+          out << "\n";
         }
       },
-      "Set platform motion: platform_speed <x_mps> <y_mps> <w_rpm>");
+      "Print the controller state");
   cli::Cli cli(std::move(root_menu));
   std::thread([&cli] {
     espp::Cli input(cli);
     input.Start();
   }).detach();
 
-  for (auto &motor : motors) {
-    MotorActuator::Status status{};
-    if (motor.read_status(status)) {
-      logger.info("Motor ID {} status: temperature={} C torque_raw={} velocity={} RPM angle={} deg",
-                  motor.get_motor_id(), status.temperature_c, status.torque_raw,
-                  status.velocity_rpm, status.angle_degrees);
-    } else {
-      logger.warn("Motor ID {} status read failed", motor.get_motor_id());
-    }
-  }
+  logger.info("Ready; platform is E-STOPPED until enabled (GUI, joystick button, or CLI)");
 
+  // refresh the GUI from the controller state at 10 Hz
   while (true) {
-    std::this_thread::sleep_for(1s);
+    gui.update_state(controller.state());
+    std::this_thread::sleep_for(100ms);
   }
 }
