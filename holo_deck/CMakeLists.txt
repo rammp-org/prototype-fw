@@ -10,11 +10,11 @@ set(EXTRA_COMPONENT_DIRS
 
 set(
   COMPONENTS
-  "main esptool_py esp_driver_twai esp32-p4-eth"
+  "main esptool_py esp_driver_twai esp32-p4-eth cli holo_deck_platform"
   CACHE STRING
   "List of components to include"
   )
 
-project(pear_platform)
+project(holo_deck)
 
 set(CMAKE_CXX_STANDARD 20)

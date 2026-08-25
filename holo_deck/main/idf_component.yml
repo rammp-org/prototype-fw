@@ -2,4 +2,5 @@
 dependencies:
   idf:
     version: '>=5.3'
+  espp/cli: '>=1.0'
   espp/esp32-p4-eth: '>=1.0'

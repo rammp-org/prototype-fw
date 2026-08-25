@@ -1,6 +1,6 @@
-# pear_platform
+# holo_deck
 
-ESP-IDF firmware project for the Pear Platform prototype. It configures four
+ESP-IDF firmware project for the Holo Deck prototype. It configures four
 Reflex RMD-X6-S2 motor actuators with IDs 1 through 4.
 
 ## Development
