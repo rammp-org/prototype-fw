@@ -91,7 +91,7 @@ bool MotorCanBus::send(const MotorPacket &command) {
     return false;
   }
   twai_frame_t frame{};
-  frame.header.id = 0x140u + command.id;
+  frame.header.id = command.data[0] == 0x79 ? 0x300u : 0x140u + command.id;
   frame.header.dlc = command.length;
   frame.buffer = const_cast<uint8_t *>(command.data.data());
   frame.buffer_len = command.length;
@@ -123,8 +123,13 @@ bool MotorCanBus::request(const MotorPacket &command, MotorPacket &response,
     }
     logger_.info("CAN RX id=0x{:x} cmd=0x{:02x} length={}", response.id, response.data[0],
            response.length);
-    const bool expected_reply_id = response.id == 0x240u + command.id ||
-                                   response.id == 0x140u + command.id;
+    const uint32_t expected_reply_id_value = command.data[0] == 0x79
+                           ? 0x300u
+                           : 0x240u + command.id;
+    const bool expected_reply_id = response.id == expected_reply_id_value ||
+                     response.id == (command.data[0] == 0x79
+                               ? 0x300u
+                               : 0x140u + command.id);
     if (expected_reply_id && response.length == kPacketLength &&
       response.data[0] == command.data[0]) {
       response.id = command.id;
@@ -157,7 +162,12 @@ bool MotorActuator::request(uint8_t command_code, MotorPacket &response,
   packet.id = motor_id_;
   packet.length = packet_length_;
   packet.data = command;
-  if (!communication_ || !communication_(packet, response, timeout_ms)) {
+  return request(packet, response, timeout_ms);
+}
+
+bool MotorActuator::request(const MotorPacket &command, MotorPacket &response,
+                            uint32_t timeout_ms) {
+  if (!communication_ || !communication_(command, response, timeout_ms)) {
     return false;
   }
   return true;
@@ -174,6 +184,49 @@ bool MotorActuator::read_status(Status &status, uint32_t timeout_ms) {
   status.torque_raw = read_i16(response.data, 2);
   status.velocity_rpm = static_cast<float>(read_i16(response.data, 4)) / (gear_ratio_ * 6.0f);
   status.angle_degrees = static_cast<float>(read_i16(response.data, 6)) / gear_ratio_;
+  return true;
+}
+
+bool MotorActuator::read_motor_id(uint8_t &motor_id, uint32_t timeout_ms) {
+  MotorPacket command{};
+  command.id = motor_id_;
+  command.length = packet_length_;
+  command.data[0] = 0x79;
+  command.data[2] = 1;
+  MotorPacket response{};
+  if (!request(command, response, timeout_ms)) {
+    logger_.warn("No motor ID response received");
+    return false;
+  }
+  const uint16_t can_id = static_cast<uint16_t>(response.data[6]) |
+                          (static_cast<uint16_t>(response.data[7]) << 8);
+  if (can_id < 0x141 || can_id > 0x160) {
+    logger_.warn("Invalid motor CAN ID in response: 0x{:x}", can_id);
+    return false;
+  }
+  motor_id = static_cast<uint8_t>(can_id - 0x140);
+  return true;
+}
+
+bool MotorActuator::write_motor_id(uint8_t motor_id, uint32_t timeout_ms) {
+  if (motor_id < 1 || motor_id > 32) {
+    logger_.error("Motor ID must be between 1 and 32");
+    return false;
+  }
+  std::array<uint8_t, packet_length_> command{};
+  command[0] = 0x79;
+  command[2] = 0;
+  command[7] = motor_id;
+  MotorPacket packet{};
+  packet.id = motor_id_;
+  packet.length = packet_length_;
+  packet.data = command;
+  MotorPacket response{};
+  if (!communication_ || !communication_(packet, response, timeout_ms)) {
+    logger_.warn("No motor ID write response received");
+    return false;
+  }
+  motor_id_ = motor_id;
   return true;
 }
 

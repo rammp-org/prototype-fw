@@ -62,6 +62,8 @@ public:
   bool is_connected(uint32_t timeout_ms = 100);
 
   bool read_status(Status &status, uint32_t timeout_ms = 100);
+  bool read_motor_id(uint8_t &motor_id, uint32_t timeout_ms = 100);
+  bool write_motor_id(uint8_t motor_id, uint32_t timeout_ms = 100);
   bool read_temperature(int &temperature_c, uint32_t timeout_ms = 100);
   bool read_angle(float &angle_degrees, uint32_t timeout_ms = 100);
   bool read_velocity(float &velocity_rpm, uint32_t timeout_ms = 100);
@@ -81,6 +83,7 @@ public:
   bool write_default_pid_rom();
   bool write_default_pid_ram();
   bool write_global_pid_gain(float gain);
+  uint8_t get_motor_id() const { return motor_id_; }
 
 private:
   static constexpr size_t packet_length_ = 8;
@@ -88,6 +91,7 @@ private:
 
   bool send_command(const std::array<uint8_t, packet_length_> &command);
   bool request(uint8_t command_code, MotorPacket &response, uint32_t timeout_ms);
+  bool request(const MotorPacket &command, MotorPacket &response, uint32_t timeout_ms);
   static int16_t read_i16(const std::array<uint8_t, 8> &data, size_t index);
   static int32_t read_i32(const std::array<uint8_t, 8> &data, size_t index);
   static void set_i16(std::array<uint8_t, 8> &data, size_t index, int16_t value);
