@@ -40,6 +40,7 @@ bool MotorCanBus::on_receive(twai_node_handle_t handle, const twai_rx_done_event
 }
 
 bool MotorCanBus::start(uint32_t bitrate) {
+  std::lock_guard<std::mutex> lock(transaction_mutex_);
   if (node_ != nullptr) {
     return true;
   }
@@ -82,6 +83,11 @@ bool MotorCanBus::start(uint32_t bitrate) {
 }
 
 bool MotorCanBus::send(const MotorPacket &command) {
+  std::lock_guard<std::mutex> lock(transaction_mutex_);
+  return send_unlocked(command);
+}
+
+bool MotorCanBus::send_unlocked(const MotorPacket &command) {
   if (node_ == nullptr) {
     logger_.error("Motor CAN is not started");
     return false;
@@ -108,9 +114,14 @@ bool MotorCanBus::send(const MotorPacket &command) {
 
 bool MotorCanBus::request(const MotorPacket &command, MotorPacket &response,
                           uint32_t timeout_ms) {
+  std::lock_guard<std::mutex> lock(transaction_mutex_);
+  if (receive_queue_ == nullptr) {
+    logger_.error("Motor CAN is not started");
+    return false;
+  }
   while (xQueueReceive(receive_queue_, &response, 0) == pdTRUE) {
   }
-  if (!send(command)) {
+  if (!send_unlocked(command)) {
     return false;
   }
 

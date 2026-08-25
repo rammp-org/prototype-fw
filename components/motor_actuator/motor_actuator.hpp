@@ -3,6 +3,7 @@
 #include <array>
 #include <cstdint>
 #include <functional>
+#include <mutex>
 #include <utility>
 
 #include "base_component.hpp"
@@ -33,11 +34,13 @@ public:
 private:
   static bool on_receive(twai_node_handle_t handle, const twai_rx_done_event_data_t *event,
                          void *context);
+  bool send_unlocked(const MotorPacket &command);
 
   gpio_num_t rx_gpio_;
   gpio_num_t tx_gpio_;
   twai_node_handle_t node_{nullptr};
   QueueHandle_t receive_queue_{nullptr};
+  std::mutex transaction_mutex_;
 };
 
 class MotorActuator : public espp::BaseComponent {
