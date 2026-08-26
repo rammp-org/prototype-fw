@@ -27,11 +27,23 @@ void Gui::init_ui() {
   const int32_t screen_w = lv_display_get_horizontal_resolution(disp);
   const int32_t screen_h = lv_display_get_vertical_resolution(disp);
   const bool landscape = screen_w >= screen_h;
+  logger_.info("Display resolution {}x{} ({})", screen_w, screen_h,
+               landscape ? "landscape" : "portrait");
   // The drag pad / vector circle scale with the smaller screen dimension so
   // they always fit next to the other panel.
   const int32_t small_dim = std::min(screen_w, screen_h);
   pad_size_ = std::clamp(static_cast<int>(small_dim / (landscape ? 3 : 2)), 200, 340);
   viz_size_ = static_cast<int>(pad_size_ * 0.85f);
+
+  // Explicit pixel geometry for the content row/column and its two panels.
+  // Percentage widths on `content` did not resolve to the full screen width
+  // (content collapsed toward its shrink-wrapped size), which starved the
+  // panels regardless of whether they used flex_grow or LV_PCT. Pixel sizes
+  // computed from the real resolution are unambiguous.
+  constexpr int32_t kScreenPad = 8;  // matches pad_all on the screen below
+  constexpr int32_t kContentGap = 10; // matches pad_column/pad_row on content
+  const int32_t content_w = screen_w - 2 * kScreenPad;
+  const int32_t panel_w = landscape ? (content_w - kContentGap) / 2 : content_w;
 
   // Root: a vertical flex of [top bar][content (grows)][motor row], full width.
   lv_obj_clear_flag(screen, LV_OBJ_FLAG_SCROLLABLE);
@@ -46,28 +58,25 @@ void Gui::init_ui() {
   // right panel), a column in portrait (stacked).
   lv_obj_t *content = lv_obj_create(screen);
   lv_obj_remove_style_all(content);
-  lv_obj_set_width(content, LV_PCT(100));
+  lv_obj_set_width(content, content_w);
   lv_obj_set_flex_grow(content, 1);
   lv_obj_clear_flag(content, LV_OBJ_FLAG_SCROLLABLE);
   lv_obj_set_flex_flow(content, landscape ? LV_FLEX_FLOW_ROW : LV_FLEX_FLOW_COLUMN);
   lv_obj_set_flex_align(content, LV_FLEX_ALIGN_START, LV_FLEX_ALIGN_START, LV_FLEX_ALIGN_START);
-  lv_obj_set_style_pad_column(content, 10, 0);
-  lv_obj_set_style_pad_row(content, 10, 0);
+  lv_obj_set_style_pad_column(content, kContentGap, 0);
+  lv_obj_set_style_pad_row(content, kContentGap, 0);
 
-  // Each panel takes an explicit share of the content container. In landscape
-  // the two panels sit side-by-side (48% each, leaving room for the column
-  // gap); in portrait they stack full-width. flex_grow is intentionally NOT
-  // used here - with the children's content (a fixed-size circle / drag-pad)
-  // driving the intrinsic width, flex_grow failed to expand the panels and
-  // they collapsed to ~10-20% of the screen. Explicit LV_PCT widths match the
-  // full-width pattern used by the top bar and motor row, which works reliably.
-  const int panel_width_pct = landscape ? 48 : 100;
+  // Each panel gets an explicit pixel width (half the row in landscape, full
+  // width when stacked in portrait). In landscape the panels fill the content
+  // height and sit side-by-side; in portrait they stack and take their content
+  // height (LV_PCT(100) there would make the first panel consume the whole
+  // column and push the second off-screen).
 
   // Left panel: velocity vector + numeric readouts + limits.
   lv_obj_t *left = lv_obj_create(content);
   lv_obj_remove_style_all(left);
-  lv_obj_set_width(left, LV_PCT(panel_width_pct));
-  lv_obj_set_height(left, LV_PCT(100));
+  lv_obj_set_width(left, panel_w);
+  lv_obj_set_height(left, landscape ? LV_PCT(100) : LV_SIZE_CONTENT);
   lv_obj_clear_flag(left, LV_OBJ_FLAG_SCROLLABLE);
   lv_obj_set_flex_flow(left, LV_FLEX_FLOW_COLUMN);
   lv_obj_set_flex_align(left, LV_FLEX_ALIGN_START, LV_FLEX_ALIGN_CENTER, LV_FLEX_ALIGN_START);
@@ -77,8 +86,8 @@ void Gui::init_ui() {
   // Right panel: touch drag-pad + rotation / limit sliders.
   lv_obj_t *right = lv_obj_create(content);
   lv_obj_remove_style_all(right);
-  lv_obj_set_width(right, LV_PCT(panel_width_pct));
-  lv_obj_set_height(right, LV_PCT(100));
+  lv_obj_set_width(right, panel_w);
+  lv_obj_set_height(right, landscape ? LV_PCT(100) : LV_SIZE_CONTENT);
   lv_obj_clear_flag(right, LV_OBJ_FLAG_SCROLLABLE);
   lv_obj_set_flex_flow(right, LV_FLEX_FLOW_COLUMN);
   lv_obj_set_flex_align(right, LV_FLEX_ALIGN_START, LV_FLEX_ALIGN_CENTER, LV_FLEX_ALIGN_START);

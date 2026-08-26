@@ -128,6 +128,14 @@ inline constexpr bool kJoystickAutoCenter = true;
 inline constexpr size_t kJoystickAutoCenterSamples = 32;
 inline constexpr float kJoystickAutoCenterMaxDeviationMv = 500.0f;
 
+/// Joystick mounting orientation. The stick may be physically mounted rotated
+/// relative to the operator, so the raw (x, y) deflection is rotated CLOCKWISE
+/// by this many degrees (0, 90, 180, or 270) before it is mapped to the
+/// platform forward/left axes. With this hardware the stick's forward reads as
+/// UI-left and its right reads as UI-forward, i.e. it is mounted a quarter turn
+/// off; 90 corrects it (physical forward -> forward, physical right -> right).
+inline constexpr int kJoystickMountingRotationCwDeg = 90;
+
 /////////////////////////////////////////////////////////////////////////////
 // Control parameters
 /////////////////////////////////////////////////////////////////////////////

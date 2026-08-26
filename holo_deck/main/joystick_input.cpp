@@ -13,6 +13,33 @@ espp::FloatRangeMapper::Config axis_calibration(float center_mv, float min_mv, f
       .invert_output = inverted,
   };
 }
+
+// Rotate a stick vector CLOCKWISE by a multiple of 90 degrees to compensate for
+// the joystick's physical mounting orientation. In the platform frame (x right,
+// y forward) a 90-degree clockwise turn maps (x, y) -> (y, -x), so +y (forward)
+// rotates onto +x (right). Applied to the already-deadzoned/normalized stick
+// output; the circular deadzone is radius-based and thus rotation-invariant.
+void rotate_stick_cw(float &x, float &y, int cw_deg) {
+  const int quadrant = ((cw_deg / 90) % 4 + 4) % 4;
+  const float ox = x;
+  const float oy = y;
+  switch (quadrant) {
+  case 1: // 90 CW
+    x = oy;
+    y = -ox;
+    break;
+  case 2: // 180
+    x = -ox;
+    y = -oy;
+    break;
+  case 3: // 270 CW
+    x = -oy;
+    y = ox;
+    break;
+  default: // 0
+    break;
+  }
+}
 } // namespace
 
 JoystickInput::JoystickInput(const Config &config)
@@ -174,10 +201,14 @@ bool JoystickInput::update() {
   const float twist =
       std::clamp(twist_mapper_.map(static_cast<float>(twist_mv.value())), -1.0f, 1.0f);
 
-  // map to the platform frame: joystick +x is right -> left is -x;
-  // joystick +y is forward; twist counter-clockwise positive
-  const float forward = joystick_.y();
-  const float left = -joystick_.x();
+  // Compensate for the stick's mounting orientation, then map to the platform
+  // frame: joystick +x is right -> left is -x; joystick +y is forward; twist
+  // counter-clockwise positive.
+  float sx = joystick_.x();
+  float sy = joystick_.y();
+  rotate_stick_cw(sx, sy, hw_config::kJoystickMountingRotationCwDeg);
+  const float forward = sy;
+  const float left = -sx;
   if (callback_) {
     callback_(forward, left, twist);
   }
