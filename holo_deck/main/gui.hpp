@@ -81,6 +81,11 @@ public:
   /// Set the callback fired when the ENABLE / STOP button is pressed.
   void set_enable_callback(enable_callback_t callback) { enable_callback_ = std::move(callback); }
 
+  /// Callback for the DISABLE button: halt the motors at the control level.
+  using disable_callback_t = std::function<void()>;
+  /// Set the callback fired when the DISABLE button is pressed.
+  void set_disable_callback(disable_callback_t callback) { disable_callback_ = std::move(callback); }
+
   /// Set the callback fired when the max-speed slider is moved.
   void set_max_speed_callback(limit_callback_t callback) {
     max_speed_callback_ = std::move(callback);
@@ -96,22 +101,25 @@ public:
   void update_state(const HoloDeckController::State &state);
 
 protected:
-  // geometry (1280x720 landscape)
-  static constexpr int TOP_BAR_HEIGHT = 90;
-  static constexpr int VIZ_SIZE = 300;
-  static constexpr int PAD_SIZE = 340;
-  static constexpr int KNOB_SIZE = 60;
-  static constexpr int SLIDER_WIDTH = 460;
+  // The UI is laid out with flex containers sized from the runtime display
+  // resolution, so it fills the screen and never overlaps regardless of the
+  // panel orientation (the Tab5 panel is natively 720x1280 portrait and the
+  // BSP rotates it to landscape). These are indicative sizes only.
+  static constexpr int KNOB_SIZE = 56;
 
   void init_ui();
   void deinit_ui();
 
-  // the individual pieces of the UI, called from init_ui()
-  void init_top_bar();
-  void init_vector_display();
-  void init_motor_tiles();
-  void init_drag_pad();
-  void init_sliders();
+  // the individual pieces of the UI, called from init_ui() with their parent
+  // flex container and the effective viz/pad size for the current layout
+  void init_top_bar(lv_obj_t *parent);
+  void init_vector_display(lv_obj_t *parent, int viz_size);
+  void init_motor_tiles(lv_obj_t *parent);
+  void init_drag_pad(lv_obj_t *parent, int pad_size);
+  void init_sliders(lv_obj_t *parent);
+  // runtime-computed geometry, set in init_ui()
+  int pad_size_{300};
+  int viz_size_{260};
 
   // the LVGL update task: calls lv_task_handler() under the mutex
   bool update(std::mutex &m, std::condition_variable &cv);
@@ -133,6 +141,7 @@ protected:
   lv_obj_t *source_label_{nullptr};
   lv_obj_t *enable_button_{nullptr};
   lv_obj_t *enable_button_label_{nullptr};
+  lv_obj_t *disable_button_{nullptr};
   lv_obj_t *vector_circle_{nullptr};
   lv_obj_t *vector_line_{nullptr};
   lv_obj_t *velocity_label_{nullptr};
@@ -155,6 +164,7 @@ protected:
   translation_callback_t translation_callback_{nullptr};
   rotation_callback_t rotation_callback_{nullptr};
   enable_callback_t enable_callback_{nullptr};
+  disable_callback_t disable_callback_{nullptr};
   limit_callback_t max_speed_callback_{nullptr};
   limit_callback_t max_rotation_callback_{nullptr};
 

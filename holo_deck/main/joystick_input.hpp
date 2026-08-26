@@ -48,6 +48,15 @@ public:
 protected:
   bool update();
   void update_button();
+  /// Boot-time auto-centering: average each spring-return axis at rest and,
+  /// if plausible, adopt it as that axis's center so the deadzones are applied
+  /// around the true resting point (see hw_config::kJoystickAutoCenter). Falls
+  /// back to the nominal centers for any axis whose reading is implausible or
+  /// cannot be read. Called once from the ctor before the sampling timer runs.
+  void calibrate_center();
+  /// (Re)apply the axis calibration with the given per-axis center voltages,
+  /// deriving the twist deadband from kJoystickTwistDeadzoneFraction.
+  void apply_calibration(float x_center_mv, float y_center_mv, float twist_center_mv);
 
   callback_t callback_;
   button_callback_t button_callback_;

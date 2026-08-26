@@ -106,12 +106,27 @@ inline constexpr bool kJoystickTwistInverted = false;
 /// Circular deadzone radius around center for the X/Y pair, as a fraction of
 /// the unit circle. Inside this radius the translation command is exactly 0
 /// (this is also what releases joystick control back to the GUI).
-inline constexpr float kJoystickCenterDeadzoneRadius = 0.12f;
+inline constexpr float kJoystickCenterDeadzoneRadius = 0.05f;
 /// Deadzone at the rim of the unit circle: deflections beyond
 /// (1 - kJoystickRangeDeadzone) count as full deflection.
-inline constexpr float kJoystickRangeDeadzone = 0.08f;
-/// Deadband (in mV) around the twist axis center inside which rotation is 0.
-inline constexpr float kJoystickTwistDeadbandMv = 200.0f;
+inline constexpr float kJoystickRangeDeadzone = 0.05f;
+/// Twist-axis center deadzone, as a fraction of the axis half-span, inside
+/// which rotation is exactly 0. Converted to a mV deadband against the
+/// (auto-captured or configured) center at runtime.
+inline constexpr float kJoystickTwistDeadzoneFraction = 0.05f;
+
+/// Boot-time auto-centering. The joystick is spring-return on all three axes,
+/// so its resting voltage at power-on IS the true center of each pot -
+/// capturing it makes the deadzones effective regardless of per-unit pot
+/// tolerance (the usual reason a fixed-center deadzone "does nothing"). At
+/// startup each axis is averaged over kJoystickAutoCenterSamples reads and, if
+/// the average is within kJoystickAutoCenterMaxDeviationMv of the nominal
+/// center below, adopted as that axis's center; otherwise the nominal center
+/// is kept and a warning is logged (the stick was likely not centered at
+/// boot). Set to false to always use the fixed nominal centers.
+inline constexpr bool kJoystickAutoCenter = true;
+inline constexpr size_t kJoystickAutoCenterSamples = 32;
+inline constexpr float kJoystickAutoCenterMaxDeviationMv = 500.0f;
 
 /////////////////////////////////////////////////////////////////////////////
 // Control parameters
@@ -130,16 +145,28 @@ inline constexpr std::chrono::milliseconds kJoystickReleaseTimeout{500};
 /// for this long.
 inline constexpr std::chrono::milliseconds kMotorStatusStaleTimeout{3000};
 
-/// Hard per-wheel speed limit: if any computed wheel speed exceeds this, all
-/// wheels are scaled down together (preserving the motion direction).
-inline constexpr float kMaxWheelRpm = 30.0f;
+/// Hard per-wheel OUTPUT-shaft speed limit (RPM): if any computed wheel speed
+/// exceeds this, all wheels are scaled down together (preserving the motion
+/// direction). This is the master safety cap that also bounds how fast the
+/// base can rotate: a pure chassis rotation of w RPM drives the wheels at
+/// roughly w * 4.6 RPM for this geometry, so this cap of 45 permits ~9.7 RPM
+/// (~58 deg/s) full rotation. Raise it (the RMD-X6-S2 has ample headroom -
+/// 45 output RPM is only ~1620 motor RPM through the 36:1 gear) for a faster
+/// base, or lower it to keep the platform gentle.
+inline constexpr float kMaxWheelRpm = 45.0f;
 /// Default (and maximum-selectable) translation speed limits, m/s.
 inline constexpr float kDefaultMaxSpeedMps = 0.25f;
 inline constexpr float kMinSelectableMaxSpeedMps = 0.05f;
 inline constexpr float kMaxSelectableMaxSpeedMps = 0.50f;
-/// Default (and maximum-selectable) chassis rotation rate limits, RPM.
-inline constexpr float kDefaultMaxRotationRpm = 3.0f;
-inline constexpr float kMinSelectableMaxRotationRpm = 0.5f;
-inline constexpr float kMaxSelectableMaxRotationRpm = 6.0f;
+/// Default (and maximum-selectable) chassis rotation rate limits, RPM. The
+/// selectable max is matched to what kMaxWheelRpm allows for pure rotation so
+/// the slider is not misleading; a full twist at the max reaches ~10 RPM
+/// (60 deg/s). Rotation is shown in deg/s in the GUI (1 RPM = 6 deg/s).
+inline constexpr float kDefaultMaxRotationRpm = 6.0f;
+inline constexpr float kMinSelectableMaxRotationRpm = 1.0f;
+inline constexpr float kMaxSelectableMaxRotationRpm = 10.0f;
+
+/// Conversion for the (intuitive) deg/s display of chassis rotation.
+inline constexpr float kRpmToDegPerSec = 6.0f;
 
 } // namespace hw_config

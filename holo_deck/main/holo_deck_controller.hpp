@@ -28,14 +28,29 @@
 /// Source arbitration: any joystick deflection beyond the deadzone makes the
 /// joystick the active source. Once the joystick has been centered for longer
 /// than the release timeout, control falls back to the GUI setpoint, which is
-/// zeroed on the handover so the platform never jumps. E-stop always wins.
+/// zeroed on the handover so the platform never jumps. STOP always wins.
+///
+/// IMPORTANT: every motor command is issued from the single control loop, so a
+/// STOP can never be overtaken by an in-flight drive command from another
+/// thread (the bug where hitting STOP with the joystick deflected left the
+/// motors driving). The setters only change the mode; the next control tick
+/// (<= one control period) enacts it.
 ///
 /// All public setters and state() are thread-safe.
 class HoloDeckController : public espp::BaseComponent {
 public:
-  /// The currently-active control source.
+  /// The controller's operating mode.
+  enum class Mode {
+    DRIVE,    ///< The active source drives the platform (normal operation).
+    STOPPED,  ///< E-stop: the loop actively commands zero velocity (motors
+              ///< hold at 0 in closed-loop). Overrides all sources.
+    DISABLED, ///< Motors stopped at the CONTROL level (MotorActuator::stop()),
+              ///< NOT held at zero by the velocity loop. Re-enable to drive.
+  };
+
+  /// The currently-active control source (meaningful only in DRIVE mode).
   enum class Source {
-    STOPPED,  ///< E-stopped / disabled; motors are not being commanded.
+    STOPPED,  ///< E-stopped / disabled; motors are not being driven.
     GUI,      ///< The touch GUI / CLI setpoint drives the platform.
     JOYSTICK, ///< The physical joystick drives the platform.
   };
@@ -52,7 +67,8 @@ public:
 
   /// Snapshot of the full controller state, for the GUI / CLI.
   struct State {
-    bool enabled{false};
+    Mode mode{Mode::STOPPED};          ///< Operating mode.
+    bool enabled{false};               ///< Convenience: mode == DRIVE.
     Source source{Source::STOPPED};
     float vx_mps{0.0f};                ///< Active commanded forward velocity.
     float vy_mps{0.0f};                ///< Active commanded leftward velocity.
@@ -111,11 +127,25 @@ public:
   /// joystick the active source.
   void set_joystick_input(float forward, float left, float ccw);
 
-  /// Enable the platform, or e-stop it (false). Enabling zeroes the GUI
-  /// setpoint so the platform never jumps on re-enable. Disabling sends a
-  /// single zero-velocity command to every motor.
+  /// Enter DRIVE mode. Zeroes the GUI setpoint and requires the physical
+  /// joystick to be re-centered before it can take over, so the platform never
+  /// jumps or lurches on (re-)enable - even if a source was deflected.
+  void enable();
+  /// E-STOP: enter STOPPED mode. The control loop actively commands zero
+  /// velocity to every motor (they decelerate and hold at 0), overriding all
+  /// sources. Always wins.
+  void stop();
+  /// Disable the motors at the CONTROL level (MotorActuator::stop()): the
+  /// velocity loop stops commanding them entirely and the motors are halted by
+  /// the motor controllers themselves, not held at zero by the loop. Call
+  /// enable() to resume driving.
+  void disable_motors();
+  /// Compatibility shim: true -> enable(), false -> stop() (e-stop).
   void set_enabled(bool enabled);
+  /// True in DRIVE mode.
   bool is_enabled() const;
+  /// The current operating mode.
+  Mode mode() const;
 
   /// Set the maximum translation speed, m/s (clamped to be positive).
   void set_max_speed(float max_speed_mps);
@@ -128,7 +158,11 @@ public:
 protected:
   bool control_step();
   bool status_step();
-  void send_zeros_unlocked();
+  /// Send zero velocity to every motor (STOPPED). Safe to call without holding
+  /// mutex_ - the CAN transport has its own locking.
+  void send_zeros();
+  /// Halt every motor at the control level via MotorActuator::stop() (DISABLED).
+  void send_disable();
   static float clamp_positive(float value);
 
   HoloDeckPlatform &platform_;
@@ -139,8 +173,9 @@ protected:
   std::chrono::milliseconds status_stale_timeout_;
 
   mutable std::mutex mutex_;
-  bool enabled_{false};
-  bool stop_sent_{false};
+  Mode mode_{Mode::STOPPED};
+  bool disable_sent_{false};             ///< the one-shot motor stop for DISABLED was sent
+  bool require_joystick_recenter_{false}; ///< ignore the joystick until it re-centers
   Source source_{Source::STOPPED};
   float gui_vx_mps_{0.0f};
   float gui_vy_mps_{0.0f};

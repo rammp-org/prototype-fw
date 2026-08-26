@@ -53,14 +53,19 @@ JoystickInput::JoystickInput(const Config &config)
                  .center_deadzone_radius = hw_config::kJoystickCenterDeadzoneRadius,
                  .range_deadzone = hw_config::kJoystickRangeDeadzone,
                  .log_level = config.log_level})
+    // placeholder mapper; calibrate_center() -> apply_calibration() sets the
+    // real center + deadband (from kJoystickTwistDeadzoneFraction) before the
+    // sampling timer starts
     , twist_mapper_(axis_calibration(hw_config::kJoystickTwistCenterMv,
                                      hw_config::kJoystickTwistMinMv, hw_config::kJoystickTwistMaxMv,
-                                     hw_config::kJoystickTwistDeadbandMv,
-                                     hw_config::kJoystickTwistInverted))
+                                     0.0f, hw_config::kJoystickTwistInverted))
+    // auto_start is FALSE: the sampling timer is started at the end of the ctor
+    // body, AFTER boot-time auto-centering, so update() never runs against an
+    // un-centered calibration.
     , timer_({.name = "joystick",
               .period = hw_config::kJoystickPeriod,
               .callback = [this]() { return update(); },
-              .auto_start = true,
+              .auto_start = false,
               .stack_size_bytes = 6 * 1024,
               .priority = 8}) {
   // the pushbutton: input with the internal pull-up, active-low (see
@@ -81,6 +86,76 @@ JoystickInput::JoystickInput(const Config &config)
   } else {
     button_configured_ = true;
   }
+
+  // Capture the spring-return resting center of each axis, then start sampling.
+  calibrate_center();
+  timer_.start();
+}
+
+void JoystickInput::apply_calibration(float x_center_mv, float y_center_mv, float twist_center_mv) {
+  // X/Y: per-axis deadband 0 - the circular deadzone is applied on the vector
+  // by the Joystick (radius/range preserved here).
+  joystick_.set_calibration(
+      axis_calibration(x_center_mv, hw_config::kJoystickXMinMv, hw_config::kJoystickXMaxMv, 0.0f,
+                       hw_config::kJoystickXInverted),
+      axis_calibration(y_center_mv, hw_config::kJoystickYMinMv, hw_config::kJoystickYMaxMv, 0.0f,
+                       hw_config::kJoystickYInverted),
+      hw_config::kJoystickCenterDeadzoneRadius, hw_config::kJoystickRangeDeadzone);
+  // Twist: deadband is a fraction of the (possibly asymmetric) half-span
+  // around the captured center.
+  const float twist_half_span = std::min(twist_center_mv - hw_config::kJoystickTwistMinMv,
+                                         hw_config::kJoystickTwistMaxMv - twist_center_mv);
+  const float twist_deadband =
+      std::max(0.0f, twist_half_span) * hw_config::kJoystickTwistDeadzoneFraction;
+  twist_mapper_ = espp::FloatRangeMapper(
+      axis_calibration(twist_center_mv, hw_config::kJoystickTwistMinMv,
+                       hw_config::kJoystickTwistMaxMv, twist_deadband,
+                       hw_config::kJoystickTwistInverted));
+}
+
+void JoystickInput::calibrate_center() {
+  // Nominal (configured) centers are the fallback.
+  float x_center = hw_config::kJoystickXCenterMv;
+  float y_center = hw_config::kJoystickYCenterMv;
+  float twist_center = hw_config::kJoystickTwistCenterMv;
+
+  if (hw_config::kJoystickAutoCenter) {
+    double x_sum = 0.0, y_sum = 0.0, t_sum = 0.0;
+    size_t n = 0;
+    for (size_t i = 0; i < hw_config::kJoystickAutoCenterSamples; ++i) {
+      const auto x = xy_adc_.read_mv(x_channel_);
+      const auto y = xy_adc_.read_mv(y_channel_);
+      const auto t = twist_adc_.read_mv(twist_channel_);
+      if (x.has_value() && y.has_value() && t.has_value()) {
+        x_sum += x.value();
+        y_sum += y.value();
+        t_sum += t.value();
+        ++n;
+      }
+    }
+    if (n == 0) {
+      logger_.warn("Auto-center: no valid ADC reads; using nominal centers");
+    } else {
+      // Adopt each measured center only if it is plausibly near mid-scale
+      // (guards against a stick that was NOT centered at boot).
+      const auto adopt = [this](float measured, float nominal, const char *axis) {
+        if (std::abs(measured - nominal) <= hw_config::kJoystickAutoCenterMaxDeviationMv) {
+          return measured;
+        }
+        logger_.warn("Auto-center: {} axis center {:.0f} mV implausible (nominal {:.0f}); "
+                     "keeping nominal - was the stick centered at boot?",
+                     axis, measured, nominal);
+        return nominal;
+      };
+      x_center = adopt(static_cast<float>(x_sum / n), hw_config::kJoystickXCenterMv, "X");
+      y_center = adopt(static_cast<float>(y_sum / n), hw_config::kJoystickYCenterMv, "Y");
+      twist_center =
+          adopt(static_cast<float>(t_sum / n), hw_config::kJoystickTwistCenterMv, "twist");
+      logger_.info("Auto-centered: x={:.0f} y={:.0f} twist={:.0f} mV", x_center, y_center,
+                   twist_center);
+    }
+  }
+  apply_calibration(x_center, y_center, twist_center);
 }
 
 bool JoystickInput::update() {

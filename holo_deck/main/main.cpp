@@ -134,6 +134,7 @@ extern "C" void app_main(void) {
   gui.set_rotation_callback(
       [&controller](float ccw) { controller.set_gui_rotation_normalized(ccw); });
   gui.set_enable_callback([&controller](bool enable) { controller.set_enabled(enable); });
+  gui.set_disable_callback([&controller]() { controller.disable_motors(); });
   gui.set_max_speed_callback([&controller](float mps) { controller.set_max_speed(mps); });
   gui.set_max_rotation_callback([&controller](float rpm) { controller.set_max_rotation(rpm); });
 
@@ -184,10 +185,17 @@ extern "C" void app_main(void) {
   root_menu->Insert(
       "estop",
       [&controller](std::ostream &out) {
-        controller.set_enabled(false);
-        out << "E-STOP: motors zeroed and disabled.\n";
+        controller.stop();
+        out << "E-STOP: commanding zero velocity (motors hold at 0).\n";
       },
-      "E-stop: zero all motors and disable the control loop");
+      "E-stop: command zero velocity to all motors (they hold at 0)");
+  root_menu->Insert(
+      "disable",
+      [&controller](std::ostream &out) {
+        controller.disable_motors();
+        out << "Motors DISABLED at the control level. Use `enable` to drive again.\n";
+      },
+      "Disable the motors at the control level (not held at zero by the loop)");
   root_menu->Insert(
       "limits",
       [&controller](std::ostream &out, float max_speed_mps, float max_rotation_rpm) {
@@ -201,8 +209,11 @@ extern "C" void app_main(void) {
       "status",
       [&controller](std::ostream &out) {
         const auto state = controller.state();
-        out << "enabled: " << (state.enabled ? "true" : "false")
-            << "\nsource:  " << source_name(state.source) << "\ncommand: vx=" << state.vx_mps
+        const char *mode_name = state.mode == HoloDeckController::Mode::DRIVE     ? "DRIVE"
+                                : state.mode == HoloDeckController::Mode::STOPPED ? "STOPPED"
+                                                                                 : "DISABLED";
+        out << "mode:    " << mode_name << "\nsource:  " << source_name(state.source)
+            << "\ncommand: vx=" << state.vx_mps
             << " m/s vy=" << state.vy_mps << " m/s w=" << state.w_rpm
             << " RPM\nsetpoint (GUI/CLI): vx=" << state.gui_vx_mps << " m/s vy=" << state.gui_vy_mps
             << " m/s w=" << state.gui_w_rpm << " RPM\nlimits:  " << state.max_speed_mps << " m/s, "
