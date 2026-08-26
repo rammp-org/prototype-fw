@@ -34,19 +34,40 @@ public:
 private:
   static bool on_receive(twai_node_handle_t handle, const twai_rx_done_event_data_t *event,
                          void *context);
-  // Transmit one frame with transaction_mutex_ already held. When
-  // wait_for_completion is true (the request/response path) it blocks until the
-  // frame has left the controller so the reply window is meaningful. When false
-  // (fire-and-forget commands such as velocity set-points) it only enqueues the
-  // frame and returns immediately - it must never block a real-time control
-  // loop waiting on a wire ACK that may never arrive (e.g. no motor attached).
-  bool send_unlocked(const MotorPacket &command, bool wait_for_completion = true);
+  // Enqueue one frame with transaction_mutex_ already held. Never waits on wire
+  // completion (no twai_node_transmit_wait_all_done): the on-chip TWAI TX queue
+  // is zero-copy - it stores a pointer to the twai_frame_t and reads its buffer
+  // asynchronously from the ISR when the frame is actually transmitted - so the
+  // frame/payload must outlive the async send. We therefore copy into a
+  // persistent ring slot (see tx_ring_) rather than a stack frame, and never
+  // block a real-time control loop on an ACK that may never arrive (e.g. no
+  // motor attached). wait_for_queue_space=true (request path) briefly waits for
+  // queue space so a poll is not dropped; false (fire-and-forget set-points)
+  // enqueues non-blocking and drops the stale frame if the queue is full - the
+  // next control tick supersedes it. The request/response path relies on the RX
+  // queue wait for its reply, so it needs no TX-completion wait.
+  bool send_unlocked(const MotorPacket &command, bool wait_for_queue_space = true);
 
   gpio_num_t rx_gpio_;
   gpio_num_t tx_gpio_;
   twai_node_handle_t node_{nullptr};
   QueueHandle_t receive_queue_{nullptr};
   std::mutex transaction_mutex_;
+
+  // Persistent, driver-referenced TX frames. The on-chip TWAI TX queue stores
+  // pointers (zero-copy) and reads the frame/buffer from the ISR when the frame
+  // is transmitted, so each frame must outlive its async send. The ring is
+  // larger than the driver tx_queue_depth (3) plus the one in-flight frame, and
+  // send_unlocked() only advances after a successful enqueue, so a slot is never
+  // reused while the driver may still reference it. All access is serialized by
+  // transaction_mutex_.
+  static constexpr size_t kTxRingSize = 8;
+  struct TxSlot {
+    twai_frame_t frame{};
+    std::array<uint8_t, 8> payload{};
+  };
+  std::array<TxSlot, kTxRingSize> tx_ring_{};
+  size_t tx_ring_index_{0};
 };
 
 class MotorActuator : public espp::BaseComponent {
