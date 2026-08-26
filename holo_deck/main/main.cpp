@@ -107,6 +107,7 @@ extern "C" void app_main(void) {
       .status_poll_period = hw_config::kStatusPollPeriod,
       .joystick_release_timeout = hw_config::kJoystickReleaseTimeout,
       .status_stale_timeout = hw_config::kMotorStatusStaleTimeout,
+      .status_read_timeout_ms = hw_config::kMotorStatusReadTimeoutMs,
       .log_level = espp::Logger::Verbosity::INFO,
   });
 

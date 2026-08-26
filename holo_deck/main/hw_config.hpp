@@ -144,6 +144,11 @@ inline constexpr std::chrono::milliseconds kJoystickReleaseTimeout{500};
 /// A motor's status is shown as STALE when it has not been successfully read
 /// for this long.
 inline constexpr std::chrono::milliseconds kMotorStatusStaleTimeout{3000};
+/// Per-status-read reply timeout (ms). The read holds the shared CAN bus mutex
+/// for up to this long, so it is kept well under kControlPeriod to bound how
+/// long a colliding control-loop send can be delayed. A healthy motor replies
+/// in ~1 ms; when no motor answers the read simply reports STALE this cycle.
+inline constexpr uint32_t kMotorStatusReadTimeoutMs = 12;
 
 /// Hard per-wheel OUTPUT-shaft speed limit (RPM): if any computed wheel speed
 /// exceeds this, all wheels are scaled down together (preserving the motion

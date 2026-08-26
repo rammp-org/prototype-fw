@@ -99,6 +99,10 @@ public:
                                                         ///< control.
     std::chrono::milliseconds status_stale_timeout;     ///< Age before a motor
                                                         ///< status is stale.
+    uint32_t status_read_timeout_ms;                    ///< Per-status-read reply
+                                                        ///< timeout; bounds how long
+                                                        ///< the shared CAN mutex is
+                                                        ///< held by a status poll.
     espp::Logger::Verbosity log_level{espp::Logger::Verbosity::WARN};
   };
 
@@ -171,6 +175,7 @@ protected:
   float max_wheel_rpm_;
   std::chrono::milliseconds joystick_release_timeout_;
   std::chrono::milliseconds status_stale_timeout_;
+  uint32_t status_read_timeout_ms_;
 
   mutable std::mutex mutex_;
   Mode mode_{Mode::STOPPED};

@@ -84,10 +84,11 @@ bool MotorCanBus::start(uint32_t bitrate) {
 
 bool MotorCanBus::send(const MotorPacket &command) {
   std::lock_guard<std::mutex> lock(transaction_mutex_);
-  return send_unlocked(command);
+  // Fire-and-forget: enqueue only, never wait on wire completion.
+  return send_unlocked(command, /*wait_for_completion=*/false);
 }
 
-bool MotorCanBus::send_unlocked(const MotorPacket &command) {
+bool MotorCanBus::send_unlocked(const MotorPacket &command, bool wait_for_completion) {
   if (node_ == nullptr) {
     logger_.error("Motor CAN is not started");
     return false;
@@ -101,12 +102,22 @@ bool MotorCanBus::send_unlocked(const MotorPacket &command) {
   frame.header.dlc = command.length;
   frame.buffer = const_cast<uint8_t *>(command.data.data());
   frame.buffer_len = command.length;
-  esp_err_t result = twai_node_transmit(node_, &frame, 3);
-  if (result == ESP_OK) {
+  // Non-blocking enqueue for fire-and-forget so a full TX queue (e.g. no bus
+  // ACK because no motor is attached) drops the stale set-point instead of
+  // stalling the caller; the next control tick supersedes it anyway.
+  const uint32_t enqueue_timeout_ms = wait_for_completion ? 3 : 0;
+  esp_err_t result = twai_node_transmit(node_, &frame, enqueue_timeout_ms);
+  if (result == ESP_OK && wait_for_completion) {
     result = twai_node_transmit_wait_all_done(node_, 10);
   }
   if (result != ESP_OK) {
-    logger_.error("Motor CAN transmit failed: {}", esp_err_to_name(result));
+    if (wait_for_completion) {
+      logger_.error("Motor CAN transmit failed: {}", esp_err_to_name(result));
+    } else {
+      // Expected and self-correcting when nothing is draining the bus; keep it
+      // off the error path so it does not spam a real-time control loop.
+      logger_.debug("Motor CAN frame dropped (non-blocking): {}", esp_err_to_name(result));
+    }
     return false;
   }
   return true;

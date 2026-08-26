@@ -11,6 +11,7 @@ HoloDeckController::HoloDeckController(const Config &config)
     , max_wheel_rpm_(clamp_positive(config.max_wheel_rpm))
     , joystick_release_timeout_(config.joystick_release_timeout)
     , status_stale_timeout_(config.status_stale_timeout)
+    , status_read_timeout_ms_(config.status_read_timeout_ms)
     , max_speed_mps_(clamp_positive(config.max_speed_mps))
     , max_rotation_rpm_(clamp_positive(config.max_rotation_rpm))
     , control_timer_({.name = "holo_ctrl",
@@ -307,7 +308,7 @@ bool HoloDeckController::status_step() {
   status_poll_index_ = (status_poll_index_ + 1) % motors_.size();
 
   MotorActuator::Status status{};
-  const bool ok = motors_[index].read_status(status, 50);
+  const bool ok = motors_[index].read_status(status, status_read_timeout_ms_);
   const auto now = std::chrono::steady_clock::now();
 
   std::lock_guard<std::mutex> lock(mutex_);

@@ -54,21 +54,31 @@ void Gui::init_ui() {
   lv_obj_set_style_pad_column(content, 10, 0);
   lv_obj_set_style_pad_row(content, 10, 0);
 
+  // Each panel takes an explicit share of the content container. In landscape
+  // the two panels sit side-by-side (48% each, leaving room for the column
+  // gap); in portrait they stack full-width. flex_grow is intentionally NOT
+  // used here - with the children's content (a fixed-size circle / drag-pad)
+  // driving the intrinsic width, flex_grow failed to expand the panels and
+  // they collapsed to ~10-20% of the screen. Explicit LV_PCT widths match the
+  // full-width pattern used by the top bar and motor row, which works reliably.
+  const int panel_width_pct = landscape ? 48 : 100;
+
   // Left panel: velocity vector + numeric readouts + limits.
   lv_obj_t *left = lv_obj_create(content);
   lv_obj_remove_style_all(left);
+  lv_obj_set_width(left, LV_PCT(panel_width_pct));
   lv_obj_set_height(left, LV_PCT(100));
-  lv_obj_set_flex_grow(left, 1);
   lv_obj_clear_flag(left, LV_OBJ_FLAG_SCROLLABLE);
   lv_obj_set_flex_flow(left, LV_FLEX_FLOW_COLUMN);
+  lv_obj_set_flex_align(left, LV_FLEX_ALIGN_START, LV_FLEX_ALIGN_CENTER, LV_FLEX_ALIGN_START);
   lv_obj_set_style_pad_row(left, 10, 0);
   init_vector_display(left, viz_size_);
 
   // Right panel: touch drag-pad + rotation / limit sliders.
   lv_obj_t *right = lv_obj_create(content);
   lv_obj_remove_style_all(right);
+  lv_obj_set_width(right, LV_PCT(panel_width_pct));
   lv_obj_set_height(right, LV_PCT(100));
-  lv_obj_set_flex_grow(right, 1);
   lv_obj_clear_flag(right, LV_OBJ_FLAG_SCROLLABLE);
   lv_obj_set_flex_flow(right, LV_FLEX_FLOW_COLUMN);
   lv_obj_set_flex_align(right, LV_FLEX_ALIGN_START, LV_FLEX_ALIGN_CENTER, LV_FLEX_ALIGN_START);

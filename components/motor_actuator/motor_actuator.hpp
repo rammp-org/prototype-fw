@@ -34,7 +34,13 @@ public:
 private:
   static bool on_receive(twai_node_handle_t handle, const twai_rx_done_event_data_t *event,
                          void *context);
-  bool send_unlocked(const MotorPacket &command);
+  // Transmit one frame with transaction_mutex_ already held. When
+  // wait_for_completion is true (the request/response path) it blocks until the
+  // frame has left the controller so the reply window is meaningful. When false
+  // (fire-and-forget commands such as velocity set-points) it only enqueues the
+  // frame and returns immediately - it must never block a real-time control
+  // loop waiting on a wire ACK that may never arrive (e.g. no motor attached).
+  bool send_unlocked(const MotorPacket &command, bool wait_for_completion = true);
 
   gpio_num_t rx_gpio_;
   gpio_num_t tx_gpio_;
