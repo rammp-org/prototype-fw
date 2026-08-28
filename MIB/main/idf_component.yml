@@ -1,0 +1,9 @@
+## IDF Component Manager Manifest File
+dependencies:
+  idf:
+    version: '>=5.3'
+  espp/esp32-p4-eth: '>=1.0'
+  espp/twai: '>=1.0'
+  espp/basicmicro: '>=1.0'
+  espp/canopen: '>=1.0'
+  espp/logger: '>=1.0'

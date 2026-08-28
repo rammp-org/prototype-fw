@@ -1,0 +1,588 @@
+#include <algorithm>
+#include <span>
+#include <thread>
+
+#include "mcp266_controller.hpp"
+
+using namespace std::chrono_literals;
+
+namespace mib {
+
+Mcp266Controller::Mcp266Controller(const Config &config)
+    : BaseComponent("Mcp266Controller", config.log_level)
+    , config_(config) {}
+
+Mcp266Controller::~Mcp266Controller() {
+  if (serial_rx_queue_) {
+    vQueueDelete(serial_rx_queue_);
+    serial_rx_queue_ = nullptr;
+  }
+}
+
+bool Mcp266Controller::initialize(std::error_code &ec) {
+  ec.clear();
+  logger_.info("Initializing Mcp266Controller on TWAI (TX GPIO {}, RX GPIO {}, Baud {})",
+               static_cast<int>(config_.twai_tx_gpio), static_cast<int>(config_.twai_rx_gpio),
+               config_.baudrate);
+
+  if (!init_twai(ec)) {
+    logger_.error("Failed to initialize TWAI transport: {}", ec.message());
+    return false;
+  }
+
+  if (config_.mode == Mode::CANOPEN) {
+    if (!init_canopen(ec)) {
+      logger_.error("Failed to initialize CANopen mode: {}", ec.message());
+      return false;
+    }
+  } else {
+    if (!init_packet_serial(ec)) {
+      logger_.error("Failed to initialize Packet Serial mode: {}", ec.message());
+      return false;
+    }
+  }
+
+  logger_.info("Mcp266Controller initialized successfully");
+  return true;
+}
+
+bool Mcp266Controller::init_twai(std::error_code &ec) {
+  twai_ = std::make_unique<espp::Twai>(espp::Twai::Config{
+      .tx_gpio = config_.twai_tx_gpio,
+      .rx_gpio = config_.twai_rx_gpio,
+      .baudrate = config_.baudrate,
+      .mode = espp::Twai::Mode::NORMAL,
+      .tx_queue_depth = 10,
+      .on_receive =
+          [this](const espp::Twai::Message &msg) {
+            if (config_.mode == Mode::CANOPEN) {
+              if (canopen_client_) {
+                canopen_client_->process_frame(espp::CanopenClient::CanFrame{
+                    .id = msg.id,
+                    .extended = msg.extended,
+                    .rtr = msg.rtr,
+                    .dlc = msg.dlc,
+                    .data = msg.data,
+                });
+              }
+            } else if (config_.mode == Mode::PACKET_SERIAL && serial_rx_queue_) {
+              for (uint8_t i = 0; i < msg.dlc; ++i) {
+                xQueueSend(serial_rx_queue_, &msg.data[i], 0);
+              }
+            }
+          },
+      .log_level = config_.log_level,
+  });
+
+  return twai_->initialize(ec);
+}
+
+bool Mcp266Controller::init_canopen(std::error_code &ec) {
+  logger_.info("Configuring CANopen mode for Node ID {}", config_.node_id);
+
+  canopen_client_ = std::make_unique<espp::CanopenClient>(espp::CanopenClient::Config{
+      .node_id = config_.node_id,
+      .send =
+          [this](const espp::CanopenClient::CanFrame &frame) {
+            espp::Twai::Message msg{
+                .id = frame.id,
+                .extended = frame.extended,
+                .rtr = frame.rtr,
+                .dlc = frame.dlc,
+                .data = frame.data,
+            };
+            std::error_code tx_ec;
+            return twai_->transmit(msg, tx_ec);
+          },
+      .sdo_timeout = 500ms,
+      .on_heartbeat = nullptr,
+  });
+
+  drive_m1_ = std::make_unique<espp::Ds402Drive>(*canopen_client_);
+
+  // Send NMT start to the node
+  if (!canopen_client_->nmt_start(ec)) {
+    logger_.warn("Failed to send NMT start to Node ID {}: {}", config_.node_id, ec.message());
+  }
+
+  if (!reset_faults(ec)) {
+    logger_.warn("Fault reset did not complete: {}", ec.message());
+  }
+
+  return true;
+}
+
+bool Mcp266Controller::init_packet_serial(std::error_code &ec) {
+  logger_.info("Configuring Packet Serial over TWAI (Address 0x{:02X})",
+               config_.packet_serial_address);
+
+  serial_rx_queue_ = xQueueCreate(256, sizeof(uint8_t));
+  if (!serial_rx_queue_) {
+    logger_.error("Failed to create serial receive queue");
+    ec = std::make_error_code(std::errc::not_enough_memory);
+    return false;
+  }
+
+  espp::Basicmicro::Config bm_config{
+      .address = config_.packet_serial_address,
+      .write =
+          [this](std::span<const uint8_t> data) -> bool {
+            size_t offset = 0;
+            while (offset < data.size()) {
+              espp::Twai::Message msg{};
+              msg.id = config_.packet_serial_address;
+              msg.extended = false;
+              msg.rtr = false;
+              const size_t len = std::min<size_t>(8, data.size() - offset);
+              msg.dlc = static_cast<uint8_t>(len);
+              std::copy_n(data.begin() + offset, len, msg.data.begin());
+
+              std::error_code tx_ec;
+              if (!twai_->transmit(msg, tx_ec)) {
+                return false;
+              }
+              offset += len;
+            }
+            return true;
+          },
+      .read =
+          [this](std::span<uint8_t> data, std::chrono::milliseconds timeout) -> size_t {
+            size_t bytes_read = 0;
+            const TickType_t timeout_ticks = pdMS_TO_TICKS(timeout.count());
+            const TickType_t start_ticks = xTaskGetTickCount();
+
+            while (bytes_read < data.size()) {
+              TickType_t elapsed = xTaskGetTickCount() - start_ticks;
+              if (elapsed >= timeout_ticks) {
+                break;
+              }
+              uint8_t byte = 0;
+              if (xQueueReceive(serial_rx_queue_, &byte, timeout_ticks - elapsed) == pdTRUE) {
+                data[bytes_read++] = byte;
+              } else {
+                break;
+              }
+            }
+            return bytes_read;
+          },
+      .timeout = 200ms,
+      .log_level = config_.log_level,
+  };
+
+  basicmicro_ = std::make_unique<espp::Basicmicro>(bm_config);
+  return true;
+}
+
+// --- Mode Control ---
+
+bool Mcp266Controller::set_mode_m1(int8_t mode, std::error_code &ec) {
+  ec.clear();
+  if (config_.mode == Mode::CANOPEN && canopen_client_) {
+    return canopen_client_->write_i8(0x6060, 0, mode, ec);
+  }
+  return false;
+}
+
+int8_t Mcp266Controller::get_mode_m1(std::error_code &ec) {
+  ec.clear();
+  if (config_.mode == Mode::CANOPEN && canopen_client_) {
+    return canopen_client_->read_i8(0x6061, 0, ec);
+  }
+  return 0;
+}
+
+bool Mcp266Controller::set_mode_m2(int8_t mode, std::error_code &ec) {
+  ec.clear();
+  if (config_.mode == Mode::CANOPEN && canopen_client_) {
+    return canopen_client_->write_i8(0x6860, 0, mode, ec);
+  }
+  return false;
+}
+
+int8_t Mcp266Controller::get_mode_m2(std::error_code &ec) {
+  ec.clear();
+  if (config_.mode == Mode::CANOPEN && canopen_client_) {
+    return canopen_client_->read_i8(0x6861, 0, ec);
+  }
+  return 0;
+}
+
+// --- CiA 402 state machine ---
+
+bool Mcp266Controller::reset_axis_fault(const AxisObjects &axis, std::error_code &ec) {
+  const uint16_t sw = canopen_client_->read_u16(axis.statusword, 0, ec);
+  if (ec) {
+    logger_.error("{}: statusword read before fault reset failed: {}", axis.name, ec.message());
+    return false;
+  }
+  if ((sw & 0x004F) != 0x0008) {
+    logger_.info("{}: no fault to reset (statusword 0x{:04X})", axis.name, sw);
+    return true;
+  }
+
+  logger_.warn("{}: resetting fault (statusword 0x{:04X})", axis.name, sw);
+  if (!canopen_client_->write_u16(axis.controlword, 0, 0x0080, ec)) {
+    return false;
+  }
+  std::this_thread::sleep_for(50ms);
+  if (!canopen_client_->write_u16(axis.controlword, 0, 0x0000, ec)) {
+    return false;
+  }
+
+  constexpr int kMaxPolls = 20;
+  for (int i = 0; i < kMaxPolls; ++i) {
+    std::this_thread::sleep_for(25ms);
+    const uint16_t reset_sw = canopen_client_->read_u16(axis.statusword, 0, ec);
+    if (ec) {
+      return false;
+    }
+    if ((reset_sw & 0x004F) != 0x0008) {
+      logger_.info("{}: fault reset (statusword 0x{:04X})", axis.name, reset_sw);
+      return true;
+    }
+  }
+  logger_.error("{}: fault remains active after reset", axis.name);
+  ec = std::make_error_code(std::errc::protocol_error);
+  return false;
+}
+
+bool Mcp266Controller::reset_faults(std::error_code &ec) {
+  ec.clear();
+  if (config_.mode != Mode::CANOPEN || !canopen_client_) {
+    return true;
+  }
+  if (!reset_axis_fault(kAxisM1, ec)) {
+    return false;
+  }
+  return reset_axis_fault(kAxisM2, ec);
+}
+
+void Mcp266Controller::log_statusword(const AxisObjects &axis, const char *step,
+                                      uint16_t statusword) const {
+  logger_.info(
+      "{} {}: 0x{:04X} [ready={}, switched_on={}, operation_enabled={}, fault={}, "
+      "voltage_enabled={}, quick_stop={}, switch_on_disabled={}, warning={}, remote={}, "
+      "target_reached={}, internal_limit={}, setpoint_ack={}, following_error={}]",
+      axis.name, step, statusword, (statusword & 0x0001) != 0, (statusword & 0x0002) != 0,
+      (statusword & 0x0004) != 0, (statusword & 0x0008) != 0, (statusword & 0x0010) != 0,
+      (statusword & 0x0020) != 0, (statusword & 0x0040) != 0, (statusword & 0x0080) != 0,
+      (statusword & 0x0200) != 0, (statusword & 0x0400) != 0, (statusword & 0x0800) != 0,
+      (statusword & 0x1000) != 0, (statusword & 0x2000) != 0);
+}
+
+bool Mcp266Controller::wait_for_statusword(const AxisObjects &axis, uint16_t mask,
+                                           uint16_t expected, const char *step,
+                                           std::error_code &ec) {
+  constexpr int kMaxPolls = 20;
+  constexpr auto kPollPeriod = 25ms;
+  uint16_t sw = 0;
+  for (int i = 0; i < kMaxPolls; ++i) {
+    std::this_thread::sleep_for(kPollPeriod);
+    sw = canopen_client_->read_u16(axis.statusword, 0, ec);
+    if (ec) {
+      logger_.error("{} {}: statusword read failed: {}", axis.name, step, ec.message());
+      return false;
+    }
+    if ((sw & 0x004F) == 0x0008) {
+      logger_.error("{} {}: drive faulted (statusword 0x{:04X})", axis.name, step, sw);
+      ec = std::make_error_code(std::errc::protocol_error);
+      return false;
+    }
+    if ((sw & mask) == expected) {
+      logger_.info("{} {}: reached (statusword 0x{:04X})", axis.name, step, sw);
+      log_statusword(axis, step, sw);
+      return true;
+    }
+  }
+  logger_.error("{} {}: timed out, statusword stuck at 0x{:04X}", axis.name, step, sw);
+  ec = std::make_error_code(std::errc::timed_out);
+  return false;
+}
+
+bool Mcp266Controller::enable_axis(const AxisObjects &axis, int8_t mode, bool verify_mode,
+                                   std::error_code &ec) {
+  ec.clear();
+  if (!canopen_client_->write_i8(axis.mode, 0, mode, ec)) {
+    logger_.error("{}: failed to set mode {}: {}", axis.name, mode, ec.message());
+    return false;
+  }
+  std::this_thread::sleep_for(25ms);
+  const int8_t display = canopen_client_->read_i8(axis.mode_display, 0, ec);
+  if (ec) {
+    logger_.error("{}: mode display read failed: {}", axis.name, ec.message());
+    return false;
+  }
+  if (verify_mode && display != mode) {
+    logger_.error("{}: mode {} rejected, drive reports {}", axis.name, mode, display);
+    ec = std::make_error_code(std::errc::not_supported);
+    return false;
+  }
+  logger_.info("{}: requested mode {}, display {}", axis.name, mode, display);
+
+  if (!reset_axis_fault(axis, ec)) {
+    return false;
+  }
+
+  // Shutdown -> Ready to switch on (statusword xxxx xxxx x01x 0001)
+  if (!canopen_client_->write_u16(axis.controlword, 0, 0x0006, ec) ||
+      !wait_for_statusword(axis, 0x007F, 0x0021, "Ready to switch on", ec)) {
+    return false;
+  }
+  // Switch On -> Switched on (statusword xxxx xxxx x01x 0011)
+  if (!canopen_client_->write_u16(axis.controlword, 0, 0x0007, ec) ||
+      !wait_for_statusword(axis, 0x007F, 0x0033, "Switched on", ec)) {
+    return false;
+  }
+  // Enable Operation -> Operation enabled (statusword xxxx xxxx x01x 0111)
+  if (!canopen_client_->write_u16(axis.controlword, 0, 0x000F, ec) ||
+      !wait_for_statusword(axis, 0x007F, 0x0037, "Operation enabled", ec)) {
+    return false;
+  }
+  return true;
+}
+
+// --- Motor Duty Control ---
+
+bool Mcp266Controller::drive_m1_duty(int16_t duty, std::error_code &ec) {
+  ec.clear();
+  if (config_.mode == Mode::PACKET_SERIAL && basicmicro_) {
+    return basicmicro_->drive_m1_duty(duty, ec);
+  }
+  if (config_.mode == Mode::CANOPEN && canopen_client_) {
+    if (duty != 0 && !enable_axis(kAxisM1, -1, true, ec)) {
+      return false;
+    }
+    return canopen_client_->write_i32(kAxisM1.target, 0, static_cast<int32_t>(duty), ec);
+  }
+  return false;
+}
+
+bool Mcp266Controller::drive_m2_duty(int16_t duty, std::error_code &ec) {
+  ec.clear();
+  if (config_.mode == Mode::PACKET_SERIAL && basicmicro_) {
+    return basicmicro_->drive_m2_duty(duty, ec);
+  }
+  if (config_.mode == Mode::CANOPEN && canopen_client_) {
+    if (duty != 0 && !enable_axis(kAxisM2, -1, true, ec)) {
+      return false;
+    }
+    return canopen_client_->write_i32(kAxisM2.target, 0, static_cast<int32_t>(duty), ec);
+  }
+  return false;
+}
+
+bool Mcp266Controller::drive_duty(int16_t duty_m1, int16_t duty_m2, std::error_code &ec) {
+  ec.clear();
+  if (config_.mode == Mode::PACKET_SERIAL && basicmicro_) {
+    return basicmicro_->drive_duty(duty_m1, duty_m2, ec);
+  }
+  return drive_m1_duty(duty_m1, ec) && drive_m2_duty(duty_m2, ec);
+}
+
+// --- Speed Control ---
+
+bool Mcp266Controller::drive_m1_speed(int32_t qpps, std::error_code &ec) {
+  ec.clear();
+  if (config_.mode == Mode::PACKET_SERIAL && basicmicro_) {
+    return basicmicro_->drive_m1_speed(qpps, ec);
+  }
+  if (config_.mode == Mode::CANOPEN && canopen_client_) {
+    if (qpps != 0 && !enable_axis(kAxisM1, 3, true, ec)) {
+      return false;
+    }
+    return canopen_client_->write_i32(kAxisM1.target, 0, qpps, ec);
+  }
+  return false;
+}
+
+bool Mcp266Controller::drive_m2_speed(int32_t qpps, std::error_code &ec) {
+  ec.clear();
+  if (config_.mode == Mode::PACKET_SERIAL && basicmicro_) {
+    return basicmicro_->drive_m2_speed(qpps, ec);
+  }
+  if (config_.mode == Mode::CANOPEN && canopen_client_) {
+    if (qpps != 0 && !enable_axis(kAxisM2, 3, true, ec)) {
+      return false;
+    }
+    return canopen_client_->write_i32(kAxisM2.target, 0, qpps, ec);
+  }
+  return false;
+}
+
+bool Mcp266Controller::move_m1_to_position(int32_t target_position, uint32_t profile_velocity,
+                                            std::error_code &ec) {
+  ec.clear();
+  if (config_.mode != Mode::CANOPEN || !canopen_client_) {
+    ec = std::make_error_code(std::errc::operation_not_supported);
+    return false;
+  }
+  if (!enable_axis(kAxisM1, 1, false, ec)) {
+    return false;
+  }
+  if (!canopen_client_->write_u32(0x6081, 0, profile_velocity, ec) ||
+      !canopen_client_->write_i32(0x607A, 0, target_position, ec)) {
+    return false;
+  }
+  if (!canopen_client_->write_u16(0x6040, 0, 0x001F, ec)) {
+    return false;
+  }
+  std::this_thread::sleep_for(25ms);
+  return canopen_client_->write_u16(0x6040, 0, 0x000F, ec);
+}
+
+bool Mcp266Controller::drive_speed(int32_t qpps_m1, int32_t qpps_m2, std::error_code &ec) {
+  ec.clear();
+  if (config_.mode == Mode::PACKET_SERIAL && basicmicro_) {
+    return basicmicro_->drive_speed(qpps_m1, qpps_m2, ec);
+  }
+  return drive_m1_speed(qpps_m1, ec) && drive_m2_speed(qpps_m2, ec);
+}
+
+bool Mcp266Controller::stop_motors(std::error_code &ec) {
+  ec.clear();
+  return drive_speed(0, 0, ec);
+}
+
+// --- Encoder Readback ---
+
+bool Mcp266Controller::read_encoder_m1(int32_t &count, uint8_t &status, std::error_code &ec) {
+  ec.clear();
+  if (config_.mode == Mode::PACKET_SERIAL && basicmicro_) {
+    uint32_t u_count = 0;
+    bool ok = basicmicro_->read_encoder_m1(u_count, status, ec);
+    count = static_cast<int32_t>(u_count);
+    return ok;
+  }
+  if (config_.mode == Mode::CANOPEN && canopen_client_) {
+    count = canopen_client_->read_i32(0x6064, 0, ec);
+    status = ec ? 0 : 1;
+    return !ec;
+  }
+  return false;
+}
+
+bool Mcp266Controller::read_encoder_m2(int32_t &count, uint8_t &status, std::error_code &ec) {
+  ec.clear();
+  if (config_.mode == Mode::PACKET_SERIAL && basicmicro_) {
+    uint32_t u_count = 0;
+    bool ok = basicmicro_->read_encoder_m2(u_count, status, ec);
+    count = static_cast<int32_t>(u_count);
+    return ok;
+  }
+  if (config_.mode == Mode::CANOPEN && canopen_client_) {
+    count = canopen_client_->read_i32(0x6864, 0, ec);
+    status = ec ? 0 : 1;
+    return !ec;
+  }
+  return false;
+}
+
+bool Mcp266Controller::read_encoders(int32_t &count_m1, int32_t &count_m2, std::error_code &ec) {
+  ec.clear();
+  if (config_.mode == Mode::PACKET_SERIAL && basicmicro_) {
+    uint32_t u1 = 0, u2 = 0;
+    bool ok = basicmicro_->read_encoders(u1, u2, ec);
+    count_m1 = static_cast<int32_t>(u1);
+    count_m2 = static_cast<int32_t>(u2);
+    return ok;
+  }
+  uint8_t st1 = 0, st2 = 0;
+  return read_encoder_m1(count_m1, st1, ec) && read_encoder_m2(count_m2, st2, ec);
+}
+
+bool Mcp266Controller::read_speed_m1(int32_t &qpps, uint8_t &status, std::error_code &ec) {
+  ec.clear();
+  if (config_.mode == Mode::PACKET_SERIAL && basicmicro_) {
+    return basicmicro_->read_encoder_speed_m1(qpps, status, ec);
+  }
+  if (config_.mode == Mode::CANOPEN && canopen_client_) {
+    qpps = canopen_client_->read_i32(0x606C, 0, ec);
+    status = ec ? 0 : 1;
+    return !ec;
+  }
+  return false;
+}
+
+bool Mcp266Controller::read_speed_m2(int32_t &qpps, uint8_t &status, std::error_code &ec) {
+  ec.clear();
+  if (config_.mode == Mode::PACKET_SERIAL && basicmicro_) {
+    return basicmicro_->read_encoder_speed_m2(qpps, status, ec);
+  }
+  if (config_.mode == Mode::CANOPEN && canopen_client_) {
+    qpps = canopen_client_->read_i32(0x686C, 0, ec);
+    status = ec ? 0 : 1;
+    return !ec;
+  }
+  return false;
+}
+
+// --- Telemetry & Diagnostics ---
+
+bool Mcp266Controller::read_device_info(std::string &device_name, uint32_t &device_type,
+                                         std::error_code &ec) {
+  ec.clear();
+  if (config_.mode == Mode::CANOPEN && canopen_client_) {
+    device_type = canopen_client_->read_u32(0x1000, 0, ec);
+    if (ec) {
+      return false;
+    }
+    device_name = canopen_client_->read_string(0x1008, 0, ec);
+    return !ec;
+  }
+  if (config_.mode == Mode::PACKET_SERIAL && basicmicro_) {
+    std::string ver;
+    bool ok = basicmicro_->read_firmware_version(ver, ec);
+    device_name = ver;
+    device_type = 0;
+    return ok;
+  }
+  return false;
+}
+
+bool Mcp266Controller::read_object_dictionary(std::string &eds, std::error_code &ec) {
+  ec.clear();
+  if (config_.mode != Mode::CANOPEN || !canopen_client_) {
+    ec = std::make_error_code(std::errc::operation_not_supported);
+    return false;
+  }
+  eds = canopen_client_->read_string(0x1021, 0, ec);
+  return !ec;
+}
+
+bool Mcp266Controller::read_main_battery_voltage(float &volts, std::error_code &ec) {
+  ec.clear();
+  if (config_.mode == Mode::PACKET_SERIAL && basicmicro_) {
+    return basicmicro_->read_main_battery_voltage(volts, ec);
+  }
+  // Default placeholder if CANopen custom voltage SDO is not used
+  volts = 0.0f;
+  return true;
+}
+
+bool Mcp266Controller::read_temperature(float &temp_c, std::error_code &ec) {
+  ec.clear();
+  if (config_.mode == Mode::PACKET_SERIAL && basicmicro_) {
+    return basicmicro_->read_temperature(temp_c, ec);
+  }
+  temp_c = 0.0f;
+  return true;
+}
+
+bool Mcp266Controller::read_status(uint32_t &status_mask, std::error_code &ec) {
+  ec.clear();
+  if (config_.mode == Mode::PACKET_SERIAL && basicmicro_) {
+    return basicmicro_->read_status(status_mask, ec);
+  }
+  if (config_.mode == Mode::CANOPEN && canopen_client_) {
+    uint16_t sw1 = canopen_client_->read_u16(0x6041, 0, ec);
+    if (ec) {
+      return false;
+    }
+    status_mask = static_cast<uint32_t>(sw1);
+    return true;
+  }
+  status_mask = 0;
+  return true;
+}
+
+} // namespace mib
