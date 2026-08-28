@@ -11,9 +11,12 @@ namespace {
 constexpr float kRadiansToDegrees = 180.0f / 3.14159265358979323846f;
 // slider integer scaling: the LVGL sliders carry integers, the limits are
 // floats
-constexpr float kSpeedSliderScale = 0.01f;   // slider unit -> m/s
-constexpr float kRotationSliderScale = 0.1f; // slider unit -> RPM
-constexpr int kRotationCommandRange = 100;   // rotation slider is +/- this
+constexpr float kSpeedSliderScale = 0.01f; // slider unit -> m/s
+// Max-rotation slider carries deg/s (matching its label); the controller's
+// unit is RPM, so one slider unit is 1/6 RPM.
+constexpr float kRotationSliderScale = 1.0f / hw_config::kRpmToDegPerSec; // slider unit -> RPM
+constexpr float kTwistScaleSliderScale = 0.1f; // slider unit -> x scale
+constexpr int kRotationCommandRange = 100;     // rotation slider is +/- this
 } // namespace
 
 void Gui::init_ui() {
@@ -121,6 +124,7 @@ void Gui::deinit_ui() {
   pad_knob_ = nullptr;
   pad_label_ = nullptr;
   rotation_slider_ = nullptr;
+  twist_scale_slider_ = nullptr;
   rotation_label_ = nullptr;
   max_speed_slider_ = nullptr;
   max_speed_label_ = nullptr;
@@ -269,6 +273,10 @@ void Gui::init_sliders(lv_obj_t *parent) {
        static_cast<int>(hw_config::kMinSelectableMaxRotationRpm / kRotationSliderScale),
        static_cast<int>(hw_config::kMaxSelectableMaxRotationRpm / kRotationSliderScale),
        static_cast<int>(hw_config::kDefaultMaxRotationRpm / kRotationSliderScale)},
+      {&twist_scale_slider_, &twist_scale_label_,
+       static_cast<int>(hw_config::kMinSelectableTwistScale / kTwistScaleSliderScale),
+       static_cast<int>(hw_config::kMaxSelectableTwistScale / kTwistScaleSliderScale),
+       static_cast<int>(hw_config::kDefaultTwistRotationScale / kTwistScaleSliderScale)},
   };
   for (const auto &spec : sliders) {
     lv_obj_t *label = lv_label_create(parent);
@@ -283,6 +291,8 @@ void Gui::init_sliders(lv_obj_t *parent) {
   lv_label_set_text(rotation_label_, "Rotation (left = CCW)");
   lv_label_set_text(max_speed_label_, "Max speed");
   lv_label_set_text(max_rotation_label_, "Max rotation (deg/s)");
+  lv_label_set_text_fmt(twist_scale_label_, "Twist scale: %.1fx",
+                        static_cast<double>(hw_config::kDefaultTwistRotationScale));
 }
 
 bool Gui::update(std::mutex &m, std::condition_variable &cv) {
@@ -403,6 +413,12 @@ void Gui::on_value_changed(lv_event_t *e) {
   } else if (target == max_rotation_slider_) {
     if (max_rotation_callback_) {
       max_rotation_callback_(lv_slider_get_value(max_rotation_slider_) * kRotationSliderScale);
+    }
+  } else if (target == twist_scale_slider_) {
+    const float scale = lv_slider_get_value(twist_scale_slider_) * kTwistScaleSliderScale;
+    lv_label_set_text_fmt(twist_scale_label_, "Twist scale: %.1fx", static_cast<double>(scale));
+    if (twist_scale_callback_) {
+      twist_scale_callback_(scale);
     }
   }
 }
@@ -552,6 +568,15 @@ void Gui::update_state(const HoloDeckController::State &state) {
                         static_cast<int>(state.max_rotation_rpm / kRotationSliderScale),
                         LV_ANIM_OFF);
   }
+  if (state.twist_rotation_scale != last_twist_scale_ &&
+      !lv_obj_has_state(twist_scale_slider_, LV_STATE_PRESSED)) {
+    lv_slider_set_value(twist_scale_slider_,
+                        static_cast<int>(state.twist_rotation_scale / kTwistScaleSliderScale),
+                        LV_ANIM_OFF);
+    lv_label_set_text_fmt(twist_scale_label_, "Twist scale: %.1fx",
+                          static_cast<double>(state.twist_rotation_scale));
+  }
   last_max_speed_ = state.max_speed_mps;
   last_max_rotation_ = state.max_rotation_rpm;
+  last_twist_scale_ = state.twist_rotation_scale;
 }

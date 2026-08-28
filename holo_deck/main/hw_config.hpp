@@ -182,4 +182,16 @@ inline constexpr float kMaxSelectableMaxRotationRpm = 10.0f;
 /// Conversion for the (intuitive) deg/s display of chassis rotation.
 inline constexpr float kRpmToDegPerSec = 6.0f;
 
+/// Joystick-twist rotation scale: multiplies the rotation rate commanded from
+/// a full twist deflection (twist * scale * max-rotation). Values > 1
+/// compensate the platform's weak rotation authority - the configured wheel
+/// drive directions are nearly radial, so pure rotation commands only ~0.27
+/// wheel RPM per chassis RPM (the kMaxWheelRpm comment's 4.6 figure assumes
+/// TANGENTIAL drive directions, i.e. wheel angles rotated 90 degrees; see the
+/// kinematics note in HoloDeckPlatform). Wheel commands remain bounded by
+/// kMaxWheelRpm regardless of this scale.
+inline constexpr float kDefaultTwistRotationScale = 1.0f;
+inline constexpr float kMinSelectableTwistScale = 0.1f;
+inline constexpr float kMaxSelectableTwistScale = 20.0f;
+
 } // namespace hw_config

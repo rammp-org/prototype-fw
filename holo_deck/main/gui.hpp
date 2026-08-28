@@ -96,6 +96,12 @@ public:
     max_rotation_callback_ = std::move(callback);
   }
 
+  /// Set the callback fired when the twist-scale slider is moved (value is
+  /// the scale factor applied to the joystick-twist rotation rate).
+  void set_twist_scale_callback(limit_callback_t callback) {
+    twist_scale_callback_ = std::move(callback);
+  }
+
   /// Refresh every widget from a controller state snapshot. Thread-safe;
   /// call it periodically (e.g. 10 Hz) from any task.
   void update_state(const HoloDeckController::State &state);
@@ -157,6 +163,8 @@ protected:
   lv_obj_t *max_speed_label_{nullptr};
   lv_obj_t *max_rotation_slider_{nullptr};
   lv_obj_t *max_rotation_label_{nullptr};
+  lv_obj_t *twist_scale_slider_{nullptr};
+  lv_obj_t *twist_scale_label_{nullptr};
 
   lv_style_t vector_line_style_;
   lv_point_precise_t vector_line_points_[2];
@@ -167,6 +175,7 @@ protected:
   disable_callback_t disable_callback_{nullptr};
   limit_callback_t max_speed_callback_{nullptr};
   limit_callback_t max_rotation_callback_{nullptr};
+  limit_callback_t twist_scale_callback_{nullptr};
 
   // last state received via update_state(), used by the event handlers (to
   // only act when the GUI is the active source) and to detect transitions
@@ -175,6 +184,7 @@ protected:
   HoloDeckController::Source last_source_{HoloDeckController::Source::STOPPED};
   float last_max_speed_{0.0f};
   float last_max_rotation_{0.0f};
+  float last_twist_scale_{0.0f};
 
   espp::Task update_task_{
       {.callback = [this](auto &m, auto &cv) { return update(m, cv); },

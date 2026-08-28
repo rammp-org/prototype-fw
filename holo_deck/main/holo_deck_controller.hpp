@@ -78,6 +78,7 @@ public:
     float gui_w_rpm{0.0f};             ///< GUI/CLI setpoint (pre-arbitration).
     float max_speed_mps{0.0f};         ///< Current translation limit.
     float max_rotation_rpm{0.0f};      ///< Current rotation-rate limit.
+    float twist_rotation_scale{1.0f};  ///< Joystick-twist rotation scale.
     float max_wheel_rpm{0.0f};         ///< Per-wheel scaling limit.
     std::array<MotorStatus, 4> motors; ///< Indexed by motor id - 1.
   };
@@ -92,6 +93,7 @@ public:
     float max_wheel_rpm;                                ///< Per-wheel scaling limit.
     float max_speed_mps;                                ///< Initial translation limit.
     float max_rotation_rpm;                             ///< Initial rotation-rate limit.
+    float twist_rotation_scale{1.0f};                   ///< Initial joystick-twist scale.
     std::chrono::milliseconds control_period;           ///< Control loop period.
     std::chrono::milliseconds status_poll_period;       ///< Status poll period.
     std::chrono::milliseconds joystick_release_timeout; ///< Centered time
@@ -155,6 +157,12 @@ public:
   void set_max_speed(float max_speed_mps);
   /// Set the maximum chassis rotation rate, RPM (clamped to be positive).
   void set_max_rotation(float max_rotation_rpm);
+  /// Set the scale factor applied to the rotation rate commanded from the
+  /// JOYSTICK TWIST axis (twist * scale * max-rotation). Values > 1 let the
+  /// twist command exceed the nominal rotation limit to compensate the
+  /// platform's weak rotation authority; wheel commands remain bounded by
+  /// max_wheel_rpm regardless (clamped to be positive).
+  void set_twist_rotation_scale(float scale);
 
   /// Get a snapshot of the current controller state. Thread-safe.
   State state() const;
@@ -191,6 +199,7 @@ protected:
   std::chrono::steady_clock::time_point last_joystick_activity_{};
   float max_speed_mps_;
   float max_rotation_rpm_;
+  float twist_rotation_scale_{1.0f};
   // active (post-arbitration) command, written by the control loop
   float vx_mps_{0.0f};
   float vy_mps_{0.0f};

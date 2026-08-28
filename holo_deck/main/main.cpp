@@ -103,6 +103,7 @@ extern "C" void app_main(void) {
       .max_wheel_rpm = hw_config::kMaxWheelRpm,
       .max_speed_mps = hw_config::kDefaultMaxSpeedMps,
       .max_rotation_rpm = hw_config::kDefaultMaxRotationRpm,
+      .twist_rotation_scale = hw_config::kDefaultTwistRotationScale,
       .control_period = hw_config::kControlPeriod,
       .status_poll_period = hw_config::kStatusPollPeriod,
       .joystick_release_timeout = hw_config::kJoystickReleaseTimeout,
@@ -138,6 +139,8 @@ extern "C" void app_main(void) {
   gui.set_disable_callback([&controller]() { controller.disable_motors(); });
   gui.set_max_speed_callback([&controller](float mps) { controller.set_max_speed(mps); });
   gui.set_max_rotation_callback([&controller](float rpm) { controller.set_max_rotation(rpm); });
+  gui.set_twist_scale_callback(
+      [&controller](float scale) { controller.set_twist_rotation_scale(scale); });
 
   // CLI
   auto root_menu = std::make_unique<cli::Menu>("holo_deck");
@@ -218,7 +221,8 @@ extern "C" void app_main(void) {
             << " m/s vy=" << state.vy_mps << " m/s w=" << state.w_rpm
             << " RPM\nsetpoint (GUI/CLI): vx=" << state.gui_vx_mps << " m/s vy=" << state.gui_vy_mps
             << " m/s w=" << state.gui_w_rpm << " RPM\nlimits:  " << state.max_speed_mps << " m/s, "
-            << state.max_rotation_rpm << " RPM, wheel " << state.max_wheel_rpm << " RPM\n";
+            << state.max_rotation_rpm << " RPM (twist scale " << state.twist_rotation_scale
+            << "x), wheel " << state.max_wheel_rpm << " RPM\n";
         for (const auto &motor : state.motors) {
           out << "motor " << static_cast<int>(motor.id) << ": cmd=" << motor.commanded_rpm
               << " RPM";

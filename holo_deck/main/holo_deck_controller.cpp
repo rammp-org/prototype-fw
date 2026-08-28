@@ -14,6 +14,7 @@ HoloDeckController::HoloDeckController(const Config &config)
     , status_read_timeout_ms_(config.status_read_timeout_ms)
     , max_speed_mps_(clamp_positive(config.max_speed_mps))
     , max_rotation_rpm_(clamp_positive(config.max_rotation_rpm))
+    , twist_rotation_scale_(clamp_positive(config.twist_rotation_scale))
     , control_timer_({.name = "holo_ctrl",
                       .period = config.control_period,
                       .callback = [this]() { return control_step(); },
@@ -152,6 +153,11 @@ void HoloDeckController::set_max_speed(float max_speed_mps) {
   max_speed_mps_ = clamp_positive(max_speed_mps);
 }
 
+void HoloDeckController::set_twist_rotation_scale(float scale) {
+  std::lock_guard<std::mutex> lock(mutex_);
+  twist_rotation_scale_ = clamp_positive(scale);
+}
+
 void HoloDeckController::set_max_rotation(float max_rotation_rpm) {
   std::lock_guard<std::mutex> lock(mutex_);
   max_rotation_rpm_ = clamp_positive(max_rotation_rpm);
@@ -171,6 +177,7 @@ HoloDeckController::State HoloDeckController::state() const {
   state.gui_w_rpm = gui_w_rpm_;
   state.max_speed_mps = max_speed_mps_;
   state.max_rotation_rpm = max_rotation_rpm_;
+  state.twist_rotation_scale = twist_rotation_scale_;
   state.max_wheel_rpm = max_wheel_rpm_;
   state.motors = motor_status_;
   return state;
@@ -239,7 +246,11 @@ bool HoloDeckController::control_step() {
     if (source_ == Source::JOYSTICK && !require_joystick_recenter_) {
       vx = joystick_forward_ * max_speed_mps_;
       vy = joystick_left_ * max_speed_mps_;
-      w = joystick_ccw_ * max_rotation_rpm_;
+      // The twist scale deliberately lets the commanded rate exceed the
+      // nominal rotation limit (the per-wheel max_wheel_rpm scaling below
+      // still bounds the motors): the platform's rotation authority is much
+      // weaker than translation, so the twist axis needs its own gain.
+      w = joystick_ccw_ * max_rotation_rpm_ * twist_rotation_scale_;
     } else {
       vx = gui_vx_mps_;
       vy = gui_vy_mps_;
