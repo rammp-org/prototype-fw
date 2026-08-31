@@ -15,6 +15,6 @@ set(
   "List of components to include"
   )
 
-project(five_bar_v1)
+project(STEM)
 
 set(CMAKE_CXX_STANDARD 20)

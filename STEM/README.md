@@ -1,7 +1,7 @@
-# five_bar_v1
+# STEM
 
-ESP-IDF firmware project for the five-bar prototype, based on the original
-`five_bar` application.
+ESP-IDF firmware project for the STEM prototype, based on the original
+five-bar application.
 
 ## Development
 

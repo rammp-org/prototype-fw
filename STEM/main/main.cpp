@@ -12,7 +12,7 @@ using namespace std::chrono_literals;
 
 extern "C" void app_main(void) {
   auto &board = espp::Esp32P4Eth::get();
-  espp::Logger logger({.tag = "five_bar_v1", .level = espp::Logger::Verbosity::INFO});
+  espp::Logger logger({.tag = "STEM", .level = espp::Logger::Verbosity::INFO});
 
   logger.info("Bootup");
   if (!board.initialize_ethernet()) {
@@ -64,7 +64,7 @@ extern "C" void app_main(void) {
     } else {
       logger.warn("Motor ID read test failed");
     }
-    auto root_menu = std::make_unique<cli::Menu>("five_bar_v1");
+    auto root_menu = std::make_unique<cli::Menu>("STEM");
     root_menu->Insert(
         "calibration",
         [&actuator_pair](std::ostream &out) {
