@@ -61,7 +61,8 @@ void HoloDeckController::set_gui_translation_normalized(float forward, float lef
   forward = std::clamp(forward, -1.0f, 1.0f);
   left = std::clamp(left, -1.0f, 1.0f);
   float vx = forward * max_speed_mps_;
-  float vy = left * max_speed_mps_;
+  // NOTE: vy is actually rightward, so negate left
+  float vy = -left * max_speed_mps_;
   const float magnitude = std::sqrt(vx * vx + vy * vy);
   if (magnitude > max_speed_mps_ && magnitude > 0.0f) {
     const float scale = max_speed_mps_ / magnitude;
