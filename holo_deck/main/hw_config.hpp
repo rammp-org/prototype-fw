@@ -166,11 +166,11 @@ inline constexpr uint32_t kMotorStatusReadTimeoutMs = 12;
 /// (~58 deg/s) full rotation. Raise it (the RMD-X6-S2 has ample headroom -
 /// 45 output RPM is only ~1620 motor RPM through the 36:1 gear) for a faster
 /// base, or lower it to keep the platform gentle.
-inline constexpr float kMaxWheelRpm = 45.0f;
+inline constexpr float kMaxWheelRpm = 90.0f;
 /// Default (and maximum-selectable) translation speed limits, m/s.
-inline constexpr float kDefaultMaxSpeedMps = 0.25f;
-inline constexpr float kMinSelectableMaxSpeedMps = 0.05f;
-inline constexpr float kMaxSelectableMaxSpeedMps = 0.50f;
+inline constexpr float kDefaultMaxSpeedMps = 1.0f;
+inline constexpr float kMinSelectableMaxSpeedMps = 0.1f;
+inline constexpr float kMaxSelectableMaxSpeedMps = 2.0f;
 /// Default (and maximum-selectable) chassis rotation rate limits, RPM. The
 /// selectable max is matched to what kMaxWheelRpm allows for pure rotation so
 /// the slider is not misleading; a full twist at the max reaches ~10 RPM

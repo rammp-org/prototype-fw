@@ -245,12 +245,14 @@ bool HoloDeckController::control_step() {
 
     if (source_ == Source::JOYSTICK && !require_joystick_recenter_) {
       vx = joystick_forward_ * max_speed_mps_;
-      vy = joystick_left_ * max_speed_mps_;
+      // NOTE: vy is left-positive, but the platform's y-axis is right-positive,
+      //       so we negate it here to match the platform's frame.
+      vy = -joystick_left_ * max_speed_mps_;
       // The twist scale deliberately lets the commanded rate exceed the
       // nominal rotation limit (the per-wheel max_wheel_rpm scaling below
       // still bounds the motors): the platform's rotation authority is much
       // weaker than translation, so the twist axis needs its own gain.
-      w = joystick_ccw_ * max_rotation_rpm_ * twist_rotation_scale_;
+      w = -joystick_ccw_ * max_rotation_rpm_ * twist_rotation_scale_;
     } else {
       vx = gui_vx_mps_;
       vy = gui_vy_mps_;
