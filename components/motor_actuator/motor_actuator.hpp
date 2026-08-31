@@ -3,6 +3,7 @@
 #include <array>
 #include <cstdint>
 #include <functional>
+#include <limits>
 #include <mutex>
 #include <utility>
 
@@ -76,6 +77,8 @@ public:
   bool send_velocity(float velocity_rpm);
   // Reset the software-only position reference; this does not write motor ROM.
   void zero_position();
+  float get_position() const { return virtual_position_degrees_; }
+  bool set_position_limits(float minimum_degrees, float maximum_degrees);
   bool set_position(float position_degrees, float max_speed_rpm);
   bool send_incremental_position(float delta_degrees, float max_speed_rpm);
   bool stop();
@@ -103,4 +106,6 @@ private:
   CommunicationFunction communication_;
   uint8_t motor_id_;
   float virtual_position_degrees_{0.0f};
+  float minimum_position_degrees_{-std::numeric_limits<float>::infinity()};
+  float maximum_position_degrees_{std::numeric_limits<float>::infinity()};
 };

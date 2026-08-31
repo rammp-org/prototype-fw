@@ -299,12 +299,29 @@ void MotorActuator::zero_position() {
   logger_.info("Virtual motor position set to zero");
 }
 
+bool MotorActuator::set_position_limits(float minimum_degrees, float maximum_degrees) {
+  if (minimum_degrees > maximum_degrees) {
+    logger_.error("Position minimum {} exceeds maximum {}", minimum_degrees, maximum_degrees);
+    return false;
+  }
+  minimum_position_degrees_ = minimum_degrees;
+  maximum_position_degrees_ = maximum_degrees;
+  logger_.info("Position limits set to [{}, {}] degrees", minimum_degrees, maximum_degrees);
+  return true;
+}
+
 bool MotorActuator::set_position(float position_degrees, float max_speed_rpm) {
-  const float delta_degrees = position_degrees - virtual_position_degrees_;
+  const float limited_position_degrees =
+      std::clamp(position_degrees, minimum_position_degrees_, maximum_position_degrees_);
+  if (limited_position_degrees != position_degrees) {
+    logger_.warn("Position {} degrees clamped to {} degrees", position_degrees,
+                 limited_position_degrees);
+  }
+  const float delta_degrees = limited_position_degrees - virtual_position_degrees_;
   if (!send_incremental_position(delta_degrees, max_speed_rpm)) {
     return false;
   }
-  virtual_position_degrees_ = position_degrees;
+  virtual_position_degrees_ = limited_position_degrees;
   return true;
 }
 
