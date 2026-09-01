@@ -106,6 +106,7 @@ private:
   CommunicationFunction communication_;
   uint8_t motor_id_;
   float virtual_position_degrees_{0.0f};
+  std::once_flag position_calibration_once_;
   float minimum_position_degrees_{-std::numeric_limits<float>::infinity()};
   float maximum_position_degrees_{std::numeric_limits<float>::infinity()};
 };

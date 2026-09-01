@@ -2,6 +2,7 @@
 
 #include <algorithm>
 #include <cmath>
+#include <mutex>
 
 namespace {
 constexpr gpio_num_t kUnusedGpio = GPIO_NUM_NC;
@@ -194,7 +195,7 @@ bool MotorActuator::read_status(Status &status, uint32_t timeout_ms) {
   status.temperature_c = response.data[1];
   status.torque_raw = read_i16(response.data, 2);
   status.velocity_rpm = static_cast<float>(read_i16(response.data, 4)) / (gear_ratio_ * 6.0f);
-  status.angle_degrees = static_cast<float>(read_i16(response.data, 6)) / gear_ratio_;
+  status.angle_degrees = static_cast<float>(read_i16(response.data, 6));
   return true;
 }
 
@@ -296,6 +297,18 @@ bool MotorActuator::send_velocity(float velocity_rpm) {
 
 void MotorActuator::zero_position() {
   virtual_position_degrees_ = 0.0f;
+  Status status{};
+  if (read_status(status, 100)) {
+    const float virtual_position_bias = status.angle_degrees / 32768.0f * 180.0f / gear_ratio_;
+    logger_.info("Virtual position bias set to {}", virtual_position_bias);
+    std::call_once(position_calibration_once_, [this, virtual_position_bias] {
+      send_incremental_position(virtual_position_bias, 5.0f);
+    });
+  }
+  else {
+    logger_.warn("Failed to read motor status; virtual position bias set to 0");
+  }
+
   logger_.info("Virtual motor position set to zero");
 }
 
@@ -342,6 +355,7 @@ bool MotorActuator::send_incremental_position(float delta_degrees, float max_spe
   command[2] = static_cast<uint8_t>(speed_limit_dps & 0xFF);
   command[3] = static_cast<uint8_t>((speed_limit_dps >> 8) & 0xFF);
   set_i32(command, 4, static_cast<int32_t>(std::lround(motor_delta_centidegrees)));
+  logger_.info("the command bytes: {::02X}", command);
   return send_command(command);
 }
 

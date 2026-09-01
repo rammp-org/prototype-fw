@@ -31,8 +31,8 @@ extern "C" void app_main(void) {
         return can_bus.request(command, response, timeout_ms);
       };
 
-  MotorActuator primary(communicate, 5);
-  MotorActuator secondary(communicate, 6);
+  MotorActuator primary(communicate, 1);
+  MotorActuator secondary(communicate, 2);
   PairedActuator pair(primary, secondary);
 
   PairedActuator::Status status{};
