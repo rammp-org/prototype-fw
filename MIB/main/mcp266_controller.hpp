@@ -99,6 +99,15 @@ public:
   ///        that publish no EDS. CANopen mode only.
   /// \return The number of objects found.
   size_t scan_object_dictionary(uint16_t first_index, uint16_t last_index);
+  /// \brief For every implemented object in [first_index, last_index], read
+  ///        and log its subindex values (records/arrays report their subindex
+  ///        count in subindex 0). Used to map undocumented manufacturer
+  ///        objects. CANopen mode only.
+  /// \return The number of objects dumped.
+  size_t dump_object_subindices(uint16_t first_index, uint16_t last_index);
+  /// \brief Drive M1 in the Basicmicro manufacturer velocity mode (-2)
+  ///        instead of standard profile velocity mode. CANopen mode only.
+  bool drive_m1_speed_manufacturer(int32_t qpps, std::error_code &ec);
   bool read_main_battery_voltage(float &volts, std::error_code &ec);
   bool read_temperature(float &temp_c, std::error_code &ec);
   bool read_status(uint32_t &status_mask, std::error_code &ec);

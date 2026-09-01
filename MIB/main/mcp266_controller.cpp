@@ -689,6 +689,68 @@ size_t Mcp266Controller::scan_object_dictionary(uint16_t first_index, uint16_t l
   return found;
 }
 
+size_t Mcp266Controller::dump_object_subindices(uint16_t first_index, uint16_t last_index) {
+  if (config_.mode != Mode::CANOPEN || !canopen_client_) {
+    return 0;
+  }
+  size_t dumped = 0;
+  canopen_client_->set_log_level(espp::Logger::Verbosity::NONE);
+  for (uint32_t idx = first_index; idx <= last_index; ++idx) {
+    const uint16_t index = static_cast<uint16_t>(idx);
+    std::error_code ec;
+    std::array<uint8_t, 4> data{};
+    const size_t len = canopen_client_->sdo_upload(index, 0, data, ec);
+    const uint32_t abort = ec ? canopen_client_->last_abort_code() : 0;
+    if (ec && (ec != std::errc::protocol_error || abort == 0x06020000)) {
+      continue; // not implemented
+    }
+    // Records/arrays report their subindex count in subindex 0; a write-only
+    // subindex 0 aborts, so fall back to probing a fixed number.
+    uint8_t count = 8;
+    std::string line;
+    if (!ec) {
+      const uint32_t sub0 = espp::detail::canopen::get_le(data.data(), len);
+      line += fmt::format(" [0]=0x{:X}({}B)", sub0, len);
+      if (len == 1 && sub0 > 0 && sub0 <= 32) {
+        count = static_cast<uint8_t>(sub0);
+      }
+    } else {
+      line += fmt::format(" [0]=<abort 0x{:08X}>", abort);
+    }
+    for (uint8_t sub = 1; sub <= count; ++sub) {
+      std::error_code sub_ec;
+      std::array<uint8_t, 4> sub_data{};
+      const size_t sub_len = canopen_client_->sdo_upload(index, sub, sub_data, sub_ec);
+      if (!sub_ec) {
+        line += fmt::format(" [{}]=0x{:X}({}B)", sub,
+                            espp::detail::canopen::get_le(sub_data.data(), sub_len), sub_len);
+      } else if (canopen_client_->last_abort_code() == 0x06090011) {
+        break; // subindex does not exist: past the end of the record
+      } else {
+        line += fmt::format(" [{}]=<abort 0x{:08X}>", sub, canopen_client_->last_abort_code());
+      }
+    }
+    logger_.info("OD 0x{:04X}:{}", index, line);
+    ++dumped;
+  }
+  canopen_client_->set_log_level(config_.log_level);
+  return dumped;
+}
+
+bool Mcp266Controller::drive_m1_speed_manufacturer(int32_t qpps, std::error_code &ec) {
+  ec.clear();
+  if (config_.mode != Mode::CANOPEN || !canopen_client_) {
+    ec = std::make_error_code(std::errc::operation_not_supported);
+    return false;
+  }
+  // Manufacturer velocity mode; the mode display echo is not standardized for
+  // negative modes, so don't fail hard on a mismatch.
+  if (qpps != 0 && !enable_m1(-2, false, ec)) {
+    return false;
+  }
+  return drive_m1_->set_target_velocity(qpps, ec);
+}
+
 bool Mcp266Controller::read_main_battery_voltage(float &volts, std::error_code &ec) {
   ec.clear();
   if (config_.mode == Mode::PACKET_SERIAL && basicmicro_) {

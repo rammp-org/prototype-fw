@@ -171,7 +171,32 @@ extern "C" void app_main(void) {
     od_found += roboclaw.scan_object_dictionary(0x2000, 0x5FFF);
     od_found += roboclaw.scan_object_dictionary(0x6000, 0x6FFF);
     logger.info("OD scan complete: {} objects implemented", od_found);
+    // The manufacturer-specific region almost certainly holds the Basicmicro
+    // settings registers (PID gains etc.); dump every subindex to map it.
+    logger.info("Dumping manufacturer-specific object subindices (0x2000-0x20FF)...");
+    roboclaw.dump_object_subindices(0x2000, 0x20FF);
 #endif
+
+    // Test 0: open-loop duty (manufacturer mode -1). Bypasses every control
+    // loop, so any motion here proves the CAN -> power stage path end to end.
+    constexpr int16_t kTestDuty = 8192; // 25%
+    logger.info("Testing Motor 1 duty command: {} (25%)", kTestDuty);
+    if (!roboclaw.drive_m1_duty(kTestDuty, ec)) {
+      logger.warn("Motor 1 duty command rejected: {}", ec.message());
+    } else {
+      std::this_thread::sleep_for(2s);
+      int32_t position = 0;
+      int32_t speed = 0;
+      uint8_t encoder_status = 0;
+      uint8_t speed_status = 0;
+      if (roboclaw.read_encoder_m1(position, encoder_status, ec) &&
+          roboclaw.read_speed_m1(speed, speed_status, ec)) {
+        logger.info("After 2s at 25% duty: position={}, speed={} counts/s", position, speed);
+      }
+      if (!roboclaw.drive_m1_duty(0, ec)) {
+        logger.warn("Failed to stop Motor 1 after duty test: {}", ec.message());
+      }
+    }
 
     // Test 1: closed-loop velocity. This exercises only the velocity PID
     // (auto-tuned in Motion Studio), so it isolates the CANopen control path
@@ -207,6 +232,37 @@ extern "C" void app_main(void) {
       }
       if (!roboclaw.drive_m1_speed(0, ec)) {
         logger.warn("Failed to stop Motor 1 after velocity test: {}", ec.message());
+      }
+    }
+
+    // Test 1b: manufacturer velocity mode (-2). The MCP advertises only
+    // manufacturer modes in supported-drive-modes (0x6502 = 0x700), so the
+    // standard profile velocity mode may be a no-op even though it is echoed.
+    logger.info("Testing Motor 1 manufacturer velocity mode (-2): target={} counts/s",
+                kTestVelocity);
+    if (!roboclaw.drive_m1_speed_manufacturer(kTestVelocity, ec)) {
+      logger.warn("Motor 1 manufacturer velocity command rejected: {}", ec.message());
+    } else {
+      for (int poll = 1; poll <= kVelocityPolls; ++poll) {
+        std::this_thread::sleep_for(1s);
+        int32_t position = 0;
+        int32_t speed = 0;
+        uint8_t encoder_status = 0;
+        uint8_t speed_status = 0;
+        if (roboclaw.read_encoder_m1(position, encoder_status, ec) &&
+            roboclaw.read_speed_m1(speed, speed_status, ec)) {
+          std::error_code demand_ec;
+          int32_t velocity_demand = 0;
+          const bool demand_ok = roboclaw.read_velocity_demand_m1(velocity_demand, demand_ec);
+          logger.info("Mfr velocity poll {}/{}: position={}, speed={} counts/s, demand={}", poll,
+                      kVelocityPolls, position, speed,
+                      demand_ok ? std::to_string(velocity_demand) : "n/a");
+        } else {
+          logger.warn("Mfr velocity poll {}/{} failed: {}", poll, kVelocityPolls, ec.message());
+        }
+      }
+      if (!roboclaw.drive_m1_speed_manufacturer(0, ec)) {
+        logger.warn("Failed to stop Motor 1 after manufacturer velocity test: {}", ec.message());
       }
     }
 
