@@ -5,7 +5,7 @@
 #include <string>
 #include <system_error>
 
-#include "basicmicro.hpp"
+#include "basicmicro_ext.hpp"
 #include "driver/gpio.h"
 #include "driver/uart.h"
 
@@ -36,9 +36,19 @@ public:
   bool drive_m2_duty(int16_t duty, std::error_code &ec);
   bool stop(std::error_code &ec);
 
+  // --- Control-loop configuration (not reachable via standard DS402) ---
+  bool read_velocity_pid_m1(float &p, float &i, float &d, uint32_t &qpps, std::error_code &ec);
+  bool set_velocity_pid_m1(float p, float i, float d, uint32_t qpps, std::error_code &ec);
+  bool read_position_pid_m1(float &p, float &i, float &d, uint32_t &max_i, uint32_t &deadzone,
+                            int32_t &min_pos, int32_t &max_pos, std::error_code &ec);
+  bool set_position_pid_m1(float p, float i, float d, uint32_t max_i, uint32_t deadzone,
+                           int32_t min_pos, int32_t max_pos, std::error_code &ec);
+  /// \brief Persist the active settings to the MCP's EEPROM (command 94).
+  bool write_settings_to_eeprom(std::error_code &ec);
+
 private:
   Config config_;
-  std::unique_ptr<espp::Basicmicro> driver_;
+  std::unique_ptr<BasicmicroExt> driver_;
   bool uart_installed_{false};
 };
 

@@ -13,6 +13,19 @@ using namespace std::chrono_literals;
 #define MIB_USE_UART_TESTING 0
 #endif
 
+// Probe the MCP's SDO object dictionary at startup to discover which standard
+// and manufacturer-specific objects it implements (it publishes no EDS).
+// Takes about a minute; disable with -DMIB_SCAN_OD=0 once mapped.
+#ifndef MIB_SCAN_OD
+#define MIB_SCAN_OD 1
+#endif
+
+// Write the starter control-loop gains below to the MCP over UART (and save
+// them to EEPROM) before testing. Off by default: review the constants first.
+#ifndef MIB_WRITE_PID_CONFIG
+#define MIB_WRITE_PID_CONFIG 0
+#endif
+
 extern "C" void app_main(void) {
   // Board hardware abstraction
   auto &board = espp::Esp32P4Eth::get();
@@ -69,6 +82,67 @@ extern "C" void app_main(void) {
     }
   }
 #else
+  // The MCP's control-loop parameters (velocity / position PID) are not
+  // reachable through standard DS402 objects, so inspect -- and optionally
+  // write -- them over the Packet Serial UART link before the CAN tests. The
+  // factory-default position PID constants are all zero, in which case
+  // position commands are accepted but never produce motion.
+  {
+    mib::Mcp266UartController uart({});
+    std::error_code uart_ec;
+    if (!uart.initialize(uart_ec)) {
+      logger.warn("UART link unavailable, skipping PID check: {}", uart_ec.message());
+    } else {
+      float vel_p = 0, vel_i = 0, vel_d = 0;
+      uint32_t vel_qpps = 0;
+      if (uart.read_velocity_pid_m1(vel_p, vel_i, vel_d, vel_qpps, uart_ec)) {
+        logger.info("M1 velocity PID: P={:.3f} I={:.3f} D={:.3f} QPPS={}", vel_p, vel_i, vel_d,
+                    vel_qpps);
+      } else {
+        logger.warn("Failed to read M1 velocity PID over UART: {}", uart_ec.message());
+      }
+      float pos_p = 0, pos_i = 0, pos_d = 0;
+      uint32_t pos_max_i = 0, pos_deadzone = 0;
+      int32_t pos_min = 0, pos_max = 0;
+      if (uart.read_position_pid_m1(pos_p, pos_i, pos_d, pos_max_i, pos_deadzone, pos_min,
+                                    pos_max, uart_ec)) {
+        logger.info(
+            "M1 position PID: P={:.3f} I={:.3f} D={:.3f} MaxI={} Deadzone={} range=[{}, {}]",
+            pos_p, pos_i, pos_d, pos_max_i, pos_deadzone, pos_min, pos_max);
+      } else {
+        logger.warn("Failed to read M1 position PID over UART: {}", uart_ec.message());
+      }
+#if MIB_WRITE_PID_CONFIG
+      // Starter gains: velocity loop uses the factory defaults from the MCP
+      // manual; position loop uses conservative Basicmicro-style values.
+      // Tune for the actual motor / encoder before relying on them.
+      constexpr float kVelocityP = 1.0f;
+      constexpr float kVelocityI = 0.5f;
+      constexpr float kVelocityD = 0.25f;
+      constexpr uint32_t kVelocityQpps = 44000;
+      constexpr float kPositionP = 2000.0f;
+      constexpr float kPositionI = 0.0f;
+      constexpr float kPositionD = 4000.0f;
+      constexpr uint32_t kPositionMaxI = 0;
+      constexpr uint32_t kPositionDeadzone = 10;
+      constexpr int32_t kPositionMin = -2'000'000'000;
+      constexpr int32_t kPositionMax = 2'000'000'000;
+      if (!uart.set_velocity_pid_m1(kVelocityP, kVelocityI, kVelocityD, kVelocityQpps,
+                                    uart_ec)) {
+        logger.error("Failed to write M1 velocity PID: {}", uart_ec.message());
+      } else if (!uart.set_position_pid_m1(kPositionP, kPositionI, kPositionD, kPositionMaxI,
+                                           kPositionDeadzone, kPositionMin, kPositionMax,
+                                           uart_ec)) {
+        logger.error("Failed to write M1 position PID: {}", uart_ec.message());
+      } else if (!uart.write_settings_to_eeprom(uart_ec)) {
+        logger.error("Failed to save MCP settings to EEPROM: {}", uart_ec.message());
+      } else {
+        logger.info("M1 velocity + position PID written and saved to EEPROM");
+      }
+#endif
+    }
+  }
+
   mib::Mcp266Controller roboclaw({
       .twai_tx_gpio = GPIO_NUM_17,
       .twai_rx_gpio = GPIO_NUM_16,
@@ -90,6 +164,14 @@ extern "C" void app_main(void) {
     } else {
       logger.warn("MCP266 does not expose an EDS at 0x1021:00: {}", ec.message());
     }
+
+#if MIB_SCAN_OD
+    logger.info("Scanning MCP object dictionary via SDO (0x1000-0x6FFF, takes ~1 minute)...");
+    size_t od_found = roboclaw.scan_object_dictionary(0x1000, 0x1FFF);
+    od_found += roboclaw.scan_object_dictionary(0x2000, 0x5FFF);
+    od_found += roboclaw.scan_object_dictionary(0x6000, 0x6FFF);
+    logger.info("OD scan complete: {} objects implemented", od_found);
+#endif
 
     // Test 1: closed-loop velocity. This exercises only the velocity PID
     // (auto-tuned in Motion Studio), so it isolates the CANopen control path

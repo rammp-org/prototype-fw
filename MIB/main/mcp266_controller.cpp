@@ -653,6 +653,42 @@ bool Mcp266Controller::read_object_dictionary(std::string &eds, std::error_code 
   return !ec;
 }
 
+size_t Mcp266Controller::scan_object_dictionary(uint16_t first_index, uint16_t last_index) {
+  if (config_.mode != Mode::CANOPEN || !canopen_client_) {
+    return 0;
+  }
+  size_t found = 0;
+  // Probing for existence produces an SDO abort for every missing object;
+  // mute the client's per-abort error logging for the duration of the scan.
+  canopen_client_->set_log_level(espp::Logger::Verbosity::NONE);
+  for (uint32_t index = first_index; index <= last_index; ++index) {
+    std::error_code ec;
+    std::array<uint8_t, 4> data{};
+    const size_t len =
+        canopen_client_->sdo_upload(static_cast<uint16_t>(index), 0, data, ec);
+    if (!ec) {
+      const uint32_t value = espp::detail::canopen::get_le(data.data(), len);
+      logger_.info("OD 0x{:04X}:00 = 0x{:08X} ({} bytes)", index, value, len);
+      ++found;
+    } else if (ec == std::errc::protocol_error &&
+               canopen_client_->last_abort_code() != 0x06020000) {
+      // Any abort other than "object does not exist" (e.g. write-only object,
+      // subindex error, segmented/string data) still proves the object exists.
+      logger_.info("OD 0x{:04X}:00 exists (abort 0x{:08X})", index,
+                   canopen_client_->last_abort_code());
+      ++found;
+    } else if (ec == std::errc::timed_out) {
+      logger_.warn("OD scan aborted at 0x{:04X}: node stopped responding", index);
+      break;
+    }
+    if ((index & 0x03FF) == 0x03FF) {
+      logger_.info("OD scan progress: through 0x{:04X}, {} objects so far", index, found);
+    }
+  }
+  canopen_client_->set_log_level(config_.log_level);
+  return found;
+}
+
 bool Mcp266Controller::read_main_battery_voltage(float &volts, std::error_code &ec) {
   ec.clear();
   if (config_.mode == Mode::PACKET_SERIAL && basicmicro_) {

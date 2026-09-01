@@ -93,6 +93,12 @@ public:
   bool read_device_info(std::string &device_name, uint32_t &device_type, std::error_code &ec);
   /// \brief Read the optional CiA 306 EDS object (0x1021:00) from the CANopen node.
   bool read_object_dictionary(std::string &eds, std::error_code &ec);
+  /// \brief Probe every object index in [first_index, last_index] (subindex 0)
+  ///        via SDO upload and log the ones the node implements. Used to
+  ///        discover manufacturer-specific objects on devices (like the MCP266)
+  ///        that publish no EDS. CANopen mode only.
+  /// \return The number of objects found.
+  size_t scan_object_dictionary(uint16_t first_index, uint16_t last_index);
   bool read_main_battery_voltage(float &volts, std::error_code &ec);
   bool read_temperature(float &temp_c, std::error_code &ec);
   bool read_status(uint32_t &status_mask, std::error_code &ec);
