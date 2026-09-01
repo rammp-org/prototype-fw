@@ -64,7 +64,12 @@ public:
   bool drive_m1_speed(int32_t qpps, std::error_code &ec);
   bool drive_m2_speed(int32_t qpps, std::error_code &ec);
   bool drive_speed(int32_t qpps_m1, int32_t qpps_m2, std::error_code &ec);
+  bool set_m1_position_limits(int32_t minimum_position, int32_t maximum_position,
+                              std::error_code &ec);
+  bool get_m1_position_limits(int32_t &minimum_position, int32_t &maximum_position,
+                              std::error_code &ec);
   bool move_m1_to_position(int32_t target_position, uint32_t profile_velocity,
+                           uint32_t profile_acceleration, uint32_t profile_deceleration,
                            std::error_code &ec);
 
   // --- Stop Motors ---

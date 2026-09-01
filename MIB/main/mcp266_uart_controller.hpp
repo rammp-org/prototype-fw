@@ -17,7 +17,7 @@ public:
     uart_port_t uart_port{UART_NUM_1};
     gpio_num_t tx_gpio{GPIO_NUM_4}; // Connect to MCP266 S1 (RX)
     gpio_num_t rx_gpio{GPIO_NUM_5}; // Connect to MCP266 S2 (TX)
-    int baudrate{115200};
+    int baudrate{38400};
     uint8_t address{128};
   };
 

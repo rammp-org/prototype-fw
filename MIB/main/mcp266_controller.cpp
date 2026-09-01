@@ -409,8 +409,39 @@ bool Mcp266Controller::drive_m2_speed(int32_t qpps, std::error_code &ec) {
   return false;
 }
 
+bool Mcp266Controller::set_m1_position_limits(int32_t minimum_position, int32_t maximum_position,
+                                               std::error_code &ec) {
+  ec.clear();
+  if (minimum_position > maximum_position) {
+    ec = std::make_error_code(std::errc::invalid_argument);
+    return false;
+  }
+  if (config_.mode != Mode::CANOPEN || !canopen_client_) {
+    ec = std::make_error_code(std::errc::operation_not_supported);
+    return false;
+  }
+  return canopen_client_->write_i32(0x607B, 1, minimum_position, ec) &&
+         canopen_client_->write_i32(0x607B, 2, maximum_position, ec);
+}
+
+bool Mcp266Controller::get_m1_position_limits(int32_t &minimum_position, int32_t &maximum_position,
+                                               std::error_code &ec) {
+  ec.clear();
+  if (config_.mode != Mode::CANOPEN || !canopen_client_) {
+    ec = std::make_error_code(std::errc::operation_not_supported);
+    return false;
+  }
+  minimum_position = canopen_client_->read_i32(0x607B, 1, ec);
+  if (ec) {
+    return false;
+  }
+  maximum_position = canopen_client_->read_i32(0x607B, 2, ec);
+  return !ec;
+}
+
 bool Mcp266Controller::move_m1_to_position(int32_t target_position, uint32_t profile_velocity,
-                                            std::error_code &ec) {
+                                            uint32_t profile_acceleration,
+                                            uint32_t profile_deceleration, std::error_code &ec) {
   ec.clear();
   if (config_.mode != Mode::CANOPEN || !canopen_client_) {
     ec = std::make_error_code(std::errc::operation_not_supported);
@@ -419,8 +450,10 @@ bool Mcp266Controller::move_m1_to_position(int32_t target_position, uint32_t pro
   if (!enable_axis(kAxisM1, 1, false, ec)) {
     return false;
   }
-  if (!canopen_client_->write_u32(0x6081, 0, profile_velocity, ec) ||
-      !canopen_client_->write_i32(0x607A, 0, target_position, ec)) {
+  if (!(canopen_client_->write_u32(0x6083, 0, profile_acceleration, ec) &&
+        canopen_client_->write_u32(0x6084, 0, profile_deceleration, ec) &&
+        canopen_client_->write_u32(0x6081, 0, profile_velocity, ec) &&
+        canopen_client_->write_i32(0x607A, 0, target_position, ec))) {
     return false;
   }
   if (!canopen_client_->write_u16(0x6040, 0, 0x001F, ec)) {
