@@ -1,4 +1,5 @@
 #include <chrono>
+#include <string>
 #include <thread>
 
 #include "esp32-p4-eth.hpp"
@@ -90,6 +91,45 @@ extern "C" void app_main(void) {
       logger.warn("MCP266 does not expose an EDS at 0x1021:00: {}", ec.message());
     }
 
+    // Test 1: closed-loop velocity. This exercises only the velocity PID
+    // (auto-tuned in Motion Studio), so it isolates the CANopen control path
+    // from the position-loop configuration.
+    constexpr int32_t kTestVelocity = 500;
+    constexpr int kVelocityPolls = 3;
+    logger.info("Testing Motor 1 velocity command: target={} counts/s", kTestVelocity);
+    if (!roboclaw.drive_m1_speed(kTestVelocity, ec)) {
+      logger.warn("Motor 1 velocity command rejected: {}", ec.message());
+    } else {
+      for (int poll = 1; poll <= kVelocityPolls; ++poll) {
+        std::this_thread::sleep_for(1s);
+        uint32_t status = 0;
+        int32_t position = 0;
+        int32_t speed = 0;
+        uint8_t encoder_status = 0;
+        uint8_t speed_status = 0;
+        const bool status_ok = roboclaw.read_status(status, ec);
+        const bool position_ok = roboclaw.read_encoder_m1(position, encoder_status, ec);
+        const bool speed_ok = roboclaw.read_speed_m1(speed, speed_status, ec);
+        if (status_ok && position_ok && speed_ok) {
+          std::error_code demand_ec;
+          int32_t velocity_demand = 0;
+          const bool demand_ok = roboclaw.read_velocity_demand_m1(velocity_demand, demand_ec);
+          logger.info(
+              "Velocity poll {}/{}: statusword=0x{:04X}, position={}, speed={} counts/s, "
+              "velocity demand={}",
+              poll, kVelocityPolls, status, position, speed,
+              demand_ok ? std::to_string(velocity_demand) : "n/a");
+        } else {
+          logger.warn("Velocity poll {}/{} failed: {}", poll, kVelocityPolls, ec.message());
+        }
+      }
+      if (!roboclaw.drive_m1_speed(0, ec)) {
+        logger.warn("Failed to stop Motor 1 after velocity test: {}", ec.message());
+      }
+    }
+
+    // Test 2: profile position move. On top of the velocity PID this needs the
+    // position loop configured on the MCP (position PID gains, max speed).
     constexpr int32_t kMotor1MinimumPosition = -20'000;
     constexpr int32_t kMotor1MaximumPosition = 20'000;
     constexpr int32_t kMotor1TargetPosition = 10'000;
@@ -126,8 +166,16 @@ extern "C" void app_main(void) {
           const bool status_ok = roboclaw.read_status(status, ec);
           const bool position_ok = roboclaw.read_encoder_m1(position, encoder_status, ec);
           if (status_ok && position_ok) {
-            logger.info("Position poll {}/{}: statusword=0x{:04X}, M1 position={}", poll,
-                        kPositionPolls, status, position);
+            // The demand value is the profile generator's instantaneous
+            // command: if it ramps toward the target while the actual position
+            // stays put, the profile is running but the position loop is not
+            // driving the motor (PID gains / max speed unset on the MCP).
+            std::error_code demand_ec;
+            int32_t position_demand = 0;
+            const bool demand_ok = roboclaw.read_position_demand_m1(position_demand, demand_ec);
+            logger.info("Position poll {}/{}: statusword=0x{:04X}, M1 position={}, demand={}",
+                        poll, kPositionPolls, status, position,
+                        demand_ok ? std::to_string(position_demand) : "n/a");
           } else {
             logger.warn("Position poll {}/{} failed: {}", poll, kPositionPolls, ec.message());
           }

@@ -83,6 +83,12 @@ public:
   bool read_speed_m1(int32_t &qpps, uint8_t &status, std::error_code &ec);
   bool read_speed_m2(int32_t &qpps, uint8_t &status, std::error_code &ec);
 
+  /// \brief Read the M1 position demand value (0x6062): the profile
+  ///        generator's instantaneous position command. CANopen mode only.
+  bool read_position_demand_m1(int32_t &demand, std::error_code &ec);
+  /// \brief Read the M1 velocity demand value (0x606B). CANopen mode only.
+  bool read_velocity_demand_m1(int32_t &demand, std::error_code &ec);
+
   // --- Telemetry & Diagnostics ---
   bool read_device_info(std::string &device_name, uint32_t &device_type, std::error_code &ec);
   /// \brief Read the optional CiA 306 EDS object (0x1021:00) from the CANopen node.

@@ -574,6 +574,26 @@ bool Mcp266Controller::read_encoders(int32_t &count_m1, int32_t &count_m2, std::
   return read_encoder_m1(count_m1, st1, ec) && read_encoder_m2(count_m2, st2, ec);
 }
 
+bool Mcp266Controller::read_position_demand_m1(int32_t &demand, std::error_code &ec) {
+  ec.clear();
+  if (config_.mode != Mode::CANOPEN || !canopen_client_) {
+    ec = std::make_error_code(std::errc::operation_not_supported);
+    return false;
+  }
+  demand = canopen_client_->read_i32(0x6062, 0, ec);
+  return !ec;
+}
+
+bool Mcp266Controller::read_velocity_demand_m1(int32_t &demand, std::error_code &ec) {
+  ec.clear();
+  if (config_.mode != Mode::CANOPEN || !canopen_client_) {
+    ec = std::make_error_code(std::errc::operation_not_supported);
+    return false;
+  }
+  demand = canopen_client_->read_i32(0x606B, 0, ec);
+  return !ec;
+}
+
 bool Mcp266Controller::read_speed_m1(int32_t &qpps, uint8_t &status, std::error_code &ec) {
   ec.clear();
   if (config_.mode == Mode::PACKET_SERIAL && basicmicro_) {
