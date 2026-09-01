@@ -113,6 +113,10 @@ private:
   /// verifying the statusword after each step.
   bool enable_axis(const AxisObjects &axis, int8_t mode, bool verify_mode,
                    std::error_code &ec);
+  /// M1 enable path via the espp::Ds402Drive helper: select the mode
+  /// (optionally verified against 0x6061), clear any latched fault, and walk
+  /// the drive to Operation Enabled.
+  bool enable_m1(int8_t mode, bool verify_mode, std::error_code &ec);
   bool wait_for_statusword(const AxisObjects &axis, uint16_t mask, uint16_t expected,
                            const char *step, std::error_code &ec);
   void log_statusword(const AxisObjects &axis, const char *step, uint16_t statusword) const;

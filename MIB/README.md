@@ -21,8 +21,8 @@ ESP-IDF firmware project for the **MIB** prototype using the ESP32-P4-ETH board 
 
 | Interface | Signal | ESP32-P4 GPIO | Description |
 |-----------|--------|---------------|-------------|
-| **TWAI / CAN** | TX | GPIO 16 | CAN Transceiver TXD (1 Mbps bus speed) |
-| **TWAI / CAN** | RX | GPIO 17 | CAN Transceiver RXD (1 Mbps bus speed) |
+| **TWAI / CAN** | TX | GPIO 17 | CAN Transceiver TXD (1 Mbps bus speed) |
+| **TWAI / CAN** | RX | GPIO 16 | CAN Transceiver RXD (1 Mbps bus speed) |
 | **Ethernet** | RMII PHY | Standard RMII | Board default (50 MHz REF_CLK on GPIO 50, PHY RST on GPIO 51) |
 
 *Note: Ensure proper 120 Ω CAN bus termination resistors are present on the TWAI network.*

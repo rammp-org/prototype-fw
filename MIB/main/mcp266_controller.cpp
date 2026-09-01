@@ -98,7 +98,12 @@ bool Mcp266Controller::init_canopen(std::error_code &ec) {
       .on_heartbeat = nullptr,
   });
 
-  drive_m1_ = std::make_unique<espp::Ds402Drive>(*canopen_client_);
+  drive_m1_ = std::make_unique<espp::Ds402Drive>(*canopen_client_,
+                                                 espp::Ds402Drive::Config{
+                                                     .state_timeout = 1s,
+                                                     .poll_period = 25ms,
+                                                     .log_level = config_.log_level,
+                                                 });
 
   // Send NMT start to the node
   if (!canopen_client_->nmt_start(ec)) {
@@ -323,19 +328,62 @@ bool Mcp266Controller::enable_axis(const AxisObjects &axis, int8_t mode, bool ve
     return false;
   }
 
+  // The CiA 402 state lives in statusword bits 0-3, 5 and 6 (mask 0x6F); bit 4
+  // (voltage enabled) merely reflects main power and must not be matched.
   // Shutdown -> Ready to switch on (statusword xxxx xxxx x01x 0001)
   if (!canopen_client_->write_u16(axis.controlword, 0, 0x0006, ec) ||
-      !wait_for_statusword(axis, 0x007F, 0x0021, "Ready to switch on", ec)) {
+      !wait_for_statusword(axis, 0x006F, 0x0021, "Ready to switch on", ec)) {
     return false;
   }
   // Switch On -> Switched on (statusword xxxx xxxx x01x 0011)
   if (!canopen_client_->write_u16(axis.controlword, 0, 0x0007, ec) ||
-      !wait_for_statusword(axis, 0x007F, 0x0033, "Switched on", ec)) {
+      !wait_for_statusword(axis, 0x006F, 0x0023, "Switched on", ec)) {
     return false;
   }
   // Enable Operation -> Operation enabled (statusword xxxx xxxx x01x 0111)
   if (!canopen_client_->write_u16(axis.controlword, 0, 0x000F, ec) ||
-      !wait_for_statusword(axis, 0x007F, 0x0037, "Operation enabled", ec)) {
+      !wait_for_statusword(axis, 0x006F, 0x0027, "Operation enabled", ec)) {
+    return false;
+  }
+  return true;
+}
+
+bool Mcp266Controller::enable_m1(int8_t mode, bool verify_mode, std::error_code &ec) {
+  ec.clear();
+  if (!canopen_client_->write_i8(kAxisM1.mode, 0, mode, ec)) {
+    logger_.error("M1: failed to set mode {}: {}", mode, ec.message());
+    return false;
+  }
+  std::this_thread::sleep_for(25ms);
+  const int8_t display = canopen_client_->read_i8(kAxisM1.mode_display, 0, ec);
+  if (ec) {
+    logger_.error("M1: mode display read failed: {}", ec.message());
+    return false;
+  }
+  if (display != mode) {
+    if (verify_mode) {
+      logger_.error("M1: mode {} rejected, drive reports {}", mode, display);
+      ec = std::make_error_code(std::errc::not_supported);
+      return false;
+    }
+    logger_.warn("M1: requested mode {}, drive reports {}; continuing", mode, display);
+  }
+
+  const auto state = drive_m1_->get_state(ec);
+  if (ec) {
+    logger_.error("M1: statusword read failed: {}", ec.message());
+    return false;
+  }
+  if (state == espp::Ds402Drive::State::Fault ||
+      state == espp::Ds402Drive::State::FaultReactionActive) {
+    logger_.warn("M1: drive is in fault; attempting fault reset");
+    if (!drive_m1_->fault_reset(ec)) {
+      logger_.error("M1: fault reset failed: {}", ec.message());
+      return false;
+    }
+  }
+  if (!drive_m1_->enable_operation(ec)) {
+    logger_.error("M1: enable operation failed: {}", ec.message());
     return false;
   }
   return true;
@@ -349,7 +397,9 @@ bool Mcp266Controller::drive_m1_duty(int16_t duty, std::error_code &ec) {
     return basicmicro_->drive_m1_duty(duty, ec);
   }
   if (config_.mode == Mode::CANOPEN && canopen_client_) {
-    if (duty != 0 && !enable_axis(kAxisM1, -1, true, ec)) {
+    // Duty mode (-1) is manufacturer-specific and may not be echoed in the
+    // mode display, so don't fail hard on a mismatch.
+    if (duty != 0 && !enable_m1(-1, false, ec)) {
       return false;
     }
     return canopen_client_->write_i32(kAxisM1.target, 0, static_cast<int32_t>(duty), ec);
@@ -363,7 +413,7 @@ bool Mcp266Controller::drive_m2_duty(int16_t duty, std::error_code &ec) {
     return basicmicro_->drive_m2_duty(duty, ec);
   }
   if (config_.mode == Mode::CANOPEN && canopen_client_) {
-    if (duty != 0 && !enable_axis(kAxisM2, -1, true, ec)) {
+    if (duty != 0 && !enable_axis(kAxisM2, -1, false, ec)) {
       return false;
     }
     return canopen_client_->write_i32(kAxisM2.target, 0, static_cast<int32_t>(duty), ec);
@@ -387,10 +437,12 @@ bool Mcp266Controller::drive_m1_speed(int32_t qpps, std::error_code &ec) {
     return basicmicro_->drive_m1_speed(qpps, ec);
   }
   if (config_.mode == Mode::CANOPEN && canopen_client_) {
-    if (qpps != 0 && !enable_axis(kAxisM1, 3, true, ec)) {
+    if (qpps != 0 &&
+        !enable_m1(static_cast<int8_t>(espp::Ds402Drive::OperatingMode::ProfileVelocity), true,
+                   ec)) {
       return false;
     }
-    return canopen_client_->write_i32(kAxisM1.target, 0, qpps, ec);
+    return drive_m1_->set_target_velocity(qpps, ec);
   }
   return false;
 }
@@ -447,20 +499,19 @@ bool Mcp266Controller::move_m1_to_position(int32_t target_position, uint32_t pro
     ec = std::make_error_code(std::errc::operation_not_supported);
     return false;
   }
-  if (!enable_axis(kAxisM1, 1, false, ec)) {
+  if (!enable_m1(static_cast<int8_t>(espp::Ds402Drive::OperatingMode::ProfilePosition), false,
+                 ec)) {
     return false;
   }
-  if (!(canopen_client_->write_u32(0x6083, 0, profile_acceleration, ec) &&
-        canopen_client_->write_u32(0x6084, 0, profile_deceleration, ec) &&
-        canopen_client_->write_u32(0x6081, 0, profile_velocity, ec) &&
-        canopen_client_->write_i32(0x607A, 0, target_position, ec))) {
+  if (!(drive_m1_->set_profile_acceleration(profile_acceleration, ec) &&
+        drive_m1_->set_profile_deceleration(profile_deceleration, ec) &&
+        drive_m1_->set_profile_velocity(profile_velocity, ec))) {
     return false;
   }
-  if (!canopen_client_->write_u16(0x6040, 0, 0x001F, ec)) {
-    return false;
-  }
-  std::this_thread::sleep_for(25ms);
-  return canopen_client_->write_u16(0x6040, 0, 0x000F, ec);
+  // Writes 0x607A and performs the full new-set-point handshake: raise
+  // controlword bit 4 (with bit 5, change set immediately), wait for the
+  // set-point acknowledge (statusword bit 12), then release bit 4.
+  return drive_m1_->set_target_position(target_position, ec);
 }
 
 bool Mcp266Controller::drive_speed(int32_t qpps_m1, int32_t qpps_m2, std::error_code &ec) {
