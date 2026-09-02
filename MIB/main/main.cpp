@@ -10,12 +10,14 @@
 
 using namespace std::chrono_literals;
 
-// Probe the MCP's SDO object dictionary at startup to discover which standard
-// and manufacturer-specific objects it implements (it publishes no EDS).
-// Takes about a minute; enable with -DMIB_SCAN_OD=1 when mapping a device.
+// Probe the MCP's SDO object dictionary at startup to discover which objects
+// it implements (it publishes no EDS). Takes ~1 minute; enable with
+// -DMIB_SCAN_OD=1 when mapping a device.
 #ifndef MIB_SCAN_OD
 #define MIB_SCAN_OD 0
 #endif
+
+using Axis = mib::Mcp266Controller::Axis;
 
 extern "C" void app_main(void) {
   auto &board = espp::Esp32P4Eth::get();
@@ -60,23 +62,19 @@ extern "C" void app_main(void) {
     roboclaw.dump_object_subindices(0x2000, 0x20FF);
 #endif
 
-    // --- One-time MCP configuration for CANopen control ---
-    // Clear any latched e-stop / safety lockout (no-op if nothing is latched).
-    roboclaw.try_estop_reset(ec);
+    // --- One-time per-boot MCP configuration ---
+    // Clear any latched e-stop (no-op if nothing is latched).
+    roboclaw.reset_estop(ec);
     // Configure the M1 position loop: widen the min/max clamp (factory [0, 0]
-    // forces every target to zero) and ensure the position P gain is non-zero.
-    // The MCP reverts to EEPROM on power-up, so this must run every boot.
-    if (!roboclaw.configure_m1_position_loop(-2'000'000'000, 2'000'000'000, ec)) {
+    // forces every target to zero) and ensure a non-zero position P gain.
+    // The MCP reverts to EEPROM on power-up, so this runs every boot.
+    if (!roboclaw.configure_position_loop(Axis::M1, -2'000'000'000, 2'000'000'000, ec)) {
       logger.warn("Could not configure the M1 position loop: {}", ec.message());
     }
-    // CiA 402 software position limits.
-    constexpr int32_t kPositionMin = -20'000;
-    constexpr int32_t kPositionMax = 20'000;
-    if (!roboclaw.set_m1_position_limits(kPositionMin, kPositionMax, ec)) {
-      logger.warn("Failed to set M1 position limits: {}", ec.message());
+    if (!roboclaw.set_position_limits(Axis::M1, -20'000, 20'000, ec)) {
+      logger.warn("Failed to set M1 software position limits: {}", ec.message());
     }
 
-    // Report telemetry.
     float volts = 0.0f, temp_c = 0.0f;
     if (roboclaw.read_main_battery_voltage(volts, ec)) {
       logger.info("Main battery: {:.1f} V", volts);
@@ -86,20 +84,19 @@ extern "C" void app_main(void) {
     }
 
     constexpr uint32_t kProfileVelocity = 500;
-    constexpr uint32_t kProfileAcceleration = 500;
-    constexpr uint32_t kProfileDeceleration = 500;
+    constexpr uint32_t kProfileAccel = 500;
+    constexpr uint32_t kProfileDecel = 500;
     constexpr int32_t kPositionTolerance = 100; // encoder counts
 
     auto read_position = [&]() -> int32_t {
       int32_t position = 0;
-      uint8_t encoder_status = 0;
       std::error_code read_ec;
-      roboclaw.read_encoder_m1(position, encoder_status, read_ec);
+      roboclaw.read_encoder(Axis::M1, position, read_ec);
       return position;
     };
     auto command_position = [&](int32_t target) {
-      return roboclaw.move_m1_to_position(target, kProfileVelocity, kProfileAcceleration,
-                                          kProfileDeceleration, ec);
+      return roboclaw.move_to_position(Axis::M1, target, kProfileVelocity, kProfileAccel,
+                                       kProfileDecel, ec);
     };
     // Wait for the motor to arrive at a target, logging progress once a second.
     auto wait_until_reached = [&](int32_t target, std::chrono::seconds timeout) -> bool {
@@ -117,9 +114,8 @@ extern "C" void app_main(void) {
         }
         if ((++iteration % 4) == 0) {
           int32_t speed = 0;
-          uint8_t speed_status = 0;
           std::error_code speed_ec;
-          roboclaw.read_speed_m1(speed, speed_status, speed_ec);
+          roboclaw.read_speed(Axis::M1, speed, speed_ec);
           logger.info("  moving: position={} speed={} counts/s (target {})", position, speed,
                       target);
         }
@@ -129,7 +125,7 @@ extern "C" void app_main(void) {
       return false;
     };
 
-    // --- Position setpoint sequence (CiA 402 profile position mode) ---
+    // --- Position setpoint sequence ---
     logger.info("=== Position setpoint sequence ===");
     constexpr std::array<int32_t, 4> kPositionSequence{10'000, -10'000, 5'000, 0};
     for (size_t i = 0; i < kPositionSequence.size(); ++i) {
@@ -141,36 +137,6 @@ extern "C" void app_main(void) {
       }
       wait_until_reached(target, 30s);
     }
-
-    // --- Velocity setpoint sequence (mirrored packet-serial speed command) ---
-    // drive_m1_speed() releases the profile-position hold left by the sequence
-    // above before writing the speed, so the position loop no longer fights it.
-    logger.info("=== Velocity setpoint sequence ===");
-    constexpr std::array<int32_t, 4> kVelocitySequence{400, -400, 800, 0};
-    for (size_t i = 0; i < kVelocitySequence.size(); ++i) {
-      const int32_t target = kVelocitySequence[i];
-      logger.info("Velocity setpoint {}/{}: {} counts/s", i + 1, kVelocitySequence.size(),
-                  target);
-      if (!roboclaw.drive_m1_speed(target, ec)) {
-        logger.warn("Velocity command rejected: {}", ec.message());
-        continue;
-      }
-      for (int poll = 0; poll < 3; ++poll) {
-        std::this_thread::sleep_for(1s);
-        int32_t speed = 0;
-        uint8_t speed_status = 0;
-        std::error_code speed_ec;
-        roboclaw.read_speed_m1(speed, speed_status, speed_ec);
-        uint32_t sw = 0;
-        int32_t vel_demand = 0;
-        std::error_code diag_ec;
-        roboclaw.read_status(sw, diag_ec);
-        roboclaw.read_velocity_demand_m1(vel_demand, diag_ec);
-        logger.info("  velocity: target={} actual={} counts/s, position={} sw=0x{:04X} demand={}",
-                    target, speed, read_position(), sw, vel_demand);
-      }
-    }
-    roboclaw.drive_m1_speed(0, ec);
 
     // --- Continuous position ping-pong, driven from the status loop below ---
     logger.info("=== Continuous position ping-pong between +/-{} ===", kPingPongTarget);
@@ -197,19 +163,18 @@ extern "C" void app_main(void) {
       have_eth_status = true;
     }
 
-    uint32_t status = 0;
+    uint16_t statusword = 0;
     int32_t encoder_value = 0;
-    uint8_t encoder_status = 0;
-    const bool status_ok = roboclaw.read_status(status, ec);
-    const bool encoder_ok = roboclaw.read_encoder_m1(encoder_value, encoder_status, ec);
+    const bool status_ok = roboclaw.read_statusword(Axis::M1, statusword, ec);
+    const bool encoder_ok = roboclaw.read_encoder(Axis::M1, encoder_value, ec);
     if (status_ok && encoder_ok) {
-      logger.info("MCP266 CANopen poll: statusword=0x{:04X}, M1 encoder={}, target={}", status,
+      logger.info("MCP266 CANopen poll: statusword=0x{:04X}, M1 encoder={}, target={}", statusword,
                   encoder_value, pingpong_active ? std::to_string(pingpong_target) : "idle");
       // Bounce between +/-kPingPongTarget so motion stays observable.
       if (pingpong_active && std::abs(encoder_value - pingpong_target) <= 100) {
         pingpong_target = -pingpong_target;
         logger.info("Ping-pong: new target {}", pingpong_target);
-        if (!roboclaw.move_m1_to_position(pingpong_target, 500, 500, 500, ec)) {
+        if (!roboclaw.move_to_position(Axis::M1, pingpong_target, 500, 500, 500, ec)) {
           logger.warn("Ping-pong position command rejected: {}", ec.message());
         }
       }

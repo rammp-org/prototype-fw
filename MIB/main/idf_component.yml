@@ -3,12 +3,17 @@ dependencies:
   idf:
     version: '>=5.3'
   espp/esp32-p4-eth: '>=1.0'
-  # Local override: carries the fix for the TX frame-lifetime crash (the
-  # esp_driver_twai driver reads the queued twai_frame_t from the TX ISR, so
-  # transmit() must keep it alive until on_tx_done). Drop the override once an
-  # espp/twai release includes it.
+  # Local overrides carry fixes/features not yet in an espp release; drop each
+  # override once an espp release includes it.
+  #  - twai: TX frame-lifetime crash fix (the esp_driver_twai driver reads the
+  #    queued twai_frame_t from the TX ISR, so transmit() must keep it alive
+  #    until on_tx_done).
+  #  - canopen: Ds402Drive axis object-offset, so M2 (objects at +0x800) is
+  #    driven by the same helper as M1.
   espp/twai:
     version: '>=1.0'
     override_path: '../../../../esp-cpp/espp/components/twai'
-  espp/canopen: '>=1.0'
+  espp/canopen:
+    version: '>=1.0'
+    override_path: '../../../../esp-cpp/espp/components/canopen'
   espp/logger: '>=1.0'
