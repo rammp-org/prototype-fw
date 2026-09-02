@@ -1,5 +1,6 @@
 #pragma once
 
+#include <array>
 #include <chrono>
 #include <cstdint>
 #include <memory>
@@ -118,6 +119,21 @@ public:
   ///        mirror (0x203F). The MCP clamps position targets to
   ///        [min, max], which is [0, 0] from the factory.
   bool configure_m1_position_range(int32_t min_pos, int32_t max_pos, std::error_code &ec);
+  /// \brief Read the raw 7-value M1 position PID record (0x203F subs 1-7).
+  bool read_position_pid_m1_raw(std::array<int32_t, 7> &values, std::error_code &ec);
+  /// \brief Write the raw 7-value M1 position PID record via 0x203D and
+  ///        verify it via the 0x203F readback.
+  bool write_position_pid_m1_raw(const std::array<int32_t, 7> &values, std::error_code &ec);
+  /// \brief Attempt an E-stop reset (packet-serial command 200 mirrored at
+  ///        write-only 0x20C8) and log the E-stop lock state (0x20CA).
+  ///        Harmless when no e-stop is latched.
+  bool try_estop_reset(std::error_code &ec);
+  /// \brief Remap RPDO1 to [controlword (16 bit), target position (32 bit)]
+  ///        using the standard disable -> clear -> map -> enable sequence.
+  bool map_rpdo1_for_position(std::error_code &ec);
+  /// \brief Send one RPDO1 frame with the given controlword and target
+  ///        position (requires map_rpdo1_for_position), followed by a SYNC.
+  bool send_position_rpdo(uint16_t controlword, int32_t target, std::error_code &ec);
   /// \brief Build and transmit each enabled RPDO (COB-ID from 0x140x:1,
   ///        layout from the 0x160x mapping), filling mapped command objects
   ///        (controlword, modes, target velocity/position/torque) with the
@@ -171,6 +187,9 @@ private:
   // Packet Serial Mode
   std::unique_ptr<espp::Basicmicro> basicmicro_;
   QueueHandle_t serial_rx_queue_{nullptr};
+
+  // COB-ID of RPDO1 once map_rpdo1_for_position() succeeds (0 = unmapped).
+  uint32_t rpdo1_cob_{0};
 };
 
 } // namespace mib

@@ -184,146 +184,10 @@ extern "C" void app_main(void) {
     roboclaw.dump_object_subindices(0x1A00, 0x1A0F);
 #endif
 
-    // Test 0: open-loop duty (manufacturer mode -1). Bypasses every control
-    // loop, so any motion here proves the CAN -> power stage path end to end.
-    constexpr int16_t kTestDuty = 8192; // 25%
-    logger.info("Testing Motor 1 duty command: {} (25%)", kTestDuty);
-    if (!roboclaw.drive_m1_duty(kTestDuty, ec)) {
-      logger.warn("Motor 1 duty command rejected: {}", ec.message());
-    } else {
-      std::this_thread::sleep_for(2s);
-      int32_t position = 0;
-      int32_t speed = 0;
-      uint8_t encoder_status = 0;
-      uint8_t speed_status = 0;
-      if (roboclaw.read_encoder_m1(position, encoder_status, ec) &&
-          roboclaw.read_speed_m1(speed, speed_status, ec)) {
-        logger.info("After 2s at 25% duty: position={}, speed={} counts/s", position, speed);
-      }
-      if (!roboclaw.drive_m1_duty(0, ec)) {
-        logger.warn("Failed to stop Motor 1 after duty test: {}", ec.message());
-      }
-    }
-
-    // Test 0b: duty via the target torque object (0x6071, per-mille). In the
-    // manufacturer duty mode the target may be sampled from 0x6071 rather
-    // than 0x60FF.
-    logger.info("Testing Motor 1 duty via 0x6071: 250 per-mille (25%)");
-    if (!roboclaw.drive_m1_duty_via_torque(250, ec)) {
-      logger.warn("Motor 1 duty-via-torque command rejected: {}", ec.message());
-    } else {
-      std::this_thread::sleep_for(2s);
-      int32_t position = 0;
-      int32_t speed = 0;
-      uint8_t encoder_status = 0;
-      uint8_t speed_status = 0;
-      if (roboclaw.read_encoder_m1(position, encoder_status, ec) &&
-          roboclaw.read_speed_m1(speed, speed_status, ec)) {
-        logger.info("After 2s at 25% via 0x6071: position={}, speed={} counts/s", position,
-                    speed);
-      }
-      if (!roboclaw.drive_m1_duty_via_torque(0, ec)) {
-        logger.warn("Failed to stop Motor 1 after duty-via-torque test: {}", ec.message());
-      }
-    }
-
-    // Test 1: closed-loop velocity. This exercises only the velocity PID
-    // (auto-tuned in Motion Studio), so it isolates the CANopen control path
-    // from the position-loop configuration.
-    constexpr int32_t kTestVelocity = 500;
-    constexpr int kVelocityPolls = 3;
-    logger.info("Testing Motor 1 velocity command: target={} counts/s", kTestVelocity);
-    if (!roboclaw.drive_m1_speed(kTestVelocity, ec)) {
-      logger.warn("Motor 1 velocity command rejected: {}", ec.message());
-    } else {
-      for (int poll = 1; poll <= kVelocityPolls; ++poll) {
-        std::this_thread::sleep_for(1s);
-        uint32_t status = 0;
-        int32_t position = 0;
-        int32_t speed = 0;
-        uint8_t encoder_status = 0;
-        uint8_t speed_status = 0;
-        const bool status_ok = roboclaw.read_status(status, ec);
-        const bool position_ok = roboclaw.read_encoder_m1(position, encoder_status, ec);
-        const bool speed_ok = roboclaw.read_speed_m1(speed, speed_status, ec);
-        if (status_ok && position_ok && speed_ok) {
-          std::error_code demand_ec;
-          int32_t velocity_demand = 0;
-          const bool demand_ok = roboclaw.read_velocity_demand_m1(velocity_demand, demand_ec);
-          logger.info(
-              "Velocity poll {}/{}: statusword=0x{:04X}, position={}, speed={} counts/s, "
-              "velocity demand={}",
-              poll, kVelocityPolls, status, position, speed,
-              demand_ok ? std::to_string(velocity_demand) : "n/a");
-        } else {
-          logger.warn("Velocity poll {}/{} failed: {}", poll, kVelocityPolls, ec.message());
-        }
-      }
-      if (!roboclaw.drive_m1_speed(0, ec)) {
-        logger.warn("Failed to stop Motor 1 after velocity test: {}", ec.message());
-      }
-    }
-
-    // Test 1b: manufacturer velocity mode (-2). The MCP advertises only
-    // manufacturer modes in supported-drive-modes (0x6502 = 0x700), so the
-    // standard profile velocity mode may be a no-op even though it is echoed.
-    logger.info("Testing Motor 1 manufacturer velocity mode (-2): target={} counts/s",
-                kTestVelocity);
-    if (!roboclaw.drive_m1_speed_manufacturer(kTestVelocity, ec)) {
-      logger.warn("Motor 1 manufacturer velocity command rejected: {}", ec.message());
-    } else {
-      for (int poll = 1; poll <= kVelocityPolls; ++poll) {
-        std::this_thread::sleep_for(1s);
-        int32_t position = 0;
-        int32_t speed = 0;
-        uint8_t encoder_status = 0;
-        uint8_t speed_status = 0;
-        if (roboclaw.read_encoder_m1(position, encoder_status, ec) &&
-            roboclaw.read_speed_m1(speed, speed_status, ec)) {
-          std::error_code demand_ec;
-          int32_t velocity_demand = 0;
-          const bool demand_ok = roboclaw.read_velocity_demand_m1(velocity_demand, demand_ec);
-          logger.info("Mfr velocity poll {}/{}: position={}, speed={} counts/s, demand={}", poll,
-                      kVelocityPolls, position, speed,
-                      demand_ok ? std::to_string(velocity_demand) : "n/a");
-        } else {
-          logger.warn("Mfr velocity poll {}/{} failed: {}", poll, kVelocityPolls, ec.message());
-        }
-      }
-      if (!roboclaw.drive_m1_speed_manufacturer(0, ec)) {
-        logger.warn("Failed to stop Motor 1 after manufacturer velocity test: {}", ec.message());
-      }
-    }
-
-    // Test 1c: deliver the command via RPDO instead of SDO. Some
-    // implementations only sample motion targets from PDO traffic; SDO writes
-    // land in the dictionary but never reach the motion engine.
-    logger.info("Testing command delivery via RPDO (mode 3, target={} counts/s)", kTestVelocity);
-    if (!roboclaw.drive_m1_speed(kTestVelocity, ec)) {
-      logger.warn("SDO enable before RPDO test failed: {}", ec.message());
-    }
-    if (const size_t sent = roboclaw.send_test_rpdos(3, kTestVelocity, 0, 0, ec); sent == 0) {
-      logger.warn("No RPDOs sent: {}", ec.message());
-    } else {
-      for (int poll = 1; poll <= kVelocityPolls; ++poll) {
-        std::this_thread::sleep_for(1s);
-        int32_t position = 0;
-        int32_t speed = 0;
-        uint8_t encoder_status = 0;
-        uint8_t speed_status = 0;
-        if (roboclaw.read_encoder_m1(position, encoder_status, ec) &&
-            roboclaw.read_speed_m1(speed, speed_status, ec)) {
-          std::error_code demand_ec;
-          int32_t velocity_demand = 0;
-          const bool demand_ok = roboclaw.read_velocity_demand_m1(velocity_demand, demand_ec);
-          logger.info("RPDO velocity poll {}/{}: position={}, speed={} counts/s, demand={}", poll,
-                      kVelocityPolls, position, speed,
-                      demand_ok ? std::to_string(velocity_demand) : "n/a");
-        }
-      }
-      roboclaw.send_test_rpdos(3, 0, 0, 0, ec);
-      roboclaw.drive_m1_speed(0, ec);
-    }
+    // Clear any latched e-stop / safety lockout before testing (packet-serial
+    // command 200 mirrored at write-only 0x20C8; a no-op when nothing is
+    // latched).
+    roboclaw.try_estop_reset(ec);
 
     // The MCP clamps position targets to the position PID's [min, max]
     // range, which is [0, 0] from the factory -- widen it over CAN first.
@@ -354,38 +218,92 @@ extern "C" void app_main(void) {
         logger.error("M1 position limit mismatch: expected [{}, {}], got [{}, {}]",
                      kMotor1MinimumPosition, kMotor1MaximumPosition, configured_minimum,
                      configured_maximum);
-      } else if (roboclaw.move_m1_to_position(kMotor1TargetPosition, kMotor1ProfileVelocity,
-                       kMotor1ProfileAcceleration,
-                       kMotor1ProfileDeceleration, ec)) {
-        logger.info("Testing Motor 1 position command: target={}, velocity={}, acceleration={}, "
-            "deceleration={}",
-            kMotor1TargetPosition, kMotor1ProfileVelocity, kMotor1ProfileAcceleration,
-            kMotor1ProfileDeceleration);
-        for (int poll = 1; poll <= kPositionPolls; ++poll) {
-          std::this_thread::sleep_for(1s);
-          uint32_t status = 0;
+      } else {
+        // Poll the whole cascade: position demand (profile output), velocity
+        // demand (position-loop output), and actuals. Returns the final
+        // position so callers can tell whether the motor moved.
+        auto poll_position = [&](const char *label, int polls) -> int32_t {
           int32_t position = 0;
-          uint8_t encoder_status = 0;
-          const bool status_ok = roboclaw.read_status(status, ec);
-          const bool position_ok = roboclaw.read_encoder_m1(position, encoder_status, ec);
-          if (status_ok && position_ok) {
-            // The demand value is the profile generator's instantaneous
-            // command: if it ramps toward the target while the actual position
-            // stays put, the profile is running but the position loop is not
-            // driving the motor (PID gains / max speed unset on the MCP).
-            std::error_code demand_ec;
+          for (int poll = 1; poll <= polls; ++poll) {
+            std::this_thread::sleep_for(1s);
+            uint32_t status = 0;
+            int32_t speed = 0;
+            uint8_t encoder_status = 0;
+            uint8_t speed_status = 0;
             int32_t position_demand = 0;
-            const bool demand_ok = roboclaw.read_position_demand_m1(position_demand, demand_ec);
-            logger.info("Position poll {}/{}: statusword=0x{:04X}, M1 position={}, demand={}",
-                        poll, kPositionPolls, status, position,
-                        demand_ok ? std::to_string(position_demand) : "n/a");
-          } else {
-            logger.warn("Position poll {}/{} failed: {}", poll, kPositionPolls, ec.message());
+            int32_t velocity_demand = 0;
+            std::error_code poll_ec;
+            const bool ok = roboclaw.read_status(status, poll_ec) &&
+                            roboclaw.read_encoder_m1(position, encoder_status, poll_ec) &&
+                            roboclaw.read_speed_m1(speed, speed_status, poll_ec);
+            std::error_code demand_ec;
+            roboclaw.read_position_demand_m1(position_demand, demand_ec);
+            roboclaw.read_velocity_demand_m1(velocity_demand, demand_ec);
+            if (ok) {
+              logger.info("{} poll {}/{}: sw=0x{:04X} position={} pos_demand={} vel_demand={} "
+                          "speed={}",
+                          label, poll, polls, status, position, position_demand, velocity_demand,
+                          speed);
+            } else {
+              logger.warn("{} poll {}/{} failed: {}", label, poll, polls, poll_ec.message());
+            }
+          }
+          return position;
+        };
+        auto command_position = [&](int32_t target) {
+          return roboclaw.move_m1_to_position(target, kMotor1ProfileVelocity,
+                                              kMotor1ProfileAcceleration,
+                                              kMotor1ProfileDeceleration, ec);
+        };
+
+        // Test A: position move with the gains as configured.
+        logger.info("Position test A: target={} with current gains", kMotor1TargetPosition);
+        int32_t reached = 0;
+        if (!command_position(kMotor1TargetPosition)) {
+          logger.warn("Motor 1 position command rejected: {}", ec.message());
+        } else {
+          reached = poll_position("Position A", kPositionPolls);
+        }
+
+        // Test B: the packet-serial position-PID WRITE order is D,P,I but the
+        // READ order is P,I,D, and the CANopen record's order is unknown. The
+        // current record reads [0x3C83, 0, 0, ...]: if sub 1 is D then P is 0
+        // and the loop can never produce output. Setting sub 2 to the same
+        // gain discriminates safely: in write order sub 2 is P (loop starts
+        // working); in read order sub 2 is I, which MaxI=0 neutralizes.
+        if (reached == 0) {
+          std::array<int32_t, 7> original{};
+          if (roboclaw.read_position_pid_m1_raw(original, ec)) {
+            std::array<int32_t, 7> experiment = original;
+            experiment[1] = experiment[0] != 0 ? experiment[0] : 0x3C83;
+            logger.info("Position test B: duplicating gain into sub 2 (P if write-order)");
+            if (roboclaw.write_position_pid_m1_raw(experiment, ec) &&
+                command_position(kMotor1TargetPosition)) {
+              reached = poll_position("Position B", kPositionPolls);
+            }
+            if (reached == 0) {
+              // No movement: restore the original record.
+              roboclaw.write_position_pid_m1_raw(original, ec);
+            } else {
+              logger.info("Movement with sub 2 set! CANopen position PID order is D,P,I,...");
+            }
           }
         }
-    }
-      else {
-        logger.warn("Motor 1 position command rejected: {}", ec.message());
+
+        // Test C: deliver the position command via RPDO1 (controlword +
+        // target position) in case the motion engine only samples PDO
+        // traffic. Uses the pp new-set-point handshake over PDO.
+        if (roboclaw.map_rpdo1_for_position(ec)) {
+          logger.info("Position test C: target={} via RPDO1", -kMotor1TargetPosition);
+          roboclaw.send_position_rpdo(0x002F, -kMotor1TargetPosition, ec);
+          std::this_thread::sleep_for(50ms);
+          roboclaw.send_position_rpdo(0x003F, -kMotor1TargetPosition, ec);
+          std::this_thread::sleep_for(50ms);
+          roboclaw.send_position_rpdo(0x002F, -kMotor1TargetPosition, ec);
+          poll_position("Position C", kPositionPolls);
+        } else {
+          logger.warn("RPDO1 remap failed; skipping PDO position test: {}", ec.message());
+        }
       }
     }
   }

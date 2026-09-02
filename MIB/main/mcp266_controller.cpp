@@ -811,6 +811,113 @@ bool Mcp266Controller::configure_m1_position_range(int32_t min_pos, int32_t max_
   return false;
 }
 
+bool Mcp266Controller::read_position_pid_m1_raw(std::array<int32_t, 7> &values,
+                                                std::error_code &ec) {
+  ec.clear();
+  if (config_.mode != Mode::CANOPEN || !canopen_client_) {
+    ec = std::make_error_code(std::errc::operation_not_supported);
+    return false;
+  }
+  for (uint8_t sub = 1; sub <= 7; ++sub) {
+    values[sub - 1] = canopen_client_->read_i32(0x203F, sub, ec);
+    if (ec) {
+      return false;
+    }
+  }
+  return true;
+}
+
+bool Mcp266Controller::write_position_pid_m1_raw(const std::array<int32_t, 7> &values,
+                                                 std::error_code &ec) {
+  ec.clear();
+  if (config_.mode != Mode::CANOPEN || !canopen_client_) {
+    ec = std::make_error_code(std::errc::operation_not_supported);
+    return false;
+  }
+  for (uint8_t sub = 1; sub <= 7; ++sub) {
+    if (!canopen_client_->write_i32(0x203D, sub, values[sub - 1], ec)) {
+      logger_.error("position PID write 0x203D:{} rejected: {}", sub, ec.message());
+      return false;
+    }
+  }
+  std::array<int32_t, 7> readback{};
+  if (!read_position_pid_m1_raw(readback, ec)) {
+    return false;
+  }
+  if (readback != values) {
+    logger_.error("position PID readback mismatch after write");
+    ec = std::make_error_code(std::errc::protocol_error);
+    return false;
+  }
+  logger_.info("M1 position PID set: [{}, {}, {}, {}, {}, {}, {}]", values[0], values[1],
+               values[2], values[3], values[4], values[5], values[6]);
+  return true;
+}
+
+bool Mcp266Controller::try_estop_reset(std::error_code &ec) {
+  ec.clear();
+  if (config_.mode != Mode::CANOPEN || !canopen_client_) {
+    ec = std::make_error_code(std::errc::operation_not_supported);
+    return false;
+  }
+  // Packet-serial command 200 (E-Stop Reset) takes no payload, so the SDO
+  // scalar size is unknown; probe the common widths.
+  bool reset_ok = canopen_client_->write_u8(0x20C8, 0, 1, ec);
+  if (!reset_ok) {
+    reset_ok = canopen_client_->write_u32(0x20C8, 0, 1, ec);
+  }
+  std::error_code lock_ec;
+  const uint8_t lock = canopen_client_->read_u8(0x20CA, 0, lock_ec);
+  logger_.info("E-stop reset (0x20C8) {}; lock state (0x20CA) = {}",
+               reset_ok ? "accepted" : "rejected", lock_ec ? -1 : static_cast<int>(lock));
+  return reset_ok;
+}
+
+bool Mcp266Controller::map_rpdo1_for_position(std::error_code &ec) {
+  ec.clear();
+  if (config_.mode != Mode::CANOPEN || !canopen_client_) {
+    ec = std::make_error_code(std::errc::operation_not_supported);
+    return false;
+  }
+  const uint32_t cob = canopen_client_->read_u32(0x1400, 1, ec);
+  if (ec) {
+    return false;
+  }
+  // Standard remap sequence: disable the PDO, clear the mapping count, write
+  // the entries ((index << 16) | (sub << 8) | bit length), restore the count,
+  // re-enable the PDO.
+  if (!canopen_client_->write_u32(0x1400, 1, cob | 0x80000000u, ec) ||
+      !canopen_client_->write_u8(0x1600, 0, 0, ec) ||
+      !canopen_client_->write_u32(0x1600, 1, 0x60400010u, ec) ||
+      !canopen_client_->write_u32(0x1600, 2, 0x607A0020u, ec) ||
+      !canopen_client_->write_u8(0x1600, 0, 2, ec) ||
+      !canopen_client_->write_u32(0x1400, 1, cob & ~0x80000000u, ec)) {
+    logger_.warn("RPDO1 remap rejected: {} (abort 0x{:08X})", ec.message(),
+                 canopen_client_->last_abort_code());
+    return false;
+  }
+  rpdo1_cob_ = cob & 0x7FFu;
+  logger_.info("RPDO1 mapped to controlword + target position on COB 0x{:03X}", rpdo1_cob_);
+  return true;
+}
+
+bool Mcp266Controller::send_position_rpdo(uint16_t controlword, int32_t target,
+                                          std::error_code &ec) {
+  ec.clear();
+  if (config_.mode != Mode::CANOPEN || !canopen_client_ || rpdo1_cob_ == 0) {
+    ec = std::make_error_code(std::errc::operation_not_supported);
+    return false;
+  }
+  const std::array<uint8_t, 6> payload{
+      static_cast<uint8_t>(controlword),       static_cast<uint8_t>(controlword >> 8),
+      static_cast<uint8_t>(target),            static_cast<uint8_t>(target >> 8),
+      static_cast<uint8_t>(target >> 16),      static_cast<uint8_t>(target >> 24)};
+  if (!canopen_client_->send_rpdo(rpdo1_cob_, payload, ec)) {
+    return false;
+  }
+  return canopen_client_->send_sync(ec);
+}
+
 size_t Mcp266Controller::send_test_rpdos(int8_t mode, int32_t target_velocity,
                                          int32_t target_position, int16_t duty_per_mille,
                                          std::error_code &ec) {
