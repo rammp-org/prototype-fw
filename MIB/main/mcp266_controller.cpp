@@ -287,7 +287,14 @@ bool Mcp266Controller::drive_m1_speed(int32_t qpps, std::error_code &ec) {
                  ec)) {
     return false;
   }
-  return canopen_client_->write_i32(kCmdDriveM1Speed, 0, qpps, ec);
+  // Diagnostic: the mirrored command 0x2023 is accepted but leaves the
+  // velocity demand (0x606B) at zero even with the drive Operation Enabled.
+  // With the drive now correctly enabled, write the standard CiA 402 target
+  // velocity (0x60FF) and also the mirror, so the next run shows whether
+  // either populates the demand.
+  const bool std_ok = canopen_client_->write_i32(kAxisM1.target, 0, qpps, ec);
+  const bool mirror_ok = canopen_client_->write_i32(kCmdDriveM1Speed, 0, qpps, ec);
+  return std_ok || mirror_ok;
 }
 
 bool Mcp266Controller::drive_m2_speed(int32_t qpps, std::error_code &ec) {
