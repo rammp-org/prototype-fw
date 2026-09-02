@@ -35,6 +35,7 @@ sdkconfig
 sdkconfig.old
 dependencies.lock
 managed_components/
+__pycache__/
 
 # vs code
 .vscode/

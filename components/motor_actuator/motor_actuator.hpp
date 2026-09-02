@@ -76,7 +76,9 @@ public:
   bool send_torque(int16_t torque_raw);
   bool send_velocity(float velocity_rpm);
   // Reset the software-only position reference; this does not write motor ROM.
-  void zero_position();
+  // If need_align is true, also send an incremental move to align to the current
+  // physical angle before zeroing the virtual position.
+  void zero_position(bool need_align = false);
   float get_position() const { return virtual_position_degrees_; }
   bool set_position_limits(float minimum_degrees, float maximum_degrees);
   bool set_position(float position_degrees, float max_speed_rpm);
@@ -84,6 +86,7 @@ public:
   bool stop();
   bool disable();
   bool hold();
+  bool reset_system();
   bool release_brake();
   bool lock_brake();
   bool write_default_pid_rom();
@@ -106,7 +109,6 @@ private:
   CommunicationFunction communication_;
   uint8_t motor_id_;
   float virtual_position_degrees_{0.0f};
-  std::once_flag position_calibration_once_;
   float minimum_position_degrees_{-std::numeric_limits<float>::infinity()};
   float maximum_position_degrees_{std::numeric_limits<float>::infinity()};
 };

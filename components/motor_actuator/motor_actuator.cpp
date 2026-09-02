@@ -295,18 +295,26 @@ bool MotorActuator::send_velocity(float velocity_rpm) {
   return send_command(command);
 }
 
-void MotorActuator::zero_position() {
+void MotorActuator::zero_position(bool need_align) {
   virtual_position_degrees_ = 0.0f;
   Status status{};
-  if (read_status(status, 100)) {
-    const float virtual_position_bias = status.angle_degrees / 32768.0f * 180.0f / gear_ratio_;
-    logger_.info("Virtual position bias set to {}", virtual_position_bias);
-    std::call_once(position_calibration_once_, [this, virtual_position_bias] {
+  if (need_align) {
+    bool status_ok = false;
+    for (int attempt = 1; attempt <= 5; ++attempt) {
+      status_ok = read_status(status, 100);
+      if (status_ok) {
+        break;
+      }
+      logger_.warn("Motor status read failed during zero alignment (attempt {}/5)", attempt);
+    }
+    if (status_ok) {
+      const float virtual_position_bias = status.angle_degrees / 32768.0f * 180.0f / gear_ratio_;
+      logger_.info("Virtual position bias set to {}", virtual_position_bias);
       send_incremental_position(virtual_position_bias, 5.0f);
-    });
-  }
-  else {
-    logger_.warn("Failed to read motor status; virtual position bias set to 0");
+    }
+    else {
+      logger_.warn("Failed to read motor status after 5 attempts; virtual position bias set to 0");
+    }
   }
 
   logger_.info("Virtual motor position set to zero");
@@ -367,6 +375,12 @@ bool MotorActuator::stop() {
 
 bool MotorActuator::disable() { return send_torque(0); }
 bool MotorActuator::hold() { return send_velocity(0.0f); }
+
+bool MotorActuator::reset_system() {
+  std::array<uint8_t, packet_length_> command{};
+  command[0] = 0x76;
+  return send_command(command);
+}
 
 bool MotorActuator::release_brake() {
   std::array<uint8_t, packet_length_> command{};

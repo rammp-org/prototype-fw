@@ -18,7 +18,7 @@ public:
   PairedActuator &operator=(const PairedActuator &) = delete;
 
   bool read_status(Status &status, uint32_t timeout_ms = 100);
-  void zero_position();
+  void zero_position(bool need_align = false);
   // Index 0 is the primary actuator; index 1 is the secondary actuator.
   std::array<float, 2> get_position() const;
   bool set_position_limits(float minimum_degrees = -45.0f, float maximum_degrees = 45.0f);

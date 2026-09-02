@@ -31,7 +31,7 @@ extern "C" void app_main(void) {
   MotorActuator actuator(communicate, kMotorId);
 
   actuator.set_position_limits(-180.0f, 180.0f);
-  actuator.zero_position();
+  // actuator.zero_position();
 
   auto root_menu = std::make_unique<cli::Menu>("motor_actuator_example");
   root_menu->Insert(
@@ -53,10 +53,17 @@ extern "C" void app_main(void) {
   root_menu->Insert(
       "zero",
       [&actuator](std::ostream &out) {
-        actuator.zero_position();
+        actuator.zero_position(false);
         out << "Current physical position is now virtual zero.\n";
       },
-      "Set the current physical position as virtual zero: zero");
+      "Set the current physical position as virtual zero without alignment: zero");
+  root_menu->Insert(
+      "zero_align",
+      [&actuator](std::ostream &out) {
+        actuator.zero_position(true);
+        out << "Current physical position is now virtual zero after alignment.\n";
+      },
+      "Set the current physical position as virtual zero after reading and aligning: zero_align");
   root_menu->Insert(
       "limits",
       [&actuator](std::ostream &out, float minimum, float maximum) {
@@ -80,6 +87,12 @@ extern "C" void app_main(void) {
       },
       "Stop the motor: stop");
   root_menu->Insert(
+      "reset",
+      [&actuator](std::ostream &out) {
+        out << (actuator.reset_system() ? "Motor system reset issued.\n" : "Failed to reset motor system.\n");
+      },
+      "Reset the motor system: reset");
+  root_menu->Insert(
       "status",
       [&actuator](std::ostream &out) {
         MotorActuator::Status status{};
@@ -98,7 +111,7 @@ extern "C" void app_main(void) {
     input.Start();
   }).detach();
 
-  logger.info("CLI ready: set, get, zero, limits, release, stop, status");
+  logger.info("CLI ready: set, get, zero, limits, release, stop, reset, status");
   while (true) {
     // for (int sample = 1; sample <= 10; ++sample) {
     //   MotorActuator::Status status{};

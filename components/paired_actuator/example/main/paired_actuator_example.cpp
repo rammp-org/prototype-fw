@@ -43,7 +43,7 @@ extern "C" void app_main(void) {
     logger.warn("Pair IDs 1-2 status read failed");
   }
 
-  pair.zero_position();
+  pair.zero_position(false);
   pair.set_position_limits(-45.0f, 45.0f);
   const auto initial_positions = pair.get_position();
   logger.info("Pair 1 virtual positions: primary={} deg secondary={} deg", initial_positions[0],
@@ -108,10 +108,17 @@ extern "C" void app_main(void) {
   root_menu->Insert(
       "zero",
       [&pair](std::ostream &out) {
-        pair.zero_position();
-        out << "Virtual position zeroed.\n";
+        pair.zero_position(false);
+        out << "Virtual position zeroed without alignment.\n";
       },
-      "Calibrate to current position as zero: zero");
+      "Zero both actuators without alignment: zero");
+  root_menu->Insert(
+      "zero_align",
+      [&pair](std::ostream &out) {
+        pair.zero_position(true);
+        out << "Virtual position zeroed after alignment.\n";
+      },
+      "Zero both actuators after alignment: zero_align");
   root_menu->Insert(
       "limit",
       [&pair](std::ostream &out, float min_deg, float max_deg) {
@@ -129,7 +136,7 @@ extern "C" void app_main(void) {
     input.Start();
   }).detach();
 
-  logger.info("Paired Actuator CLI ready: get, status, set, stop, release, zero, limit");
+  logger.info("Paired Actuator CLI ready: get, status, set, stop, release, zero, zero_align, limit");
 
   while (true) {
     std::this_thread::sleep_for(1000ms);
