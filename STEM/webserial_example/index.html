@@ -1,0 +1,326 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>STEM Serial Control</title>
+  <style>
+    :root {
+      color-scheme: dark;
+      --bg: #111518;
+      --panel: #1a2124;
+      --panel-raised: #222c2f;
+      --line: #354347;
+      --text: #edf3f1;
+      --muted: #94a5a2;
+      --accent: #f3a34d;
+      --accent-strong: #ffc477;
+      --danger: #ed6b5f;
+      --ok: #72c49a;
+    }
+
+    * { box-sizing: border-box; }
+    body {
+      margin: 0;
+      min-width: 320px;
+      background: var(--bg);
+      color: var(--text);
+      font: 15px/1.45 ui-sans-serif, system-ui, sans-serif;
+    }
+    header {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      gap: 16px;
+      padding: 22px clamp(18px, 5vw, 64px);
+      border-bottom: 1px solid var(--line);
+    }
+    h1, h2, p { margin: 0; }
+    h1 { font: 700 clamp(22px, 4vw, 34px)/1.1 Georgia, serif; letter-spacing: 0; }
+    h2 { font-size: 16px; letter-spacing: 0; }
+    .eyebrow { color: var(--accent); font-size: 11px; font-weight: 700; letter-spacing: 0.14em; text-transform: uppercase; }
+    .status { color: var(--muted); font-size: 13px; }
+    .status.connected { color: var(--ok); }
+    main {
+      display: grid;
+      grid-template-columns: minmax(280px, 560px) minmax(280px, 1fr);
+      gap: 18px;
+      max-width: 1240px;
+      margin: 0 auto;
+      padding: 28px clamp(18px, 5vw, 64px) 48px;
+    }
+    .panel {
+      border: 1px solid var(--line);
+      background: var(--panel);
+      padding: 20px;
+    }
+    .panel-title { display: flex; justify-content: space-between; align-items: baseline; margin-bottom: 16px; }
+    .button-row { display: flex; flex-wrap: wrap; gap: 10px; }
+    button, input {
+      min-height: 42px;
+      border: 1px solid var(--line);
+      border-radius: 4px;
+      color: var(--text);
+      background: var(--panel-raised);
+      font: inherit;
+    }
+    button { padding: 0 16px; cursor: pointer; font-weight: 700; }
+    button:hover:not(:disabled) { border-color: var(--accent); color: var(--accent-strong); }
+    button:disabled { cursor: not-allowed; opacity: .45; }
+    button.primary { border-color: var(--accent); background: var(--accent); color: #19130d; }
+    button.primary:hover:not(:disabled) { background: var(--accent-strong); color: #19130d; }
+    button.danger { border-color: var(--danger); color: #ffaaa2; }
+    .pad {
+      position: relative;
+      aspect-ratio: 1.25;
+      margin-bottom: 18px;
+      border: 1px solid var(--line);
+      background-color: #151b1d;
+      background-image: linear-gradient(var(--line) 1px, transparent 1px), linear-gradient(90deg, var(--line) 1px, transparent 1px);
+      background-size: 20% 20%;
+      touch-action: none;
+      user-select: none;
+      cursor: crosshair;
+    }
+    .pad::before, .pad::after { content: ""; position: absolute; background: var(--accent); opacity: .55; }
+    .pad::before { left: 50%; top: 0; bottom: 0; width: 1px; }
+    .pad::after { top: 50%; left: 0; right: 0; height: 1px; }
+    .target {
+      position: absolute;
+      width: 18px;
+      height: 18px;
+      border: 2px solid var(--accent-strong);
+      border-radius: 50%;
+      background: var(--accent);
+      transform: translate(-50%, -50%);
+      pointer-events: none;
+      box-shadow: 0 0 0 5px #f3a34d22;
+    }
+    .coordinates { display: grid; grid-template-columns: 1fr 1fr; gap: 10px; margin-bottom: 14px; }
+    label { display: grid; gap: 5px; color: var(--muted); font-size: 12px; }
+    input { width: 100%; padding: 0 11px; }
+    .pair-controls { display: grid; grid-template-columns: 1fr auto; gap: 10px; margin-top: 18px; }
+    .pair-controls select { min-height: 42px; padding: 0 10px; border: 1px solid var(--line); border-radius: 4px; color: var(--text); background: var(--panel-raised); font: inherit; }
+    pre {
+      min-height: 310px;
+      max-height: 510px;
+      overflow: auto;
+      margin: 0;
+      padding: 14px;
+      border: 1px solid var(--line);
+      background: #0c1011;
+      color: #c7d5d1;
+      font: 12px/1.55 ui-monospace, SFMono-Regular, Consolas, monospace;
+      white-space: pre-wrap;
+      overflow-wrap: anywhere;
+    }
+    .hint { margin-top: 12px; color: var(--muted); font-size: 12px; }
+    @media (max-width: 760px) {
+      header { align-items: flex-start; flex-direction: column; }
+      main { grid-template-columns: 1fr; }
+    }
+  </style>
+</head>
+<body>
+  <header>
+    <div>
+      <p class="eyebrow">Five-bar actuator platform</p>
+      <h1>STEM serial control</h1>
+    </div>
+    <div id="connectionStatus" class="status">Disconnected</div>
+  </header>
+
+  <main>
+    <section class="panel">
+      <div class="panel-title">
+        <h2>Connection</h2>
+        <span class="status">USB Serial/JTAG</span>
+      </div>
+      <div class="button-row">
+        <button id="connectButton" class="primary">Connect</button>
+        <button id="disconnectButton" disabled>Disconnect</button>
+        <button id="statusButton" disabled>Status</button>
+      </div>
+
+      <div class="panel-title" style="margin-top: 28px">
+        <h2>Position</h2>
+        <span class="status">relative coordinates</span>
+      </div>
+      <div id="pad" class="pad" aria-label="Position control pad">
+        <div id="target" class="target" style="left: 50%; top: 50%"></div>
+      </div>
+      <div class="coordinates">
+        <label>X relative
+          <input id="xInput" type="number" min="-150" max="150" step="0.1" value="0">
+        </label>
+        <label>Y relative
+          <input id="yInput" type="number" min="-150" max="150" step="0.1" value="0">
+        </label>
+      </div>
+      <div class="button-row">
+        <button id="moveButton" class="primary" disabled>Move</button>
+        <button id="homeButton" disabled>Home</button>
+      </div>
+
+      <div class="pair-controls">
+        <select id="pairSelect" aria-label="Actuator pair">
+          <option value="left">Left</option>
+          <option value="right">Right</option>
+          <option value="seat">Seat</option>
+        </select>
+        <button id="setButton" disabled>Set pair</button>
+      </div>
+      <p class="hint">The firmware remains responsible for IK and position limits. Unsupported coordinates are rejected by the existing move command.</p>
+    </section>
+
+    <section class="panel">
+      <div class="panel-title">
+        <h2>Serial output</h2>
+        <button id="clearButton">Clear</button>
+      </div>
+      <pre id="output" aria-live="polite">Connect to the STEM USB serial device to begin.</pre>
+      <div class="button-row" style="margin-top: 14px">
+        <button id="releaseButton" class="danger" disabled>Release brakes</button>
+      </div>
+    </section>
+  </main>
+
+  <script>
+    const output = document.querySelector('#output');
+    const connectionStatus = document.querySelector('#connectionStatus');
+    const connectButton = document.querySelector('#connectButton');
+    const disconnectButton = document.querySelector('#disconnectButton');
+    const statusButton = document.querySelector('#statusButton');
+    const moveButton = document.querySelector('#moveButton');
+    const homeButton = document.querySelector('#homeButton');
+    const setButton = document.querySelector('#setButton');
+    const releaseButton = document.querySelector('#releaseButton');
+    const xInput = document.querySelector('#xInput');
+    const yInput = document.querySelector('#yInput');
+    const pairSelect = document.querySelector('#pairSelect');
+    const pad = document.querySelector('#pad');
+    const target = document.querySelector('#target');
+
+    let port;
+    let reader;
+    let writer;
+    let readTask;
+    let writeChain = Promise.resolve();
+
+    function log(text) {
+      output.textContent += `${output.textContent ? '\n' : ''}${text}`;
+      output.scrollTop = output.scrollHeight;
+    }
+
+    function setConnected(connected) {
+      connectionStatus.textContent = connected ? 'Connected' : 'Disconnected';
+      connectionStatus.classList.toggle('connected', connected);
+      connectButton.disabled = connected;
+      disconnectButton.disabled = !connected;
+      for (const button of [statusButton, moveButton, homeButton, setButton, releaseButton]) {
+        button.disabled = !connected;
+      }
+    }
+
+    async function send(command) {
+      if (!writer) return;
+      writeChain = writeChain.then(async () => {
+        await writer.write(new TextEncoder().encode(`${command}\n`));
+        log(`> ${command}`);
+      });
+      return writeChain;
+    }
+
+    async function readLoop() {
+      const decoder = new TextDecoder();
+      try {
+        while (port?.readable) {
+          const result = await reader.read();
+          if (result.done) break;
+          if (result.value) log(decoder.decode(result.value, { stream: true }).trimEnd());
+        }
+      } catch (error) {
+        log(`Serial read error: ${error.message}`);
+      }
+    }
+
+    async function connect() {
+      if (!('serial' in navigator)) {
+        log('Web Serial is unavailable. Use Chrome or Edge over localhost or HTTPS.');
+        return;
+      }
+      try {
+        port = await navigator.serial.requestPort();
+        await port.open({ baudRate: 115200 });
+        writer = port.writable.getWriter();
+        reader = port.readable.getReader();
+        setConnected(true);
+        log('Connected at 115200 baud.');
+        readTask = readLoop();
+      } catch (error) {
+        log(`Connection failed: ${error.message}`);
+        await disconnect();
+      }
+    }
+
+    async function disconnect() {
+      setConnected(false);
+      if (reader) {
+        await reader.cancel().catch(() => {});
+        reader.releaseLock();
+        reader = undefined;
+      }
+      if (writer) {
+        writer.releaseLock();
+        writer = undefined;
+      }
+      if (port) {
+        await port.close().catch(() => {});
+        port = undefined;
+      }
+      await readTask?.catch(() => {});
+      readTask = undefined;
+    }
+
+    function updateTarget(x, y) {
+      const xPercent = Math.max(0, Math.min(100, (Number(x) + 150) / 300 * 100));
+      const yPercent = Math.max(0, Math.min(100, (150 - Number(y)) / 300 * 100));
+      target.style.left = `${xPercent}%`;
+      target.style.top = `${yPercent}%`;
+    }
+
+    pad.addEventListener('pointerdown', event => {
+      pad.setPointerCapture(event.pointerId);
+      updateFromPad(event);
+    });
+    pad.addEventListener('pointermove', event => {
+      if (event.buttons) updateFromPad(event);
+    });
+    function updateFromPad(event) {
+      const bounds = pad.getBoundingClientRect();
+      const x = ((event.clientX - bounds.left) / bounds.width * 300) - 150;
+      const y = 150 - ((event.clientY - bounds.top) / bounds.height * 300);
+      xInput.value = x.toFixed(1);
+      yInput.value = y.toFixed(1);
+      updateTarget(xInput.value, yInput.value);
+    }
+    xInput.addEventListener('input', () => updateTarget(xInput.value, yInput.value));
+    yInput.addEventListener('input', () => updateTarget(xInput.value, yInput.value));
+
+    connectButton.addEventListener('click', connect);
+    disconnectButton.addEventListener('click', disconnect);
+    statusButton.addEventListener('click', () => send('status'));
+    moveButton.addEventListener('click', () => send(`move ${Number(xInput.value)} ${Number(yInput.value)}`));
+    homeButton.addEventListener('click', () => send('home'));
+    setButton.addEventListener('click', () => {
+      const degrees = window.prompt(`Degrees for ${pairSelect.value}`, '0');
+      if (degrees !== null && Number.isFinite(Number(degrees))) send(`set ${pairSelect.value} ${Number(degrees)}`);
+    });
+    releaseButton.addEventListener('click', () => {
+      if (window.confirm('Release all motor brakes?')) send('release');
+    });
+    document.querySelector('#clearButton').addEventListener('click', () => output.textContent = '');
+    navigator.serial?.addEventListener('disconnect', disconnect);
+  </script>
+</body>
+</html>

@@ -1,0 +1,136 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>STEM USB Control</title>
+  <style>
+    :root { color-scheme: dark; --bg:#111518; --panel:#1b2225; --line:#38464a; --text:#edf3f1; --muted:#9aaba8; --accent:#f3a34d; --danger:#ed6b5f; }
+    * { box-sizing:border-box; }
+    body { margin:0; background:var(--bg); color:var(--text); font:15px/1.45 system-ui,sans-serif; }
+    main { max-width:760px; margin:auto; padding:32px 18px; }
+    h1 { margin:0 0 4px; font:700 34px/1.1 Georgia,serif; }
+    p { margin:0; color:var(--muted); }
+    section { margin-top:22px; padding:20px; border:1px solid var(--line); background:var(--panel); }
+    .row { display:flex; flex-wrap:wrap; gap:10px; align-items:end; }
+    button, input { min-height:42px; border:1px solid var(--line); border-radius:4px; background:#263135; color:var(--text); font:inherit; }
+    button { padding:0 15px; cursor:pointer; font-weight:700; }
+    button:hover:not(:disabled) { border-color:var(--accent); color:var(--accent); }
+    button:disabled { opacity:.45; cursor:not-allowed; }
+    .primary { background:var(--accent); color:#18130d; border-color:var(--accent); }
+    .danger { border-color:var(--danger); color:#ffaaa2; }
+    label { display:grid; gap:5px; color:var(--muted); font-size:12px; }
+    input { width:110px; padding:0 10px; }
+    #connection { margin-top:8px; color:var(--muted); }
+    #connection.connected { color:#72c49a; }
+    pre { min-height:230px; max-height:420px; overflow:auto; padding:14px; background:#0b0f10; color:#c8d7d3; white-space:pre-wrap; font:12px/1.55 monospace; }
+    .title { display:flex; justify-content:space-between; align-items:baseline; margin-bottom:15px; }
+    @media (max-width:520px) { .row > * { flex:1 1 100%; } input { width:100%; } }
+  </style>
+</head>
+<body>
+  <main>
+    <h1>STEM USB control</h1>
+    <p>Dedicated UART0 protocol, no firmware CLI required.</p>
+    <div id="connection">Disconnected</div>
+
+    <section>
+      <div class="title"><strong>Connection</strong><span>UART0 / USB-UART adapter</span></div>
+      <div class="row">
+        <button id="connect" class="primary">Connect</button>
+        <button id="disconnect" disabled>Disconnect</button>
+        <button id="ping" disabled>Ping</button>
+        <button id="status" disabled>Status</button>
+      </div>
+    </section>
+
+    <section>
+      <div class="title"><strong>Motion</strong><span>coordinates in mm</span></div>
+      <div class="row">
+        <label>X relative<input id="x" type="number" step="0.1" value="0"></label>
+        <label>Y relative<input id="y" type="number" step="0.1" value="0"></label>
+        <button id="move" class="primary" disabled>Move</button>
+        <button id="home" disabled>Home</button>
+        <button id="stop" class="danger" disabled>Stop</button>
+      </div>
+    </section>
+
+    <section>
+      <div class="title"><strong>Serial output</strong><button id="clear">Clear</button></div>
+      <pre id="output">Connect to the serial protocol firmware to begin.</pre>
+    </section>
+  </main>
+
+  <script>
+    const $ = selector => document.querySelector(selector);
+    const output = $('#output');
+    const connection = $('#connection');
+    let port;
+    let reader;
+    let writer;
+    let readTask;
+    let writeChain = Promise.resolve();
+
+    function log(message) {
+      output.textContent += `${output.textContent ? '\n' : ''}${message}`;
+      output.scrollTop = output.scrollHeight;
+    }
+    function connected(value) {
+      connection.textContent = value ? 'Connected' : 'Disconnected';
+      connection.classList.toggle('connected', value);
+      $('#connect').disabled = value;
+      $('#disconnect').disabled = !value;
+      for (const id of ['ping', 'status', 'move', 'home', 'stop']) $(id === 'ping' ? '#ping' : `#${id}`).disabled = !value;
+    }
+    async function send(command) {
+      if (!writer) return;
+      writeChain = writeChain.then(async () => {
+        await writer.write(new TextEncoder().encode(`${command}\n`));
+        log(`> ${command}`);
+      });
+      return writeChain;
+    }
+    async function readLoop() {
+      const decoder = new TextDecoder();
+      try {
+        while (port?.readable) {
+          const result = await reader.read();
+          if (result.done) break;
+          if (result.value) log(decoder.decode(result.value, { stream: true }).trimEnd());
+        }
+      } catch (error) { log(`Read error: ${error.message}`); }
+    }
+    async function connect() {
+      if (!('serial' in navigator)) { log('Web Serial requires Chrome or Edge on localhost or HTTPS.'); return; }
+      try {
+        port = await navigator.serial.requestPort();
+        await port.open({ baudRate: 115200 });
+        writer = port.writable.getWriter();
+        reader = port.readable.getReader();
+        connected(true);
+        log('Connected.');
+        readTask = readLoop();
+        await send('PING');
+      } catch (error) { log(`Connection failed: ${error.message}`); await disconnect(); }
+    }
+    async function disconnect() {
+      connected(false);
+      if (reader) { await reader.cancel().catch(() => {}); reader.releaseLock(); reader = undefined; }
+      if (writer) { writer.releaseLock(); writer = undefined; }
+      if (port) { await port.close().catch(() => {}); port = undefined; }
+      await readTask?.catch(() => {});
+      readTask = undefined;
+    }
+
+    $('#connect').onclick = connect;
+    $('#disconnect').onclick = disconnect;
+    $('#ping').onclick = () => send('PING');
+    $('#status').onclick = () => send('STATUS');
+    $('#move').onclick = () => send(`MOVE ${Number($('#x').value)} ${Number($('#y').value)}`);
+    $('#home').onclick = () => send('HOME');
+    $('#stop').onclick = () => send('STOP');
+    $('#clear').onclick = () => output.textContent = '';
+    navigator.serial?.addEventListener('disconnect', disconnect);
+  </script>
+</body>
+</html>
