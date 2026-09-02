@@ -414,21 +414,27 @@ bool Mcp266Controller::configure_m1_position_loop(int32_t min_pos, int32_t max_p
     logger_.error("could not read M1 position PID: {}", ec.message());
     return false;
   }
-  // The record's subs 6/7 are the min/max position clamp; the factory value
-  // [0, 0] forces every target to zero. Rewrite the whole record (preserving
-  // the existing gains, which already drive position moves) with the clamp
-  // widened, then verify the clamp took -- the setter (0x203D) does not
-  // round-trip every field through the readback (0x203F), so verify only the
-  // fields we changed rather than the full record.
-  pid[5] = min_pos;
-  pid[6] = max_pos;
+  // The readback (0x203F) and the setter (0x203D) use DIFFERENT field orders:
+  // the readback reports [P, I, D, MaxI, Deadzone, MinPos, MaxPos] while the
+  // setter takes the packet-serial write order [D, P, I, ...]. So the P gain
+  // we read in sub 1 must be written into the setter's sub 2, and the min/max
+  // clamp (readback subs 6/7) maps to the same setter subs. Build the setter
+  // record explicitly rather than writing the readback array straight back
+  // (which would drop P into the D slot and zero P).
+  const int32_t p_gain = pid[0] != 0 ? pid[0] : 0x3C83; // readback sub 1 = P
+  const int32_t i_gain = pid[1];                        // readback sub 2 = I
+  const int32_t d_gain = pid[2];                        // readback sub 3 = D
+  const int32_t max_i = pid[3];
+  const int32_t deadzone = pid[4];
+  const std::array<int32_t, 7> setter{d_gain, p_gain, i_gain, max_i, deadzone, min_pos, max_pos};
   for (uint8_t sub = 1; sub <= 7; ++sub) {
-    if (!canopen_client_->write_i32(kM1PositionPidSet, sub, pid[sub - 1], ec)) {
+    if (!canopen_client_->write_i32(kM1PositionPidSet, sub, setter[sub - 1], ec)) {
       logger_.error("position PID write 0x{:04X}:{} rejected: {}", kM1PositionPidSet, sub,
                     ec.message());
       return false;
     }
   }
+  // Verify via the readback's own field order (min/max are subs 6/7 there too).
   const int32_t got_min = canopen_client_->read_i32(kM1PositionPidRead, 6, ec);
   const int32_t got_max = canopen_client_->read_i32(kM1PositionPidRead, 7, ec);
   if (ec || got_min != min_pos || got_max != max_pos) {
@@ -437,7 +443,7 @@ bool Mcp266Controller::configure_m1_position_loop(int32_t min_pos, int32_t max_p
     ec = std::make_error_code(std::errc::protocol_error);
     return false;
   }
-  logger_.info("M1 position loop configured: clamp=[{}, {}]", min_pos, max_pos);
+  logger_.info("M1 position loop configured: P={} clamp=[{}, {}]", p_gain, min_pos, max_pos);
   return true;
 }
 
