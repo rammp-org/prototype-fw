@@ -10,6 +10,5 @@ dependencies:
   espp/twai:
     version: '>=1.0'
     override_path: '../../../../esp-cpp/espp/components/twai'
-  espp/basicmicro: '>=1.0'
   espp/canopen: '>=1.0'
   espp/logger: '>=1.0'

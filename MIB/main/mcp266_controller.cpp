@@ -1,4 +1,4 @@
-#include <algorithm>
+#include <array>
 #include <span>
 #include <thread>
 
@@ -22,6 +22,10 @@ constexpr uint16_t kCmdDriveM1Speed = mcp_command_object(35);
 constexpr uint16_t kCmdDriveM2Speed = mcp_command_object(36);
 constexpr uint16_t kCmdReadMainBattery = mcp_command_object(24);
 constexpr uint16_t kCmdReadTemperature = mcp_command_object(82);
+constexpr uint16_t kEStopReset = mcp_command_object(200);   // cmd 200
+constexpr uint16_t kEStopLockState = mcp_command_object(202); // cmd 202 (0x20CA)
+constexpr uint16_t kM1PositionPidSet = 0x203D;              // cmd 61, write-only
+constexpr uint16_t kM1PositionPidRead = 0x203F;             // read-back mirror
 } // namespace
 
 namespace mib {
@@ -29,13 +33,6 @@ namespace mib {
 Mcp266Controller::Mcp266Controller(const Config &config)
     : BaseComponent("Mcp266Controller", config.log_level)
     , config_(config) {}
-
-Mcp266Controller::~Mcp266Controller() {
-  if (serial_rx_queue_) {
-    vQueueDelete(serial_rx_queue_);
-    serial_rx_queue_ = nullptr;
-  }
-}
 
 bool Mcp266Controller::initialize(std::error_code &ec) {
   ec.clear();
@@ -47,17 +44,9 @@ bool Mcp266Controller::initialize(std::error_code &ec) {
     logger_.error("Failed to initialize TWAI transport: {}", ec.message());
     return false;
   }
-
-  if (config_.mode == Mode::CANOPEN) {
-    if (!init_canopen(ec)) {
-      logger_.error("Failed to initialize CANopen mode: {}", ec.message());
-      return false;
-    }
-  } else {
-    if (!init_packet_serial(ec)) {
-      logger_.error("Failed to initialize Packet Serial mode: {}", ec.message());
-      return false;
-    }
+  if (!init_canopen(ec)) {
+    logger_.error("Failed to initialize CANopen mode: {}", ec.message());
+    return false;
   }
 
   logger_.info("Mcp266Controller initialized successfully");
@@ -73,20 +62,14 @@ bool Mcp266Controller::init_twai(std::error_code &ec) {
       .tx_queue_depth = 10,
       .on_receive =
           [this](const espp::Twai::Message &msg) {
-            if (config_.mode == Mode::CANOPEN) {
-              if (canopen_client_) {
-                canopen_client_->process_frame(espp::CanopenClient::CanFrame{
-                    .id = msg.id,
-                    .extended = msg.extended,
-                    .rtr = msg.rtr,
-                    .dlc = msg.dlc,
-                    .data = msg.data,
-                });
-              }
-            } else if (config_.mode == Mode::PACKET_SERIAL && serial_rx_queue_) {
-              for (uint8_t i = 0; i < msg.dlc; ++i) {
-                xQueueSend(serial_rx_queue_, &msg.data[i], 0);
-              }
+            if (canopen_client_) {
+              canopen_client_->process_frame(espp::CanopenClient::CanFrame{
+                  .id = msg.id,
+                  .extended = msg.extended,
+                  .rtr = msg.rtr,
+                  .dlc = msg.dlc,
+                  .data = msg.data,
+              });
             }
           },
       .log_level = config_.log_level,
@@ -135,99 +118,33 @@ bool Mcp266Controller::init_canopen(std::error_code &ec) {
   return true;
 }
 
-bool Mcp266Controller::init_packet_serial(std::error_code &ec) {
-  logger_.info("Configuring Packet Serial over TWAI (Address 0x{:02X})",
-               config_.packet_serial_address);
-
-  serial_rx_queue_ = xQueueCreate(256, sizeof(uint8_t));
-  if (!serial_rx_queue_) {
-    logger_.error("Failed to create serial receive queue");
-    ec = std::make_error_code(std::errc::not_enough_memory);
-    return false;
-  }
-
-  espp::Basicmicro::Config bm_config{
-      .address = config_.packet_serial_address,
-      .write =
-          [this](std::span<const uint8_t> data) -> bool {
-            size_t offset = 0;
-            while (offset < data.size()) {
-              espp::Twai::Message msg{};
-              msg.id = config_.packet_serial_address;
-              msg.extended = false;
-              msg.rtr = false;
-              const size_t len = std::min<size_t>(8, data.size() - offset);
-              msg.dlc = static_cast<uint8_t>(len);
-              std::copy_n(data.begin() + offset, len, msg.data.begin());
-
-              std::error_code tx_ec;
-              if (!twai_->transmit(msg, tx_ec)) {
-                return false;
-              }
-              offset += len;
-            }
-            return true;
-          },
-      .read =
-          [this](std::span<uint8_t> data, std::chrono::milliseconds timeout) -> size_t {
-            size_t bytes_read = 0;
-            const TickType_t timeout_ticks = pdMS_TO_TICKS(timeout.count());
-            const TickType_t start_ticks = xTaskGetTickCount();
-
-            while (bytes_read < data.size()) {
-              TickType_t elapsed = xTaskGetTickCount() - start_ticks;
-              if (elapsed >= timeout_ticks) {
-                break;
-              }
-              uint8_t byte = 0;
-              if (xQueueReceive(serial_rx_queue_, &byte, timeout_ticks - elapsed) == pdTRUE) {
-                data[bytes_read++] = byte;
-              } else {
-                break;
-              }
-            }
-            return bytes_read;
-          },
-      .timeout = 200ms,
-      .log_level = config_.log_level,
-  };
-
-  basicmicro_ = std::make_unique<espp::Basicmicro>(bm_config);
-  return true;
-}
-
 // --- Mode Control ---
 
 bool Mcp266Controller::set_mode_m1(int8_t mode, std::error_code &ec) {
   ec.clear();
-  if (config_.mode == Mode::CANOPEN && canopen_client_) {
-    return canopen_client_->write_i8(0x6060, 0, mode, ec);
+  if (!canopen_client_) {
+    return false;
+  }
+  if (canopen_client_->write_i8(kAxisM1.mode, 0, mode, ec)) {
+    m1_mode_ = mode;
+    return true;
   }
   return false;
 }
 
 int8_t Mcp266Controller::get_mode_m1(std::error_code &ec) {
   ec.clear();
-  if (config_.mode == Mode::CANOPEN && canopen_client_) {
-    return canopen_client_->read_i8(0x6061, 0, ec);
-  }
-  return 0;
+  return canopen_client_ ? canopen_client_->read_i8(kAxisM1.mode_display, 0, ec) : 0;
 }
 
 bool Mcp266Controller::set_mode_m2(int8_t mode, std::error_code &ec) {
   ec.clear();
-  if (config_.mode == Mode::CANOPEN && canopen_client_) {
-    return canopen_client_->write_i8(0x6860, 0, mode, ec);
-  }
-  return false;
+  return canopen_client_ && canopen_client_->write_i8(kAxisM2.mode, 0, mode, ec);
 }
 
 int8_t Mcp266Controller::get_mode_m2(std::error_code &ec) {
   ec.clear();
-  if (config_.mode == Mode::CANOPEN && canopen_client_) {
-    return canopen_client_->read_i8(0x6861, 0, ec);
-  }
-  return 0;
+  return canopen_client_ ? canopen_client_->read_i8(kAxisM2.mode_display, 0, ec) : 0;
 }
 
 // --- CiA 402 state machine ---
@@ -239,8 +156,7 @@ bool Mcp266Controller::reset_axis_fault(const AxisObjects &axis, std::error_code
     return false;
   }
   if ((sw & 0x004F) != 0x0008) {
-    logger_.info("{}: no fault to reset (statusword 0x{:04X})", axis.name, sw);
-    return true;
+    return true; // not in Fault
   }
 
   logger_.warn("{}: resetting fault (statusword 0x{:04X})", axis.name, sw);
@@ -271,7 +187,7 @@ bool Mcp266Controller::reset_axis_fault(const AxisObjects &axis, std::error_code
 
 bool Mcp266Controller::reset_faults(std::error_code &ec) {
   ec.clear();
-  if (config_.mode != Mode::CANOPEN || !canopen_client_) {
+  if (!canopen_client_) {
     return true;
   }
   if (!reset_axis_fault(kAxisM1, ec)) {
@@ -280,98 +196,13 @@ bool Mcp266Controller::reset_faults(std::error_code &ec) {
   return reset_axis_fault(kAxisM2, ec);
 }
 
-void Mcp266Controller::log_statusword(const AxisObjects &axis, const char *step,
-                                      uint16_t statusword) const {
-  logger_.info(
-      "{} {}: 0x{:04X} [ready={}, switched_on={}, operation_enabled={}, fault={}, "
-      "voltage_enabled={}, quick_stop={}, switch_on_disabled={}, warning={}, remote={}, "
-      "target_reached={}, internal_limit={}, setpoint_ack={}, following_error={}]",
-      axis.name, step, statusword, (statusword & 0x0001) != 0, (statusword & 0x0002) != 0,
-      (statusword & 0x0004) != 0, (statusword & 0x0008) != 0, (statusword & 0x0010) != 0,
-      (statusword & 0x0020) != 0, (statusword & 0x0040) != 0, (statusword & 0x0080) != 0,
-      (statusword & 0x0200) != 0, (statusword & 0x0400) != 0, (statusword & 0x0800) != 0,
-      (statusword & 0x1000) != 0, (statusword & 0x2000) != 0);
-}
-
-bool Mcp266Controller::wait_for_statusword(const AxisObjects &axis, uint16_t mask,
-                                           uint16_t expected, const char *step,
-                                           std::error_code &ec) {
-  constexpr int kMaxPolls = 20;
-  constexpr auto kPollPeriod = 25ms;
-  uint16_t sw = 0;
-  for (int i = 0; i < kMaxPolls; ++i) {
-    std::this_thread::sleep_for(kPollPeriod);
-    sw = canopen_client_->read_u16(axis.statusword, 0, ec);
-    if (ec) {
-      logger_.error("{} {}: statusword read failed: {}", axis.name, step, ec.message());
-      return false;
-    }
-    if ((sw & 0x004F) == 0x0008) {
-      logger_.error("{} {}: drive faulted (statusword 0x{:04X})", axis.name, step, sw);
-      ec = std::make_error_code(std::errc::protocol_error);
-      return false;
-    }
-    if ((sw & mask) == expected) {
-      logger_.info("{} {}: reached (statusword 0x{:04X})", axis.name, step, sw);
-      log_statusword(axis, step, sw);
-      return true;
-    }
-  }
-  logger_.error("{} {}: timed out, statusword stuck at 0x{:04X}", axis.name, step, sw);
-  ec = std::make_error_code(std::errc::timed_out);
-  return false;
-}
-
-bool Mcp266Controller::enable_axis(const AxisObjects &axis, int8_t mode, bool verify_mode,
-                                   std::error_code &ec) {
-  ec.clear();
-  if (!canopen_client_->write_i8(axis.mode, 0, mode, ec)) {
-    logger_.error("{}: failed to set mode {}: {}", axis.name, mode, ec.message());
-    return false;
-  }
-  std::this_thread::sleep_for(25ms);
-  const int8_t display = canopen_client_->read_i8(axis.mode_display, 0, ec);
-  if (ec) {
-    logger_.error("{}: mode display read failed: {}", axis.name, ec.message());
-    return false;
-  }
-  if (verify_mode && display != mode) {
-    logger_.error("{}: mode {} rejected, drive reports {}", axis.name, mode, display);
-    ec = std::make_error_code(std::errc::not_supported);
-    return false;
-  }
-  logger_.info("{}: requested mode {}, display {}", axis.name, mode, display);
-
-  if (!reset_axis_fault(axis, ec)) {
-    return false;
-  }
-
-  // The CiA 402 state lives in statusword bits 0-3, 5 and 6 (mask 0x6F); bit 4
-  // (voltage enabled) merely reflects main power and must not be matched.
-  // Shutdown -> Ready to switch on (statusword xxxx xxxx x01x 0001)
-  if (!canopen_client_->write_u16(axis.controlword, 0, 0x0006, ec) ||
-      !wait_for_statusword(axis, 0x006F, 0x0021, "Ready to switch on", ec)) {
-    return false;
-  }
-  // Switch On -> Switched on (statusword xxxx xxxx x01x 0011)
-  if (!canopen_client_->write_u16(axis.controlword, 0, 0x0007, ec) ||
-      !wait_for_statusword(axis, 0x006F, 0x0023, "Switched on", ec)) {
-    return false;
-  }
-  // Enable Operation -> Operation enabled (statusword xxxx xxxx x01x 0111)
-  if (!canopen_client_->write_u16(axis.controlword, 0, 0x000F, ec) ||
-      !wait_for_statusword(axis, 0x006F, 0x0027, "Operation enabled", ec)) {
-    return false;
-  }
-  return true;
-}
-
 bool Mcp266Controller::enable_m1(int8_t mode, bool verify_mode, std::error_code &ec) {
   ec.clear();
   if (!canopen_client_->write_i8(kAxisM1.mode, 0, mode, ec)) {
     logger_.error("M1: failed to set mode {}: {}", mode, ec.message());
     return false;
   }
+  m1_mode_ = mode;
   std::this_thread::sleep_for(25ms);
   const int8_t display = canopen_client_->read_i8(kAxisM1.mode_display, 0, ec);
   if (ec) {
@@ -407,76 +238,91 @@ bool Mcp266Controller::enable_m1(int8_t mode, bool verify_mode, std::error_code 
   return true;
 }
 
-// --- Motor Duty Control ---
+bool Mcp266Controller::release_m1_position_hold(std::error_code &ec) {
+  ec.clear();
+  // A profile-position session leaves the MCP's position PID actively holding
+  // the last target; the mirrored duty/speed commands write their target but
+  // the position loop keeps servoing and wins. Switching the mode of operation
+  // out of profile position (to the manufacturer idle/duty mode -1) stops the
+  // position controller so the raw command takes effect.
+  if (m1_mode_ == -1) {
+    return true;
+  }
+  if (!canopen_client_->write_i8(kAxisM1.mode, 0, -1, ec)) {
+    logger_.error("M1: failed to release position hold (set mode -1): {}", ec.message());
+    return false;
+  }
+  m1_mode_ = -1;
+  std::this_thread::sleep_for(25ms);
+  return true;
+}
+
+// --- Motor Duty Control (manufacturer command mirror) ---
 
 bool Mcp266Controller::drive_m1_duty(int16_t duty, std::error_code &ec) {
   ec.clear();
-  if (config_.mode == Mode::PACKET_SERIAL && basicmicro_) {
-    return basicmicro_->drive_m1_duty(duty, ec);
+  if (!canopen_client_) {
+    return false;
   }
-  if (config_.mode == Mode::CANOPEN && canopen_client_) {
-    // Packet-serial command 32 mirrored into the object dictionary; acts
-    // directly, no CiA 402 mode/handshake required.
-    return canopen_client_->write_i16(kCmdDriveM1Duty, 0, duty, ec);
+  if (!release_m1_position_hold(ec)) {
+    return false;
   }
-  return false;
+  // Packet-serial command 32 mirrored into the object dictionary.
+  return canopen_client_->write_i16(kCmdDriveM1Duty, 0, duty, ec);
 }
 
 bool Mcp266Controller::drive_m2_duty(int16_t duty, std::error_code &ec) {
   ec.clear();
-  if (config_.mode == Mode::PACKET_SERIAL && basicmicro_) {
-    return basicmicro_->drive_m2_duty(duty, ec);
-  }
-  if (config_.mode == Mode::CANOPEN && canopen_client_) {
-    return canopen_client_->write_i16(kCmdDriveM2Duty, 0, duty, ec);
-  }
-  return false;
+  return canopen_client_ && canopen_client_->write_i16(kCmdDriveM2Duty, 0, duty, ec);
 }
 
 bool Mcp266Controller::drive_duty(int16_t duty_m1, int16_t duty_m2, std::error_code &ec) {
   ec.clear();
-  if (config_.mode == Mode::PACKET_SERIAL && basicmicro_) {
-    return basicmicro_->drive_duty(duty_m1, duty_m2, ec);
-  }
   return drive_m1_duty(duty_m1, ec) && drive_m2_duty(duty_m2, ec);
 }
 
-// --- Speed Control ---
+// --- Speed Control (manufacturer command mirror) ---
 
 bool Mcp266Controller::drive_m1_speed(int32_t qpps, std::error_code &ec) {
   ec.clear();
-  if (config_.mode == Mode::PACKET_SERIAL && basicmicro_) {
-    return basicmicro_->drive_m1_speed(qpps, ec);
+  if (!canopen_client_) {
+    return false;
   }
-  if (config_.mode == Mode::CANOPEN && canopen_client_) {
-    // Packet-serial command 35 ("Drive M1 With Signed Speed") mirrored into
-    // the object dictionary. The standard profile-velocity mode (0x6060=3 +
-    // 0x60FF) is accepted but inert on this firmware; this is the command the
-    // motion engine actually executes. Requires a tuned velocity PID.
-    return canopen_client_->write_i32(kCmdDriveM1Speed, 0, qpps, ec);
+  if (!release_m1_position_hold(ec)) {
+    return false;
   }
-  return false;
+  // Packet-serial command 35 ("Drive M1 With Signed Speed") mirrored into the
+  // object dictionary. The standard profile-velocity mode (0x6060=3 + 0x60FF)
+  // is accepted but inert on this firmware; this is the command the motion
+  // engine actually executes. Requires a tuned velocity PID.
+  return canopen_client_->write_i32(kCmdDriveM1Speed, 0, qpps, ec);
 }
 
 bool Mcp266Controller::drive_m2_speed(int32_t qpps, std::error_code &ec) {
   ec.clear();
-  if (config_.mode == Mode::PACKET_SERIAL && basicmicro_) {
-    return basicmicro_->drive_m2_speed(qpps, ec);
-  }
-  if (config_.mode == Mode::CANOPEN && canopen_client_) {
-    return canopen_client_->write_i32(kCmdDriveM2Speed, 0, qpps, ec);
-  }
-  return false;
+  return canopen_client_ && canopen_client_->write_i32(kCmdDriveM2Speed, 0, qpps, ec);
 }
 
+bool Mcp266Controller::drive_speed(int32_t qpps_m1, int32_t qpps_m2, std::error_code &ec) {
+  ec.clear();
+  return drive_m1_speed(qpps_m1, ec) && drive_m2_speed(qpps_m2, ec);
+}
+
+bool Mcp266Controller::stop_motors(std::error_code &ec) {
+  ec.clear();
+  return drive_speed(0, 0, ec);
+}
+
+// --- Position Control (CiA 402 profile position mode) ---
+
 bool Mcp266Controller::set_m1_position_limits(int32_t minimum_position, int32_t maximum_position,
-                                               std::error_code &ec) {
+                                              std::error_code &ec) {
   ec.clear();
   if (minimum_position > maximum_position) {
     ec = std::make_error_code(std::errc::invalid_argument);
     return false;
   }
-  if (config_.mode != Mode::CANOPEN || !canopen_client_) {
+  if (!canopen_client_) {
     ec = std::make_error_code(std::errc::operation_not_supported);
     return false;
   }
@@ -485,9 +331,9 @@ bool Mcp266Controller::set_m1_position_limits(int32_t minimum_position, int32_t 
 }
 
 bool Mcp266Controller::get_m1_position_limits(int32_t &minimum_position, int32_t &maximum_position,
-                                               std::error_code &ec) {
+                                              std::error_code &ec) {
   ec.clear();
-  if (config_.mode != Mode::CANOPEN || !canopen_client_) {
+  if (!canopen_client_) {
     ec = std::make_error_code(std::errc::operation_not_supported);
     return false;
   }
@@ -500,10 +346,10 @@ bool Mcp266Controller::get_m1_position_limits(int32_t &minimum_position, int32_t
 }
 
 bool Mcp266Controller::move_m1_to_position(int32_t target_position, uint32_t profile_velocity,
-                                            uint32_t profile_acceleration,
-                                            uint32_t profile_deceleration, std::error_code &ec) {
+                                           uint32_t profile_acceleration,
+                                           uint32_t profile_deceleration, std::error_code &ec) {
   ec.clear();
-  if (config_.mode != Mode::CANOPEN || !canopen_client_) {
+  if (!canopen_client_) {
     ec = std::make_error_code(std::errc::operation_not_supported);
     return false;
   }
@@ -522,69 +368,173 @@ bool Mcp266Controller::move_m1_to_position(int32_t target_position, uint32_t pro
   return drive_m1_->set_target_position(target_position, ec);
 }
 
-bool Mcp266Controller::drive_speed(int32_t qpps_m1, int32_t qpps_m2, std::error_code &ec) {
+bool Mcp266Controller::read_position_pid_m1_raw(std::array<int32_t, 7> &values,
+                                                std::error_code &ec) {
   ec.clear();
-  if (config_.mode == Mode::PACKET_SERIAL && basicmicro_) {
-    return basicmicro_->drive_speed(qpps_m1, qpps_m2, ec);
+  if (!canopen_client_) {
+    ec = std::make_error_code(std::errc::operation_not_supported);
+    return false;
   }
-  return drive_m1_speed(qpps_m1, ec) && drive_m2_speed(qpps_m2, ec);
+  for (uint8_t sub = 1; sub <= 7; ++sub) {
+    values[sub - 1] = canopen_client_->read_i32(kM1PositionPidRead, sub, ec);
+    if (ec) {
+      return false;
+    }
+  }
+  return true;
 }
 
-bool Mcp266Controller::stop_motors(std::error_code &ec) {
+bool Mcp266Controller::write_position_pid_m1_raw(const std::array<int32_t, 7> &values,
+                                                 std::error_code &ec) {
   ec.clear();
-  return drive_speed(0, 0, ec);
+  if (!canopen_client_) {
+    ec = std::make_error_code(std::errc::operation_not_supported);
+    return false;
+  }
+  for (uint8_t sub = 1; sub <= 7; ++sub) {
+    if (!canopen_client_->write_i32(kM1PositionPidSet, sub, values[sub - 1], ec)) {
+      logger_.error("position PID write 0x{:04X}:{} rejected: {}", kM1PositionPidSet, sub,
+                    ec.message());
+      return false;
+    }
+  }
+  std::array<int32_t, 7> readback{};
+  if (!read_position_pid_m1_raw(readback, ec)) {
+    return false;
+  }
+  if (readback != values) {
+    logger_.error("position PID readback mismatch after write");
+    ec = std::make_error_code(std::errc::protocol_error);
+    return false;
+  }
+  return true;
+}
+
+bool Mcp266Controller::configure_m1_position_loop(int32_t min_pos, int32_t max_pos,
+                                                  std::error_code &ec) {
+  ec.clear();
+  if (!canopen_client_) {
+    ec = std::make_error_code(std::errc::operation_not_supported);
+    return false;
+  }
+  std::array<int32_t, 7> pid{};
+  if (!read_position_pid_m1_raw(pid, ec)) {
+    logger_.error("could not read M1 position PID: {}", ec.message());
+    return false;
+  }
+  // Record layout (this firmware, write order D,P,I,MaxI,Deadzone,MinPos,
+  // MaxPos): subs 6/7 are the min/max clamp, factory [0,0] which forces every
+  // target to zero. Sub 1 is the D gain and sub 2 the P gain, so a factory
+  // record reading [gain, 0, ...] has P = 0 and the loop produces no output;
+  // seed P from the D value (or a sane default) when it is zero.
+  pid[5] = min_pos;
+  pid[6] = max_pos;
+  if (pid[1] == 0) {
+    pid[1] = pid[0] != 0 ? pid[0] : 0x3C83;
+    logger_.info("M1 position P gain was 0; seeding with {}", pid[1]);
+  }
+  if (!write_position_pid_m1_raw(pid, ec)) {
+    return false;
+  }
+  logger_.info("M1 position loop configured: P={} clamp=[{}, {}]", pid[1], min_pos, max_pos);
+  return true;
+}
+
+bool Mcp266Controller::try_estop_reset(std::error_code &ec) {
+  ec.clear();
+  if (!canopen_client_) {
+    ec = std::make_error_code(std::errc::operation_not_supported);
+    return false;
+  }
+  // Packet-serial command 200 (E-Stop Reset) takes no payload, so the SDO
+  // scalar size is unknown; probe the common widths.
+  bool reset_ok = canopen_client_->write_u8(kEStopReset, 0, 1, ec);
+  if (!reset_ok) {
+    reset_ok = canopen_client_->write_u32(kEStopReset, 0, 1, ec);
+  }
+  std::error_code lock_ec;
+  const uint8_t lock = canopen_client_->read_u8(kEStopLockState, 0, lock_ec);
+  logger_.info("E-stop reset {}; lock state = {}", reset_ok ? "accepted" : "rejected",
+               lock_ec ? -1 : static_cast<int>(lock));
+  return reset_ok;
+}
+
+bool Mcp266Controller::map_rpdo1_for_position(std::error_code &ec) {
+  ec.clear();
+  if (!canopen_client_) {
+    ec = std::make_error_code(std::errc::operation_not_supported);
+    return false;
+  }
+  const uint32_t cob = canopen_client_->read_u32(0x1400, 1, ec);
+  if (ec) {
+    return false;
+  }
+  // Standard remap sequence: disable the PDO, clear the mapping count, write
+  // the entries ((index << 16) | (sub << 8) | bit length), restore the count,
+  // re-enable the PDO.
+  if (!canopen_client_->write_u32(0x1400, 1, cob | 0x80000000u, ec) ||
+      !canopen_client_->write_u8(0x1600, 0, 0, ec) ||
+      !canopen_client_->write_u32(0x1600, 1, 0x60400010u, ec) ||
+      !canopen_client_->write_u32(0x1600, 2, 0x607A0020u, ec) ||
+      !canopen_client_->write_u8(0x1600, 0, 2, ec) ||
+      !canopen_client_->write_u32(0x1400, 1, cob & ~0x80000000u, ec)) {
+    logger_.warn("RPDO1 remap rejected: {} (abort 0x{:08X})", ec.message(),
+                 canopen_client_->last_abort_code());
+    return false;
+  }
+  rpdo1_cob_ = cob & 0x7FFu;
+  logger_.info("RPDO1 mapped to controlword + target position on COB 0x{:03X}", rpdo1_cob_);
+  return true;
+}
+
+bool Mcp266Controller::send_position_rpdo(uint16_t controlword, int32_t target,
+                                          std::error_code &ec) {
+  ec.clear();
+  if (!canopen_client_ || rpdo1_cob_ == 0) {
+    ec = std::make_error_code(std::errc::operation_not_supported);
+    return false;
+  }
+  const std::array<uint8_t, 6> payload{
+      static_cast<uint8_t>(controlword),  static_cast<uint8_t>(controlword >> 8),
+      static_cast<uint8_t>(target),       static_cast<uint8_t>(target >> 8),
+      static_cast<uint8_t>(target >> 16), static_cast<uint8_t>(target >> 24)};
+  if (!canopen_client_->send_rpdo(rpdo1_cob_, payload, ec)) {
+    return false;
+  }
+  return canopen_client_->send_sync(ec);
 }
 
 // --- Encoder Readback ---
 
 bool Mcp266Controller::read_encoder_m1(int32_t &count, uint8_t &status, std::error_code &ec) {
   ec.clear();
-  if (config_.mode == Mode::PACKET_SERIAL && basicmicro_) {
-    uint32_t u_count = 0;
-    bool ok = basicmicro_->read_encoder_m1(u_count, status, ec);
-    count = static_cast<int32_t>(u_count);
-    return ok;
+  if (!canopen_client_) {
+    return false;
   }
-  if (config_.mode == Mode::CANOPEN && canopen_client_) {
-    count = canopen_client_->read_i32(0x6064, 0, ec);
-    status = ec ? 0 : 1;
-    return !ec;
-  }
-  return false;
+  count = canopen_client_->read_i32(0x6064, 0, ec);
+  status = ec ? 0 : 1;
+  return !ec;
 }
 
 bool Mcp266Controller::read_encoder_m2(int32_t &count, uint8_t &status, std::error_code &ec) {
   ec.clear();
-  if (config_.mode == Mode::PACKET_SERIAL && basicmicro_) {
-    uint32_t u_count = 0;
-    bool ok = basicmicro_->read_encoder_m2(u_count, status, ec);
-    count = static_cast<int32_t>(u_count);
-    return ok;
+  if (!canopen_client_) {
+    return false;
   }
-  if (config_.mode == Mode::CANOPEN && canopen_client_) {
-    count = canopen_client_->read_i32(0x6864, 0, ec);
-    status = ec ? 0 : 1;
-    return !ec;
-  }
-  return false;
+  count = canopen_client_->read_i32(0x6864, 0, ec);
+  status = ec ? 0 : 1;
+  return !ec;
 }
 
 bool Mcp266Controller::read_encoders(int32_t &count_m1, int32_t &count_m2, std::error_code &ec) {
   ec.clear();
-  if (config_.mode == Mode::PACKET_SERIAL && basicmicro_) {
-    uint32_t u1 = 0, u2 = 0;
-    bool ok = basicmicro_->read_encoders(u1, u2, ec);
-    count_m1 = static_cast<int32_t>(u1);
-    count_m2 = static_cast<int32_t>(u2);
-    return ok;
-  }
   uint8_t st1 = 0, st2 = 0;
   return read_encoder_m1(count_m1, st1, ec) && read_encoder_m2(count_m2, st2, ec);
 }
 
 bool Mcp266Controller::read_position_demand_m1(int32_t &demand, std::error_code &ec) {
   ec.clear();
-  if (config_.mode != Mode::CANOPEN || !canopen_client_) {
+  if (!canopen_client_) {
     ec = std::make_error_code(std::errc::operation_not_supported);
     return false;
   }
@@ -594,7 +544,7 @@ bool Mcp266Controller::read_position_demand_m1(int32_t &demand, std::error_code 
 
 bool Mcp266Controller::read_velocity_demand_m1(int32_t &demand, std::error_code &ec) {
   ec.clear();
-  if (config_.mode != Mode::CANOPEN || !canopen_client_) {
+  if (!canopen_client_) {
     ec = std::make_error_code(std::errc::operation_not_supported);
     return false;
   }
@@ -604,56 +554,43 @@ bool Mcp266Controller::read_velocity_demand_m1(int32_t &demand, std::error_code 
 
 bool Mcp266Controller::read_speed_m1(int32_t &qpps, uint8_t &status, std::error_code &ec) {
   ec.clear();
-  if (config_.mode == Mode::PACKET_SERIAL && basicmicro_) {
-    return basicmicro_->read_encoder_speed_m1(qpps, status, ec);
+  if (!canopen_client_) {
+    return false;
   }
-  if (config_.mode == Mode::CANOPEN && canopen_client_) {
-    qpps = canopen_client_->read_i32(0x606C, 0, ec);
-    status = ec ? 0 : 1;
-    return !ec;
-  }
-  return false;
+  qpps = canopen_client_->read_i32(0x606C, 0, ec);
+  status = ec ? 0 : 1;
+  return !ec;
 }
 
 bool Mcp266Controller::read_speed_m2(int32_t &qpps, uint8_t &status, std::error_code &ec) {
   ec.clear();
-  if (config_.mode == Mode::PACKET_SERIAL && basicmicro_) {
-    return basicmicro_->read_encoder_speed_m2(qpps, status, ec);
+  if (!canopen_client_) {
+    return false;
   }
-  if (config_.mode == Mode::CANOPEN && canopen_client_) {
-    qpps = canopen_client_->read_i32(0x686C, 0, ec);
-    status = ec ? 0 : 1;
-    return !ec;
-  }
-  return false;
+  qpps = canopen_client_->read_i32(0x686C, 0, ec);
+  status = ec ? 0 : 1;
+  return !ec;
 }
 
 // --- Telemetry & Diagnostics ---
 
 bool Mcp266Controller::read_device_info(std::string &device_name, uint32_t &device_type,
-                                         std::error_code &ec) {
+                                        std::error_code &ec) {
   ec.clear();
-  if (config_.mode == Mode::CANOPEN && canopen_client_) {
-    device_type = canopen_client_->read_u32(0x1000, 0, ec);
-    if (ec) {
-      return false;
-    }
-    device_name = canopen_client_->read_string(0x1008, 0, ec);
-    return !ec;
+  if (!canopen_client_) {
+    return false;
   }
-  if (config_.mode == Mode::PACKET_SERIAL && basicmicro_) {
-    std::string ver;
-    bool ok = basicmicro_->read_firmware_version(ver, ec);
-    device_name = ver;
-    device_type = 0;
-    return ok;
+  device_type = canopen_client_->read_u32(0x1000, 0, ec);
+  if (ec) {
+    return false;
   }
-  return false;
+  device_name = canopen_client_->read_string(0x1008, 0, ec);
+  return !ec;
 }
 
 bool Mcp266Controller::read_object_dictionary(std::string &eds, std::error_code &ec) {
   ec.clear();
-  if (config_.mode != Mode::CANOPEN || !canopen_client_) {
+  if (!canopen_client_) {
     ec = std::make_error_code(std::errc::operation_not_supported);
     return false;
   }
@@ -662,7 +599,7 @@ bool Mcp266Controller::read_object_dictionary(std::string &eds, std::error_code 
 }
 
 size_t Mcp266Controller::scan_object_dictionary(uint16_t first_index, uint16_t last_index) {
-  if (config_.mode != Mode::CANOPEN || !canopen_client_) {
+  if (!canopen_client_) {
     return 0;
   }
   size_t found = 0;
@@ -672,8 +609,7 @@ size_t Mcp266Controller::scan_object_dictionary(uint16_t first_index, uint16_t l
   for (uint32_t index = first_index; index <= last_index; ++index) {
     std::error_code ec;
     std::array<uint8_t, 4> data{};
-    const size_t len =
-        canopen_client_->sdo_upload(static_cast<uint16_t>(index), 0, data, ec);
+    const size_t len = canopen_client_->sdo_upload(static_cast<uint16_t>(index), 0, data, ec);
     if (!ec) {
       const uint32_t value = espp::detail::canopen::get_le(data.data(), len);
       logger_.info("OD 0x{:04X}:00 = 0x{:08X} ({} bytes)", index, value, len);
@@ -698,7 +634,7 @@ size_t Mcp266Controller::scan_object_dictionary(uint16_t first_index, uint16_t l
 }
 
 size_t Mcp266Controller::dump_object_subindices(uint16_t first_index, uint16_t last_index) {
-  if (config_.mode != Mode::CANOPEN || !canopen_client_) {
+  if (!canopen_client_) {
     return 0;
   }
   size_t dumped = 0;
@@ -745,301 +681,41 @@ size_t Mcp266Controller::dump_object_subindices(uint16_t first_index, uint16_t l
   return dumped;
 }
 
-bool Mcp266Controller::drive_m1_speed_manufacturer(int32_t qpps, std::error_code &ec) {
-  ec.clear();
-  if (config_.mode != Mode::CANOPEN || !canopen_client_) {
-    ec = std::make_error_code(std::errc::operation_not_supported);
-    return false;
-  }
-  // Manufacturer velocity mode; the mode display echo is not standardized for
-  // negative modes, so don't fail hard on a mismatch.
-  if (qpps != 0 && !enable_m1(-2, false, ec)) {
-    return false;
-  }
-  return drive_m1_->set_target_velocity(qpps, ec);
-}
-
-bool Mcp266Controller::drive_m1_duty_via_torque(int16_t per_mille, std::error_code &ec) {
-  ec.clear();
-  if (config_.mode != Mode::CANOPEN || !canopen_client_) {
-    ec = std::make_error_code(std::errc::operation_not_supported);
-    return false;
-  }
-  if (per_mille != 0 && !enable_m1(-1, false, ec)) {
-    return false;
-  }
-  return canopen_client_->write_i16(0x6071, 0, per_mille, ec);
-}
-
-bool Mcp266Controller::configure_m1_position_range(int32_t min_pos, int32_t max_pos,
-                                                   std::error_code &ec) {
-  ec.clear();
-  if (config_.mode != Mode::CANOPEN || !canopen_client_) {
-    ec = std::make_error_code(std::errc::operation_not_supported);
-    return false;
-  }
-  constexpr uint16_t kReadbackIndex = 0x203F; // readable position PID M1 mirror
-  // Preserve the currently-configured gains; only the [min, max] clamp (subs
-  // 6 and 7) needs to change for position targets to survive.
-  std::array<int32_t, 7> values{};
-  for (uint8_t sub = 1; sub <= 7; ++sub) {
-    values[sub - 1] = canopen_client_->read_i32(kReadbackIndex, sub, ec);
-    if (ec) {
-      logger_.error("position PID readback 0x{:04X}:{} failed: {}", kReadbackIndex, sub,
-                    ec.message());
-      return false;
-    }
-  }
-  values[5] = min_pos;
-  values[6] = max_pos;
-
-  for (const uint16_t setter : {uint16_t{0x203D}, uint16_t{0x203E}}) {
-    bool wrote = true;
-    for (uint8_t sub = 1; sub <= 7; ++sub) {
-      if (!canopen_client_->write_i32(setter, sub, values[sub - 1], ec)) {
-        logger_.warn("position PID write 0x{:04X}:{} rejected: {}", setter, sub, ec.message());
-        wrote = false;
-        break;
-      }
-    }
-    if (!wrote) {
-      continue;
-    }
-    const int32_t got_min = canopen_client_->read_i32(kReadbackIndex, 6, ec);
-    const int32_t got_max = canopen_client_->read_i32(kReadbackIndex, 7, ec);
-    if (!ec && got_min == min_pos && got_max == max_pos) {
-      logger_.info("M1 position range set to [{}, {}] via 0x{:04X}", min_pos, max_pos, setter);
-      return true;
-    }
-    logger_.warn("0x{:04X} did not change the M1 position range (read [{}, {}])", setter,
-                 got_min, got_max);
-  }
-  logger_.error("failed to configure the M1 position range via 0x203D/0x203E");
-  ec = std::make_error_code(std::errc::protocol_error);
-  return false;
-}
-
-bool Mcp266Controller::read_position_pid_m1_raw(std::array<int32_t, 7> &values,
-                                                std::error_code &ec) {
-  ec.clear();
-  if (config_.mode != Mode::CANOPEN || !canopen_client_) {
-    ec = std::make_error_code(std::errc::operation_not_supported);
-    return false;
-  }
-  for (uint8_t sub = 1; sub <= 7; ++sub) {
-    values[sub - 1] = canopen_client_->read_i32(0x203F, sub, ec);
-    if (ec) {
-      return false;
-    }
-  }
-  return true;
-}
-
-bool Mcp266Controller::write_position_pid_m1_raw(const std::array<int32_t, 7> &values,
-                                                 std::error_code &ec) {
-  ec.clear();
-  if (config_.mode != Mode::CANOPEN || !canopen_client_) {
-    ec = std::make_error_code(std::errc::operation_not_supported);
-    return false;
-  }
-  for (uint8_t sub = 1; sub <= 7; ++sub) {
-    if (!canopen_client_->write_i32(0x203D, sub, values[sub - 1], ec)) {
-      logger_.error("position PID write 0x203D:{} rejected: {}", sub, ec.message());
-      return false;
-    }
-  }
-  std::array<int32_t, 7> readback{};
-  if (!read_position_pid_m1_raw(readback, ec)) {
-    return false;
-  }
-  if (readback != values) {
-    logger_.error("position PID readback mismatch after write");
-    ec = std::make_error_code(std::errc::protocol_error);
-    return false;
-  }
-  logger_.info("M1 position PID set: [{}, {}, {}, {}, {}, {}, {}]", values[0], values[1],
-               values[2], values[3], values[4], values[5], values[6]);
-  return true;
-}
-
-bool Mcp266Controller::try_estop_reset(std::error_code &ec) {
-  ec.clear();
-  if (config_.mode != Mode::CANOPEN || !canopen_client_) {
-    ec = std::make_error_code(std::errc::operation_not_supported);
-    return false;
-  }
-  // Packet-serial command 200 (E-Stop Reset) takes no payload, so the SDO
-  // scalar size is unknown; probe the common widths.
-  bool reset_ok = canopen_client_->write_u8(0x20C8, 0, 1, ec);
-  if (!reset_ok) {
-    reset_ok = canopen_client_->write_u32(0x20C8, 0, 1, ec);
-  }
-  std::error_code lock_ec;
-  const uint8_t lock = canopen_client_->read_u8(0x20CA, 0, lock_ec);
-  logger_.info("E-stop reset (0x20C8) {}; lock state (0x20CA) = {}",
-               reset_ok ? "accepted" : "rejected", lock_ec ? -1 : static_cast<int>(lock));
-  return reset_ok;
-}
-
-bool Mcp266Controller::map_rpdo1_for_position(std::error_code &ec) {
-  ec.clear();
-  if (config_.mode != Mode::CANOPEN || !canopen_client_) {
-    ec = std::make_error_code(std::errc::operation_not_supported);
-    return false;
-  }
-  const uint32_t cob = canopen_client_->read_u32(0x1400, 1, ec);
-  if (ec) {
-    return false;
-  }
-  // Standard remap sequence: disable the PDO, clear the mapping count, write
-  // the entries ((index << 16) | (sub << 8) | bit length), restore the count,
-  // re-enable the PDO.
-  if (!canopen_client_->write_u32(0x1400, 1, cob | 0x80000000u, ec) ||
-      !canopen_client_->write_u8(0x1600, 0, 0, ec) ||
-      !canopen_client_->write_u32(0x1600, 1, 0x60400010u, ec) ||
-      !canopen_client_->write_u32(0x1600, 2, 0x607A0020u, ec) ||
-      !canopen_client_->write_u8(0x1600, 0, 2, ec) ||
-      !canopen_client_->write_u32(0x1400, 1, cob & ~0x80000000u, ec)) {
-    logger_.warn("RPDO1 remap rejected: {} (abort 0x{:08X})", ec.message(),
-                 canopen_client_->last_abort_code());
-    return false;
-  }
-  rpdo1_cob_ = cob & 0x7FFu;
-  logger_.info("RPDO1 mapped to controlword + target position on COB 0x{:03X}", rpdo1_cob_);
-  return true;
-}
-
-bool Mcp266Controller::send_position_rpdo(uint16_t controlword, int32_t target,
-                                          std::error_code &ec) {
-  ec.clear();
-  if (config_.mode != Mode::CANOPEN || !canopen_client_ || rpdo1_cob_ == 0) {
-    ec = std::make_error_code(std::errc::operation_not_supported);
-    return false;
-  }
-  const std::array<uint8_t, 6> payload{
-      static_cast<uint8_t>(controlword),       static_cast<uint8_t>(controlword >> 8),
-      static_cast<uint8_t>(target),            static_cast<uint8_t>(target >> 8),
-      static_cast<uint8_t>(target >> 16),      static_cast<uint8_t>(target >> 24)};
-  if (!canopen_client_->send_rpdo(rpdo1_cob_, payload, ec)) {
-    return false;
-  }
-  return canopen_client_->send_sync(ec);
-}
-
-size_t Mcp266Controller::send_test_rpdos(int8_t mode, int32_t target_velocity,
-                                         int32_t target_position, int16_t duty_per_mille,
-                                         std::error_code &ec) {
-  ec.clear();
-  if (config_.mode != Mode::CANOPEN || !canopen_client_) {
-    ec = std::make_error_code(std::errc::operation_not_supported);
-    return 0;
-  }
-  // Value to place in a mapped object slot; unknown objects are zero-filled.
-  const auto value_for = [&](uint16_t object) -> uint32_t {
-    switch (object & 0xF7FF) { // fold the M2 axis (+0x800) onto M1 objects
-    case 0x6040:
-      return 0x000F; // controlword: enable operation
-    case 0x6060:
-      return static_cast<uint32_t>(static_cast<uint8_t>(mode));
-    case 0x60FF:
-    case 0x6042:
-      return static_cast<uint32_t>(target_velocity);
-    case 0x607A:
-      return static_cast<uint32_t>(target_position);
-    case 0x6071:
-      return static_cast<uint32_t>(static_cast<uint16_t>(duty_per_mille));
-    default:
-      return 0;
-    }
-  };
-
-  size_t sent = 0;
-  for (uint16_t rpdo = 0; rpdo < 4; ++rpdo) {
-    std::error_code pdo_ec;
-    const uint32_t cob = canopen_client_->read_u32(0x1400 + rpdo, 1, pdo_ec);
-    if (pdo_ec || (cob & 0x80000000u)) {
-      continue; // RPDO missing or disabled
-    }
-    const uint8_t entries = canopen_client_->read_u8(0x1600 + rpdo, 0, pdo_ec);
-    if (pdo_ec) {
-      continue;
-    }
-    std::array<uint8_t, 8> payload{};
-    size_t bit_offset = 0;
-    std::string desc;
-    for (uint8_t sub = 1; sub <= entries && bit_offset < 64; ++sub) {
-      const uint32_t entry = canopen_client_->read_u32(0x1600 + rpdo, sub, pdo_ec);
-      if (pdo_ec) {
-        break;
-      }
-      const uint16_t object = static_cast<uint16_t>(entry >> 16);
-      const uint8_t bits = static_cast<uint8_t>(entry & 0xFF);
-      const uint32_t value = value_for(object);
-      for (uint8_t b = 0; b + 8 <= bits && bit_offset < 64; b += 8) {
-        payload[bit_offset / 8] = static_cast<uint8_t>(value >> b);
-        bit_offset += 8;
-      }
-      desc += fmt::format(" 0x{:04X}:{:02X}/{}={:X}", object, (entry >> 8) & 0xFF, bits, value);
-    }
-    const size_t dlc = (bit_offset + 7) / 8;
-    if (dlc == 0) {
-      continue;
-    }
-    if (!canopen_client_->send_rpdo(cob & 0x7FF, std::span(payload.data(), dlc), ec)) {
-      return sent;
-    }
-    logger_.info("RPDO{} sent on COB 0x{:03X} ({} bytes):{}", rpdo + 1, cob & 0x7FF, dlc, desc);
-    ++sent;
-  }
-  // Cover synchronous transmission types: latch the just-sent PDO data.
-  canopen_client_->send_sync(ec);
-  return sent;
-}
-
 bool Mcp266Controller::read_main_battery_voltage(float &volts, std::error_code &ec) {
   ec.clear();
-  if (config_.mode == Mode::PACKET_SERIAL && basicmicro_) {
-    return basicmicro_->read_main_battery_voltage(volts, ec);
+  if (!canopen_client_) {
+    volts = 0.0f;
+    return false;
   }
-  if (config_.mode == Mode::CANOPEN && canopen_client_) {
-    // Packet-serial command 24 mirrored into the object dictionary (tenths of a volt).
-    const uint16_t tenths = canopen_client_->read_u16(kCmdReadMainBattery, 0, ec);
-    volts = static_cast<float>(tenths) / 10.0f;
-    return !ec;
-  }
-  volts = 0.0f;
-  return true;
+  // Packet-serial command 24 mirrored into the object dictionary (tenths of a volt).
+  const uint16_t tenths = canopen_client_->read_u16(kCmdReadMainBattery, 0, ec);
+  volts = static_cast<float>(tenths) / 10.0f;
+  return !ec;
 }
 
 bool Mcp266Controller::read_temperature(float &temp_c, std::error_code &ec) {
   ec.clear();
-  if (config_.mode == Mode::PACKET_SERIAL && basicmicro_) {
-    return basicmicro_->read_temperature(temp_c, ec);
+  if (!canopen_client_) {
+    temp_c = 0.0f;
+    return false;
   }
-  if (config_.mode == Mode::CANOPEN && canopen_client_) {
-    // Packet-serial command 82 mirrored into the object dictionary (tenths of a degree C).
-    const uint16_t tenths = canopen_client_->read_u16(kCmdReadTemperature, 0, ec);
-    temp_c = static_cast<float>(tenths) / 10.0f;
-    return !ec;
-  }
-  temp_c = 0.0f;
-  return true;
+  // Packet-serial command 82 mirrored into the object dictionary (tenths of a degree C).
+  const uint16_t tenths = canopen_client_->read_u16(kCmdReadTemperature, 0, ec);
+  temp_c = static_cast<float>(tenths) / 10.0f;
+  return !ec;
 }
 
 bool Mcp266Controller::read_status(uint32_t &status_mask, std::error_code &ec) {
   ec.clear();
-  if (config_.mode == Mode::PACKET_SERIAL && basicmicro_) {
-    return basicmicro_->read_status(status_mask, ec);
+  if (!canopen_client_) {
+    status_mask = 0;
+    return false;
   }
-  if (config_.mode == Mode::CANOPEN && canopen_client_) {
-    uint16_t sw1 = canopen_client_->read_u16(0x6041, 0, ec);
-    if (ec) {
-      return false;
-    }
-    status_mask = static_cast<uint32_t>(sw1);
-    return true;
+  const uint16_t sw1 = canopen_client_->read_u16(0x6041, 0, ec);
+  if (ec) {
+    return false;
   }
-  status_mask = 0;
+  status_mask = static_cast<uint32_t>(sw1);
   return true;
 }
 
