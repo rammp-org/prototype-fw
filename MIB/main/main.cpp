@@ -161,8 +161,13 @@ extern "C" void app_main(void) {
         uint8_t speed_status = 0;
         std::error_code speed_ec;
         roboclaw.read_speed_m1(speed, speed_status, speed_ec);
-        logger.info("  velocity: target={} actual={} counts/s, position={}", target, speed,
-                    read_position());
+        uint32_t sw = 0;
+        int32_t vel_demand = 0;
+        std::error_code diag_ec;
+        roboclaw.read_status(sw, diag_ec);
+        roboclaw.read_velocity_demand_m1(vel_demand, diag_ec);
+        logger.info("  velocity: target={} actual={} counts/s, position={} sw=0x{:04X} demand={}",
+                    target, speed, read_position(), sw, vel_demand);
       }
     }
     roboclaw.drive_m1_speed(0, ec);

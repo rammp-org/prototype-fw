@@ -161,10 +161,6 @@ private:
   /// latched fault, and walk the drive to Operation Enabled.
   bool enable_m1(int8_t mode, bool verify_mode, std::error_code &ec);
   bool reset_axis_fault(const AxisObjects &axis, std::error_code &ec);
-  /// If a CiA 402 profile-position session is active on M1, release it (set
-  /// mode -1) so the mirrored duty/speed commands are not overridden by the
-  /// position hold.
-  bool release_m1_position_hold(std::error_code &ec);
 
   Config config_;
   std::unique_ptr<espp::Twai> twai_;

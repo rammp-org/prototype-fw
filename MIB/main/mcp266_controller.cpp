@@ -238,25 +238,6 @@ bool Mcp266Controller::enable_m1(int8_t mode, bool verify_mode, std::error_code 
   return true;
 }
 
-bool Mcp266Controller::release_m1_position_hold(std::error_code &ec) {
-  ec.clear();
-  // A profile-position session leaves the MCP's position PID actively holding
-  // the last target; the mirrored duty/speed commands write their target but
-  // the position loop keeps servoing and wins. Switching the mode of operation
-  // out of profile position (to the manufacturer idle/duty mode -1) stops the
-  // position controller so the raw command takes effect.
-  if (m1_mode_ == -1) {
-    return true;
-  }
-  if (!canopen_client_->write_i8(kAxisM1.mode, 0, -1, ec)) {
-    logger_.error("M1: failed to release position hold (set mode -1): {}", ec.message());
-    return false;
-  }
-  m1_mode_ = -1;
-  std::this_thread::sleep_for(25ms);
-  return true;
-}
-
 // --- Motor Duty Control (manufacturer command mirror) ---
 
 bool Mcp266Controller::drive_m1_duty(int16_t duty, std::error_code &ec) {
@@ -264,10 +245,14 @@ bool Mcp266Controller::drive_m1_duty(int16_t duty, std::error_code &ec) {
   if (!canopen_client_) {
     return false;
   }
-  if (!release_m1_position_hold(ec)) {
+  // The power stage is only live in Operation Enabled; profile velocity mode
+  // (3) reaches it without the position loop holding a target. Enable there,
+  // then issue the mirrored duty command (packet-serial cmd 32).
+  if (duty != 0 &&
+      !enable_m1(static_cast<int8_t>(espp::Ds402Drive::OperatingMode::ProfileVelocity), false,
+                 ec)) {
     return false;
   }
-  // Packet-serial command 32 mirrored into the object dictionary.
   return canopen_client_->write_i16(kCmdDriveM1Duty, 0, duty, ec);
 }
 
@@ -288,13 +273,20 @@ bool Mcp266Controller::drive_m1_speed(int32_t qpps, std::error_code &ec) {
   if (!canopen_client_) {
     return false;
   }
-  if (!release_m1_position_hold(ec)) {
+  // The mirrored speed command only turns the motor when the power stage is
+  // live, i.e. Operation Enabled. Profile velocity mode (3) reaches Operation
+  // Enabled without the position loop holding a target (unlike position mode,
+  // which servos to its last setpoint and overrides the raw command). Setting
+  // the mode to -1 does NOT idle the drive -- it drops it to Switch On
+  // Disabled (power stage off), so never use that to "release" a hold.
+  // With the drive enabled here, issue the mirrored packet-serial command 35
+  // ("Drive M1 With Signed Speed"); the standard 0x60FF target is inert on
+  // this firmware. Requires a tuned velocity PID.
+  if (qpps != 0 &&
+      !enable_m1(static_cast<int8_t>(espp::Ds402Drive::OperatingMode::ProfileVelocity), false,
+                 ec)) {
     return false;
   }
-  // Packet-serial command 35 ("Drive M1 With Signed Speed") mirrored into the
-  // object dictionary. The standard profile-velocity mode (0x6060=3 + 0x60FF)
-  // is accepted but inert on this firmware; this is the command the motion
-  // engine actually executes. Requires a tuned velocity PID.
   return canopen_client_->write_i32(kCmdDriveM1Speed, 0, qpps, ec);
 }
 
@@ -422,21 +414,30 @@ bool Mcp266Controller::configure_m1_position_loop(int32_t min_pos, int32_t max_p
     logger_.error("could not read M1 position PID: {}", ec.message());
     return false;
   }
-  // Record layout (this firmware, write order D,P,I,MaxI,Deadzone,MinPos,
-  // MaxPos): subs 6/7 are the min/max clamp, factory [0,0] which forces every
-  // target to zero. Sub 1 is the D gain and sub 2 the P gain, so a factory
-  // record reading [gain, 0, ...] has P = 0 and the loop produces no output;
-  // seed P from the D value (or a sane default) when it is zero.
+  // The record's subs 6/7 are the min/max position clamp; the factory value
+  // [0, 0] forces every target to zero. Rewrite the whole record (preserving
+  // the existing gains, which already drive position moves) with the clamp
+  // widened, then verify the clamp took -- the setter (0x203D) does not
+  // round-trip every field through the readback (0x203F), so verify only the
+  // fields we changed rather than the full record.
   pid[5] = min_pos;
   pid[6] = max_pos;
-  if (pid[1] == 0) {
-    pid[1] = pid[0] != 0 ? pid[0] : 0x3C83;
-    logger_.info("M1 position P gain was 0; seeding with {}", pid[1]);
+  for (uint8_t sub = 1; sub <= 7; ++sub) {
+    if (!canopen_client_->write_i32(kM1PositionPidSet, sub, pid[sub - 1], ec)) {
+      logger_.error("position PID write 0x{:04X}:{} rejected: {}", kM1PositionPidSet, sub,
+                    ec.message());
+      return false;
+    }
   }
-  if (!write_position_pid_m1_raw(pid, ec)) {
+  const int32_t got_min = canopen_client_->read_i32(kM1PositionPidRead, 6, ec);
+  const int32_t got_max = canopen_client_->read_i32(kM1PositionPidRead, 7, ec);
+  if (ec || got_min != min_pos || got_max != max_pos) {
+    logger_.error("M1 position clamp did not take (read [{}, {}], wanted [{}, {}])", got_min,
+                  got_max, min_pos, max_pos);
+    ec = std::make_error_code(std::errc::protocol_error);
     return false;
   }
-  logger_.info("M1 position loop configured: P={} clamp=[{}, {}]", pid[1], min_pos, max_pos);
+  logger_.info("M1 position loop configured: clamp=[{}, {}]", min_pos, max_pos);
   return true;
 }
 
