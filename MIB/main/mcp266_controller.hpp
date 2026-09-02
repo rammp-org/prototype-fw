@@ -108,6 +108,24 @@ public:
   /// \brief Drive M1 in the Basicmicro manufacturer velocity mode (-2)
   ///        instead of standard profile velocity mode. CANopen mode only.
   bool drive_m1_speed_manufacturer(int32_t qpps, std::error_code &ec);
+  /// \brief In manufacturer duty mode (-1), command M1 via the target torque
+  ///        object (0x6071, per-mille) instead of target velocity (0x60FF).
+  bool drive_m1_duty_via_torque(int16_t per_mille, std::error_code &ec);
+  /// \brief Write the M1 position PID over the manufacturer objects,
+  ///        preserving the current gains but replacing the min/max position
+  ///        clamp; the write-only setter object is discovered by writing a
+  ///        candidate (0x203D then 0x203E) and verifying via the readable
+  ///        mirror (0x203F). The MCP clamps position targets to
+  ///        [min, max], which is [0, 0] from the factory.
+  bool configure_m1_position_range(int32_t min_pos, int32_t max_pos, std::error_code &ec);
+  /// \brief Build and transmit each enabled RPDO (COB-ID from 0x140x:1,
+  ///        layout from the 0x160x mapping), filling mapped command objects
+  ///        (controlword, modes, target velocity/position/torque) with the
+  ///        given values and everything else with zero, then send a SYNC.
+  ///        Used to discover whether the motion engine samples commands only
+  ///        from PDO traffic. Returns the number of RPDOs sent.
+  size_t send_test_rpdos(int8_t mode, int32_t target_velocity, int32_t target_position,
+                         int16_t duty_per_mille, std::error_code &ec);
   bool read_main_battery_voltage(float &volts, std::error_code &ec);
   bool read_temperature(float &temp_c, std::error_code &ec);
   bool read_status(uint32_t &status_mask, std::error_code &ec);

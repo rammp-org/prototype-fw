@@ -175,6 +175,13 @@ extern "C" void app_main(void) {
     // settings registers (PID gains etc.); dump every subindex to map it.
     logger.info("Dumping manufacturer-specific object subindices (0x2000-0x20FF)...");
     roboclaw.dump_object_subindices(0x2000, 0x20FF);
+    // The default PDO mappings reveal which objects the motion engine
+    // actually consumes.
+    logger.info("Dumping PDO communication and mapping parameters...");
+    roboclaw.dump_object_subindices(0x1400, 0x140F);
+    roboclaw.dump_object_subindices(0x1600, 0x160F);
+    roboclaw.dump_object_subindices(0x1800, 0x180F);
+    roboclaw.dump_object_subindices(0x1A00, 0x1A0F);
 #endif
 
     // Test 0: open-loop duty (manufacturer mode -1). Bypasses every control
@@ -195,6 +202,28 @@ extern "C" void app_main(void) {
       }
       if (!roboclaw.drive_m1_duty(0, ec)) {
         logger.warn("Failed to stop Motor 1 after duty test: {}", ec.message());
+      }
+    }
+
+    // Test 0b: duty via the target torque object (0x6071, per-mille). In the
+    // manufacturer duty mode the target may be sampled from 0x6071 rather
+    // than 0x60FF.
+    logger.info("Testing Motor 1 duty via 0x6071: 250 per-mille (25%)");
+    if (!roboclaw.drive_m1_duty_via_torque(250, ec)) {
+      logger.warn("Motor 1 duty-via-torque command rejected: {}", ec.message());
+    } else {
+      std::this_thread::sleep_for(2s);
+      int32_t position = 0;
+      int32_t speed = 0;
+      uint8_t encoder_status = 0;
+      uint8_t speed_status = 0;
+      if (roboclaw.read_encoder_m1(position, encoder_status, ec) &&
+          roboclaw.read_speed_m1(speed, speed_status, ec)) {
+        logger.info("After 2s at 25% via 0x6071: position={}, speed={} counts/s", position,
+                    speed);
+      }
+      if (!roboclaw.drive_m1_duty_via_torque(0, ec)) {
+        logger.warn("Failed to stop Motor 1 after duty-via-torque test: {}", ec.message());
       }
     }
 
@@ -264,6 +293,42 @@ extern "C" void app_main(void) {
       if (!roboclaw.drive_m1_speed_manufacturer(0, ec)) {
         logger.warn("Failed to stop Motor 1 after manufacturer velocity test: {}", ec.message());
       }
+    }
+
+    // Test 1c: deliver the command via RPDO instead of SDO. Some
+    // implementations only sample motion targets from PDO traffic; SDO writes
+    // land in the dictionary but never reach the motion engine.
+    logger.info("Testing command delivery via RPDO (mode 3, target={} counts/s)", kTestVelocity);
+    if (!roboclaw.drive_m1_speed(kTestVelocity, ec)) {
+      logger.warn("SDO enable before RPDO test failed: {}", ec.message());
+    }
+    if (const size_t sent = roboclaw.send_test_rpdos(3, kTestVelocity, 0, 0, ec); sent == 0) {
+      logger.warn("No RPDOs sent: {}", ec.message());
+    } else {
+      for (int poll = 1; poll <= kVelocityPolls; ++poll) {
+        std::this_thread::sleep_for(1s);
+        int32_t position = 0;
+        int32_t speed = 0;
+        uint8_t encoder_status = 0;
+        uint8_t speed_status = 0;
+        if (roboclaw.read_encoder_m1(position, encoder_status, ec) &&
+            roboclaw.read_speed_m1(speed, speed_status, ec)) {
+          std::error_code demand_ec;
+          int32_t velocity_demand = 0;
+          const bool demand_ok = roboclaw.read_velocity_demand_m1(velocity_demand, demand_ec);
+          logger.info("RPDO velocity poll {}/{}: position={}, speed={} counts/s, demand={}", poll,
+                      kVelocityPolls, position, speed,
+                      demand_ok ? std::to_string(velocity_demand) : "n/a");
+        }
+      }
+      roboclaw.send_test_rpdos(3, 0, 0, 0, ec);
+      roboclaw.drive_m1_speed(0, ec);
+    }
+
+    // The MCP clamps position targets to the position PID's [min, max]
+    // range, which is [0, 0] from the factory -- widen it over CAN first.
+    if (!roboclaw.configure_m1_position_range(-2'000'000'000, 2'000'000'000, ec)) {
+      logger.warn("Could not configure the M1 position range over CAN: {}", ec.message());
     }
 
     // Test 2: profile position move. On top of the velocity PID this needs the

@@ -751,6 +751,136 @@ bool Mcp266Controller::drive_m1_speed_manufacturer(int32_t qpps, std::error_code
   return drive_m1_->set_target_velocity(qpps, ec);
 }
 
+bool Mcp266Controller::drive_m1_duty_via_torque(int16_t per_mille, std::error_code &ec) {
+  ec.clear();
+  if (config_.mode != Mode::CANOPEN || !canopen_client_) {
+    ec = std::make_error_code(std::errc::operation_not_supported);
+    return false;
+  }
+  if (per_mille != 0 && !enable_m1(-1, false, ec)) {
+    return false;
+  }
+  return canopen_client_->write_i16(0x6071, 0, per_mille, ec);
+}
+
+bool Mcp266Controller::configure_m1_position_range(int32_t min_pos, int32_t max_pos,
+                                                   std::error_code &ec) {
+  ec.clear();
+  if (config_.mode != Mode::CANOPEN || !canopen_client_) {
+    ec = std::make_error_code(std::errc::operation_not_supported);
+    return false;
+  }
+  constexpr uint16_t kReadbackIndex = 0x203F; // readable position PID M1 mirror
+  // Preserve the currently-configured gains; only the [min, max] clamp (subs
+  // 6 and 7) needs to change for position targets to survive.
+  std::array<int32_t, 7> values{};
+  for (uint8_t sub = 1; sub <= 7; ++sub) {
+    values[sub - 1] = canopen_client_->read_i32(kReadbackIndex, sub, ec);
+    if (ec) {
+      logger_.error("position PID readback 0x{:04X}:{} failed: {}", kReadbackIndex, sub,
+                    ec.message());
+      return false;
+    }
+  }
+  values[5] = min_pos;
+  values[6] = max_pos;
+
+  for (const uint16_t setter : {uint16_t{0x203D}, uint16_t{0x203E}}) {
+    bool wrote = true;
+    for (uint8_t sub = 1; sub <= 7; ++sub) {
+      if (!canopen_client_->write_i32(setter, sub, values[sub - 1], ec)) {
+        logger_.warn("position PID write 0x{:04X}:{} rejected: {}", setter, sub, ec.message());
+        wrote = false;
+        break;
+      }
+    }
+    if (!wrote) {
+      continue;
+    }
+    const int32_t got_min = canopen_client_->read_i32(kReadbackIndex, 6, ec);
+    const int32_t got_max = canopen_client_->read_i32(kReadbackIndex, 7, ec);
+    if (!ec && got_min == min_pos && got_max == max_pos) {
+      logger_.info("M1 position range set to [{}, {}] via 0x{:04X}", min_pos, max_pos, setter);
+      return true;
+    }
+    logger_.warn("0x{:04X} did not change the M1 position range (read [{}, {}])", setter,
+                 got_min, got_max);
+  }
+  logger_.error("failed to configure the M1 position range via 0x203D/0x203E");
+  ec = std::make_error_code(std::errc::protocol_error);
+  return false;
+}
+
+size_t Mcp266Controller::send_test_rpdos(int8_t mode, int32_t target_velocity,
+                                         int32_t target_position, int16_t duty_per_mille,
+                                         std::error_code &ec) {
+  ec.clear();
+  if (config_.mode != Mode::CANOPEN || !canopen_client_) {
+    ec = std::make_error_code(std::errc::operation_not_supported);
+    return 0;
+  }
+  // Value to place in a mapped object slot; unknown objects are zero-filled.
+  const auto value_for = [&](uint16_t object) -> uint32_t {
+    switch (object & 0xF7FF) { // fold the M2 axis (+0x800) onto M1 objects
+    case 0x6040:
+      return 0x000F; // controlword: enable operation
+    case 0x6060:
+      return static_cast<uint32_t>(static_cast<uint8_t>(mode));
+    case 0x60FF:
+    case 0x6042:
+      return static_cast<uint32_t>(target_velocity);
+    case 0x607A:
+      return static_cast<uint32_t>(target_position);
+    case 0x6071:
+      return static_cast<uint32_t>(static_cast<uint16_t>(duty_per_mille));
+    default:
+      return 0;
+    }
+  };
+
+  size_t sent = 0;
+  for (uint16_t rpdo = 0; rpdo < 4; ++rpdo) {
+    std::error_code pdo_ec;
+    const uint32_t cob = canopen_client_->read_u32(0x1400 + rpdo, 1, pdo_ec);
+    if (pdo_ec || (cob & 0x80000000u)) {
+      continue; // RPDO missing or disabled
+    }
+    const uint8_t entries = canopen_client_->read_u8(0x1600 + rpdo, 0, pdo_ec);
+    if (pdo_ec) {
+      continue;
+    }
+    std::array<uint8_t, 8> payload{};
+    size_t bit_offset = 0;
+    std::string desc;
+    for (uint8_t sub = 1; sub <= entries && bit_offset < 64; ++sub) {
+      const uint32_t entry = canopen_client_->read_u32(0x1600 + rpdo, sub, pdo_ec);
+      if (pdo_ec) {
+        break;
+      }
+      const uint16_t object = static_cast<uint16_t>(entry >> 16);
+      const uint8_t bits = static_cast<uint8_t>(entry & 0xFF);
+      const uint32_t value = value_for(object);
+      for (uint8_t b = 0; b + 8 <= bits && bit_offset < 64; b += 8) {
+        payload[bit_offset / 8] = static_cast<uint8_t>(value >> b);
+        bit_offset += 8;
+      }
+      desc += fmt::format(" 0x{:04X}:{:02X}/{}={:X}", object, (entry >> 8) & 0xFF, bits, value);
+    }
+    const size_t dlc = (bit_offset + 7) / 8;
+    if (dlc == 0) {
+      continue;
+    }
+    if (!canopen_client_->send_rpdo(cob & 0x7FF, std::span(payload.data(), dlc), ec)) {
+      return sent;
+    }
+    logger_.info("RPDO{} sent on COB 0x{:03X} ({} bytes):{}", rpdo + 1, cob & 0x7FF, dlc, desc);
+    ++sent;
+  }
+  // Cover synchronous transmission types: latch the just-sent PDO data.
+  canopen_client_->send_sync(ec);
+  return sent;
+}
+
 bool Mcp266Controller::read_main_battery_voltage(float &volts, std::error_code &ec) {
   ec.clear();
   if (config_.mode == Mode::PACKET_SERIAL && basicmicro_) {
