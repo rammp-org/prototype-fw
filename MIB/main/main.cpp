@@ -6,7 +6,24 @@
 
 #include "esp32-p4-eth.hpp"
 #include "logger.hpp"
+
 #include "mcp266_controller.hpp"
+
+// Drive the motor through the upstream espp/mcp266 component (espp::Mcp266)
+// instead of MIB's local mib::Mcp266Controller. Both expose the same
+// Axis-based API for the operations used below; the difference is that the
+// component is transport-agnostic (it takes a CanopenClient), so this path
+// also owns the Twai + CanopenClient. Build with -DMIB_USE_ESPP_MCP266=1 to
+// exercise the component on real hardware.
+#ifndef MIB_USE_ESPP_MCP266
+#define MIB_USE_ESPP_MCP266 0
+#endif
+
+#if MIB_USE_ESPP_MCP266
+#include "canopen_client.hpp"
+#include "mcp266.hpp"
+#include "twai.hpp"
+#endif
 
 using namespace std::chrono_literals;
 
@@ -17,7 +34,168 @@ using namespace std::chrono_literals;
 #define MIB_SCAN_OD 0
 #endif
 
-using Axis = mib::Mcp266Controller::Axis;
+namespace {
+
+constexpr int32_t kPingPongTarget = 10'000;
+
+/// Bare status loop used when the motor controller could not be brought up:
+/// keep reporting Ethernet link state so the board is still observable.
+[[noreturn]] void run_ethernet_only(espp::Esp32P4Eth &board, espp::Logger &logger) {
+  bool last_eth_status = false;
+  bool have_eth_status = false;
+  while (true) {
+    const bool eth_connected = board.is_ethernet_connected();
+    if (!have_eth_status || eth_connected != last_eth_status) {
+      logger.info("Ethernet status changed: connected={}", eth_connected);
+      if (eth_connected) {
+        auto ip = board.ethernet_ip();
+        logger.info("Ethernet IP: " IPSTR, IP2STR(&ip));
+      }
+      last_eth_status = eth_connected;
+      have_eth_status = true;
+    }
+    std::this_thread::sleep_for(2000ms);
+  }
+}
+
+/// Configure M1, run a profile-position setpoint sequence, then a continuous
+/// ping-pong interleaved with Ethernet status reporting. Templated on the
+/// controller type so it drives either mib::Mcp266Controller or espp::Mcp266
+/// (both share the Axis-based API used here). The controller must already be
+/// initialized / started.
+template <class Mc>
+[[noreturn]] void run_motor_demo(Mc &mc, espp::Esp32P4Eth &board, espp::Logger &logger) {
+  using Axis = typename Mc::Axis;
+  std::error_code ec;
+
+#if MIB_SCAN_OD
+  logger.info("Scanning MCP object dictionary via SDO (0x1000-0x6FFF, takes ~1 minute)...");
+  size_t od_found = mc.scan_object_dictionary(0x1000, 0x1FFF);
+  od_found += mc.scan_object_dictionary(0x2000, 0x5FFF);
+  od_found += mc.scan_object_dictionary(0x6000, 0x6FFF);
+  logger.info("OD scan complete: {} objects implemented", od_found);
+  mc.dump_object_subindices(0x2000, 0x20FF);
+#endif
+
+  // --- One-time per-boot MCP configuration ---
+  mc.reset_estop(ec); // clear any latched e-stop (no-op if nothing is latched)
+  // Widen the M1 position clamp (factory [0, 0] forces every target to zero)
+  // and seed a P gain if the drive has none. The MCP reverts to EEPROM on
+  // power-up, so this runs every boot.
+  if (!mc.configure_position_loop(Axis::M1, -2'000'000'000, 2'000'000'000, ec)) {
+    logger.warn("Could not configure the M1 position loop: {}", ec.message());
+  }
+  if (!mc.set_position_limits(Axis::M1, -20'000, 20'000, ec)) {
+    logger.warn("Failed to set M1 software position limits: {}", ec.message());
+  }
+
+  float volts = 0.0f, temp_c = 0.0f;
+  if (mc.read_main_battery_voltage(volts, ec)) {
+    logger.info("Main battery: {:.1f} V", volts);
+  }
+  if (mc.read_temperature(temp_c, ec)) {
+    logger.info("Board temperature: {:.1f} C", temp_c);
+  }
+
+  constexpr uint32_t kProfileVelocity = 500;
+  constexpr uint32_t kProfileAccel = 500;
+  constexpr uint32_t kProfileDecel = 500;
+  constexpr int32_t kPositionTolerance = 100; // encoder counts
+
+  auto read_position = [&]() -> int32_t {
+    int32_t position = 0;
+    std::error_code read_ec;
+    mc.read_encoder(Axis::M1, position, read_ec);
+    return position;
+  };
+  auto command_position = [&](int32_t target) {
+    return mc.move_to_position(Axis::M1, target, kProfileVelocity, kProfileAccel, kProfileDecel,
+                               ec);
+  };
+  // Wait for the motor to arrive at a target, logging progress once a second.
+  auto wait_until_reached = [&](int32_t target, std::chrono::seconds timeout) -> bool {
+    const auto start = std::chrono::steady_clock::now();
+    const auto deadline = start + timeout;
+    int iteration = 0;
+    while (std::chrono::steady_clock::now() < deadline) {
+      std::this_thread::sleep_for(250ms);
+      const int32_t position = read_position();
+      if (std::abs(position - target) <= kPositionTolerance) {
+        const auto elapsed = std::chrono::duration_cast<std::chrono::milliseconds>(
+            std::chrono::steady_clock::now() - start);
+        logger.info("  reached {} in {} ms", target, elapsed.count());
+        return true;
+      }
+      if ((++iteration % 4) == 0) {
+        int32_t speed = 0;
+        std::error_code speed_ec;
+        mc.read_speed(Axis::M1, speed, speed_ec);
+        logger.info("  moving: position={} speed={} counts/s (target {})", position, speed, target);
+      }
+    }
+    logger.warn("  did NOT reach {} within {} s (position={})", target, timeout.count(),
+                read_position());
+    return false;
+  };
+
+  // --- Position setpoint sequence ---
+  logger.info("=== Position setpoint sequence ===");
+  constexpr std::array<int32_t, 4> kPositionSequence{10'000, -10'000, 5'000, 0};
+  for (size_t i = 0; i < kPositionSequence.size(); ++i) {
+    const int32_t target = kPositionSequence[i];
+    logger.info("Position setpoint {}/{}: {}", i + 1, kPositionSequence.size(), target);
+    if (!command_position(target)) {
+      logger.warn("Position command rejected: {}", ec.message());
+      continue;
+    }
+    wait_until_reached(target, 30s);
+  }
+
+  // --- Continuous position ping-pong, interleaved with Ethernet status ---
+  logger.info("=== Continuous position ping-pong between +/-{} ===", kPingPongTarget);
+  bool pingpong_active = command_position(kPingPongTarget);
+  if (!pingpong_active) {
+    logger.warn("Ping-pong start command rejected: {}", ec.message());
+  }
+  int32_t pingpong_target = kPingPongTarget;
+
+  bool last_eth_status = false;
+  bool have_eth_status = false;
+  while (true) {
+    const bool eth_connected = board.is_ethernet_connected();
+    if (!have_eth_status || eth_connected != last_eth_status) {
+      logger.info("Ethernet status changed: connected={}", eth_connected);
+      if (eth_connected) {
+        auto ip = board.ethernet_ip();
+        logger.info("Ethernet IP: " IPSTR, IP2STR(&ip));
+      }
+      last_eth_status = eth_connected;
+      have_eth_status = true;
+    }
+
+    uint16_t statusword = 0;
+    int32_t encoder_value = 0;
+    const bool status_ok = mc.read_statusword(Axis::M1, statusword, ec);
+    const bool encoder_ok = mc.read_encoder(Axis::M1, encoder_value, ec);
+    if (status_ok && encoder_ok) {
+      logger.info("MCP266 CANopen poll: statusword=0x{:04X}, M1 encoder={}, target={}", statusword,
+                  encoder_value, pingpong_active ? std::to_string(pingpong_target) : "idle");
+      if (pingpong_active && std::abs(encoder_value - pingpong_target) <= 100) {
+        pingpong_target = -pingpong_target;
+        logger.info("Ping-pong: new target {}", pingpong_target);
+        if (!mc.move_to_position(Axis::M1, pingpong_target, 500, 500, 500, ec)) {
+          logger.warn("Ping-pong position command rejected: {}", ec.message());
+        }
+      }
+    } else {
+      logger.warn("MCP266 CANopen poll failed: {}", ec.message());
+    }
+
+    std::this_thread::sleep_for(2000ms);
+  }
+}
+
+} // namespace
 
 extern "C" void app_main(void) {
   auto &board = espp::Esp32P4Eth::get();
@@ -33,11 +211,66 @@ extern "C" void app_main(void) {
     logger.info("Ethernet initialized successfully");
   }
 
-  // Continuous ping-pong demo state, driven from the status loop below.
-  constexpr int32_t kPingPongTarget = 10'000;
-  bool pingpong_active = false;
-  int32_t pingpong_target = kPingPongTarget;
+  std::error_code ec;
 
+#if MIB_USE_ESPP_MCP266
+  // Component path: MIB owns the Twai + CanopenClient and drives espp::Mcp266.
+  // These are function-local statics so the Twai receive task and the client's
+  // send lambda keep valid references for the life of the program.
+  logger.info("Driving the MCP266 via the espp/mcp266 component (espp::Mcp266)...");
+  static espp::CanopenClient *client_ptr = nullptr;
+  static espp::Twai twai({
+      .tx_gpio = 17,
+      .rx_gpio = 16,
+      .baudrate = 1000000,
+      .mode = espp::Twai::Mode::NORMAL,
+      .tx_queue_depth = 10,
+      .on_receive =
+          [](const espp::Twai::Message &msg) {
+            if (client_ptr) {
+              client_ptr->process_frame(espp::CanopenClient::CanFrame{
+                  .id = msg.id,
+                  .extended = msg.extended,
+                  .rtr = msg.rtr,
+                  .dlc = msg.dlc,
+                  .data = msg.data,
+              });
+            }
+          },
+      .log_level = espp::Logger::Verbosity::WARN,
+  });
+  static espp::CanopenClient client({
+      .node_id = 10,
+      .send =
+          [](const espp::CanopenClient::CanFrame &frame) {
+            espp::Twai::Message msg{
+                .id = frame.id,
+                .extended = frame.extended,
+                .rtr = frame.rtr,
+                .dlc = frame.dlc,
+                .data = frame.data,
+            };
+            std::error_code tx_ec;
+            return twai.transmit(msg, tx_ec);
+          },
+      .sdo_timeout = 500ms,
+      .log_level = espp::Logger::Verbosity::WARN,
+  });
+  client_ptr = &client;
+  static espp::Mcp266 mcp(client, {.log_level = espp::Logger::Verbosity::INFO});
+
+  if (!twai.initialize(ec)) {
+    logger.error("Failed to initialize TWAI: {}", ec.message());
+    run_ethernet_only(board, logger);
+  }
+  if (!mcp.start(ec)) {
+    logger.error("Failed to start MCP266 component: {} -- is the node on the bus?", ec.message());
+    run_ethernet_only(board, logger);
+  }
+  logger.info("espp::Mcp266 started");
+  run_motor_demo(mcp, board, logger);
+#else
+  // Default path: MIB's local controller (owns its own transport).
   mib::Mcp266Controller roboclaw({
       .twai_tx_gpio = GPIO_NUM_17,
       .twai_rx_gpio = GPIO_NUM_16,
@@ -45,143 +278,12 @@ extern "C" void app_main(void) {
       .node_id = 10,
       .log_level = espp::Logger::Verbosity::INFO,
   });
-  std::error_code ec;
-
   logger.info("Initializing MCP266 Controller via CANopen (TWAI)...");
   if (!roboclaw.initialize(ec)) {
     logger.error("Failed to initialize MCP266 CANopen Controller: {}", ec.message());
-  } else {
-    logger.info("MCP266 CANopen controller initialized");
-
-#if MIB_SCAN_OD
-    logger.info("Scanning MCP object dictionary via SDO (0x1000-0x6FFF, takes ~1 minute)...");
-    size_t od_found = roboclaw.scan_object_dictionary(0x1000, 0x1FFF);
-    od_found += roboclaw.scan_object_dictionary(0x2000, 0x5FFF);
-    od_found += roboclaw.scan_object_dictionary(0x6000, 0x6FFF);
-    logger.info("OD scan complete: {} objects implemented", od_found);
-    roboclaw.dump_object_subindices(0x2000, 0x20FF);
+    run_ethernet_only(board, logger);
+  }
+  logger.info("MCP266 CANopen controller initialized");
+  run_motor_demo(roboclaw, board, logger);
 #endif
-
-    // --- One-time per-boot MCP configuration ---
-    // Clear any latched e-stop (no-op if nothing is latched).
-    roboclaw.reset_estop(ec);
-    // Configure the M1 position loop: widen the min/max clamp (factory [0, 0]
-    // forces every target to zero) and ensure a non-zero position P gain.
-    // The MCP reverts to EEPROM on power-up, so this runs every boot.
-    if (!roboclaw.configure_position_loop(Axis::M1, -2'000'000'000, 2'000'000'000, ec)) {
-      logger.warn("Could not configure the M1 position loop: {}", ec.message());
-    }
-    if (!roboclaw.set_position_limits(Axis::M1, -20'000, 20'000, ec)) {
-      logger.warn("Failed to set M1 software position limits: {}", ec.message());
-    }
-
-    float volts = 0.0f, temp_c = 0.0f;
-    if (roboclaw.read_main_battery_voltage(volts, ec)) {
-      logger.info("Main battery: {:.1f} V", volts);
-    }
-    if (roboclaw.read_temperature(temp_c, ec)) {
-      logger.info("Board temperature: {:.1f} C", temp_c);
-    }
-
-    constexpr uint32_t kProfileVelocity = 500;
-    constexpr uint32_t kProfileAccel = 500;
-    constexpr uint32_t kProfileDecel = 500;
-    constexpr int32_t kPositionTolerance = 100; // encoder counts
-
-    auto read_position = [&]() -> int32_t {
-      int32_t position = 0;
-      std::error_code read_ec;
-      roboclaw.read_encoder(Axis::M1, position, read_ec);
-      return position;
-    };
-    auto command_position = [&](int32_t target) {
-      return roboclaw.move_to_position(Axis::M1, target, kProfileVelocity, kProfileAccel,
-                                       kProfileDecel, ec);
-    };
-    // Wait for the motor to arrive at a target, logging progress once a second.
-    auto wait_until_reached = [&](int32_t target, std::chrono::seconds timeout) -> bool {
-      const auto start = std::chrono::steady_clock::now();
-      const auto deadline = start + timeout;
-      int iteration = 0;
-      while (std::chrono::steady_clock::now() < deadline) {
-        std::this_thread::sleep_for(250ms);
-        const int32_t position = read_position();
-        if (std::abs(position - target) <= kPositionTolerance) {
-          const auto elapsed = std::chrono::duration_cast<std::chrono::milliseconds>(
-              std::chrono::steady_clock::now() - start);
-          logger.info("  reached {} in {} ms", target, elapsed.count());
-          return true;
-        }
-        if ((++iteration % 4) == 0) {
-          int32_t speed = 0;
-          std::error_code speed_ec;
-          roboclaw.read_speed(Axis::M1, speed, speed_ec);
-          logger.info("  moving: position={} speed={} counts/s (target {})", position, speed,
-                      target);
-        }
-      }
-      logger.warn("  did NOT reach {} within {} s (position={})", target, timeout.count(),
-                  read_position());
-      return false;
-    };
-
-    // --- Position setpoint sequence ---
-    logger.info("=== Position setpoint sequence ===");
-    constexpr std::array<int32_t, 4> kPositionSequence{10'000, -10'000, 5'000, 0};
-    for (size_t i = 0; i < kPositionSequence.size(); ++i) {
-      const int32_t target = kPositionSequence[i];
-      logger.info("Position setpoint {}/{}: {}", i + 1, kPositionSequence.size(), target);
-      if (!command_position(target)) {
-        logger.warn("Position command rejected: {}", ec.message());
-        continue;
-      }
-      wait_until_reached(target, 30s);
-    }
-
-    // --- Continuous position ping-pong, driven from the status loop below ---
-    logger.info("=== Continuous position ping-pong between +/-{} ===", kPingPongTarget);
-    if (command_position(kPingPongTarget)) {
-      pingpong_active = true;
-    } else {
-      logger.warn("Ping-pong start command rejected: {}", ec.message());
-    }
-  }
-
-  // Background status loop
-  bool last_eth_status = false;
-  bool have_eth_status = false;
-
-  while (true) {
-    const bool eth_connected = board.is_ethernet_connected();
-    if (!have_eth_status || eth_connected != last_eth_status) {
-      logger.info("Ethernet status changed: connected={}", eth_connected);
-      if (eth_connected) {
-        auto ip = board.ethernet_ip();
-        logger.info("Ethernet IP: " IPSTR, IP2STR(&ip));
-      }
-      last_eth_status = eth_connected;
-      have_eth_status = true;
-    }
-
-    uint16_t statusword = 0;
-    int32_t encoder_value = 0;
-    const bool status_ok = roboclaw.read_statusword(Axis::M1, statusword, ec);
-    const bool encoder_ok = roboclaw.read_encoder(Axis::M1, encoder_value, ec);
-    if (status_ok && encoder_ok) {
-      logger.info("MCP266 CANopen poll: statusword=0x{:04X}, M1 encoder={}, target={}", statusword,
-                  encoder_value, pingpong_active ? std::to_string(pingpong_target) : "idle");
-      // Bounce between +/-kPingPongTarget so motion stays observable.
-      if (pingpong_active && std::abs(encoder_value - pingpong_target) <= 100) {
-        pingpong_target = -pingpong_target;
-        logger.info("Ping-pong: new target {}", pingpong_target);
-        if (!roboclaw.move_to_position(Axis::M1, pingpong_target, 500, 500, 500, ec)) {
-          logger.warn("Ping-pong position command rejected: {}", ec.message());
-        }
-      }
-    } else {
-      logger.warn("MCP266 CANopen poll failed: {}", ec.message());
-    }
-
-    std::this_thread::sleep_for(2000ms);
-  }
 }

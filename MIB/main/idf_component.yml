@@ -16,4 +16,11 @@ dependencies:
   espp/canopen:
     version: '>=1.0'
     override_path: '../../../../esp-cpp/espp/components/canopen'
+  # espp/mcp266: the upstream dual-channel MCP266 CANopen controller (PR #758,
+  # not yet released). Only referenced when built with -DMIB_USE_ESPP_MCP266=1,
+  # to exercise the component instead of MIB's local Mcp266Controller. Drop the
+  # override once an espp/mcp266 release is available.
+  espp/mcp266:
+    version: '>=1.0'
+    override_path: '../../../../esp-cpp/espp/components/mcp266'
   espp/logger: '>=1.0'
