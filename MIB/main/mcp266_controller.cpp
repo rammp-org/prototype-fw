@@ -6,6 +6,24 @@
 
 using namespace std::chrono_literals;
 
+namespace {
+/// The MCP mirrors its packet-serial command set into the manufacturer region
+/// of the CANopen object dictionary at index 0x2000 + command number.
+/// Confirmed empirically on MCP266 firmware: cmd 61 "Set M1 position PID" =
+/// 0x203D, cmd 55 "Read M1 velocity PID" = 0x2037, cmd 200 "E-Stop Reset" =
+/// 0x20C8, cmd 24 "Read Main Battery" = 0x2018, cmd 65/67 "Buffered position
+/// move" = 0x2041/0x2043 (5/9 subindices matching their parameter counts).
+constexpr uint16_t mcp_command_object(uint8_t command) {
+  return static_cast<uint16_t>(0x2000 + command);
+}
+constexpr uint16_t kCmdDriveM1Duty = mcp_command_object(32);
+constexpr uint16_t kCmdDriveM2Duty = mcp_command_object(33);
+constexpr uint16_t kCmdDriveM1Speed = mcp_command_object(35);
+constexpr uint16_t kCmdDriveM2Speed = mcp_command_object(36);
+constexpr uint16_t kCmdReadMainBattery = mcp_command_object(24);
+constexpr uint16_t kCmdReadTemperature = mcp_command_object(82);
+} // namespace
+
 namespace mib {
 
 Mcp266Controller::Mcp266Controller(const Config &config)
@@ -397,12 +415,9 @@ bool Mcp266Controller::drive_m1_duty(int16_t duty, std::error_code &ec) {
     return basicmicro_->drive_m1_duty(duty, ec);
   }
   if (config_.mode == Mode::CANOPEN && canopen_client_) {
-    // Duty mode (-1) is manufacturer-specific and may not be echoed in the
-    // mode display, so don't fail hard on a mismatch.
-    if (duty != 0 && !enable_m1(-1, false, ec)) {
-      return false;
-    }
-    return canopen_client_->write_i32(kAxisM1.target, 0, static_cast<int32_t>(duty), ec);
+    // Packet-serial command 32 mirrored into the object dictionary; acts
+    // directly, no CiA 402 mode/handshake required.
+    return canopen_client_->write_i16(kCmdDriveM1Duty, 0, duty, ec);
   }
   return false;
 }
@@ -413,10 +428,7 @@ bool Mcp266Controller::drive_m2_duty(int16_t duty, std::error_code &ec) {
     return basicmicro_->drive_m2_duty(duty, ec);
   }
   if (config_.mode == Mode::CANOPEN && canopen_client_) {
-    if (duty != 0 && !enable_axis(kAxisM2, -1, false, ec)) {
-      return false;
-    }
-    return canopen_client_->write_i32(kAxisM2.target, 0, static_cast<int32_t>(duty), ec);
+    return canopen_client_->write_i16(kCmdDriveM2Duty, 0, duty, ec);
   }
   return false;
 }
@@ -437,12 +449,11 @@ bool Mcp266Controller::drive_m1_speed(int32_t qpps, std::error_code &ec) {
     return basicmicro_->drive_m1_speed(qpps, ec);
   }
   if (config_.mode == Mode::CANOPEN && canopen_client_) {
-    if (qpps != 0 &&
-        !enable_m1(static_cast<int8_t>(espp::Ds402Drive::OperatingMode::ProfileVelocity), true,
-                   ec)) {
-      return false;
-    }
-    return drive_m1_->set_target_velocity(qpps, ec);
+    // Packet-serial command 35 ("Drive M1 With Signed Speed") mirrored into
+    // the object dictionary. The standard profile-velocity mode (0x6060=3 +
+    // 0x60FF) is accepted but inert on this firmware; this is the command the
+    // motion engine actually executes. Requires a tuned velocity PID.
+    return canopen_client_->write_i32(kCmdDriveM1Speed, 0, qpps, ec);
   }
   return false;
 }
@@ -453,10 +464,7 @@ bool Mcp266Controller::drive_m2_speed(int32_t qpps, std::error_code &ec) {
     return basicmicro_->drive_m2_speed(qpps, ec);
   }
   if (config_.mode == Mode::CANOPEN && canopen_client_) {
-    if (qpps != 0 && !enable_axis(kAxisM2, 3, true, ec)) {
-      return false;
-    }
-    return canopen_client_->write_i32(kAxisM2.target, 0, qpps, ec);
+    return canopen_client_->write_i32(kCmdDriveM2Speed, 0, qpps, ec);
   }
   return false;
 }
@@ -993,7 +1001,12 @@ bool Mcp266Controller::read_main_battery_voltage(float &volts, std::error_code &
   if (config_.mode == Mode::PACKET_SERIAL && basicmicro_) {
     return basicmicro_->read_main_battery_voltage(volts, ec);
   }
-  // Default placeholder if CANopen custom voltage SDO is not used
+  if (config_.mode == Mode::CANOPEN && canopen_client_) {
+    // Packet-serial command 24 mirrored into the object dictionary (tenths of a volt).
+    const uint16_t tenths = canopen_client_->read_u16(kCmdReadMainBattery, 0, ec);
+    volts = static_cast<float>(tenths) / 10.0f;
+    return !ec;
+  }
   volts = 0.0f;
   return true;
 }
@@ -1002,6 +1015,12 @@ bool Mcp266Controller::read_temperature(float &temp_c, std::error_code &ec) {
   ec.clear();
   if (config_.mode == Mode::PACKET_SERIAL && basicmicro_) {
     return basicmicro_->read_temperature(temp_c, ec);
+  }
+  if (config_.mode == Mode::CANOPEN && canopen_client_) {
+    // Packet-serial command 82 mirrored into the object dictionary (tenths of a degree C).
+    const uint16_t tenths = canopen_client_->read_u16(kCmdReadTemperature, 0, ec);
+    temp_c = static_cast<float>(tenths) / 10.0f;
+    return !ec;
   }
   temp_c = 0.0f;
   return true;

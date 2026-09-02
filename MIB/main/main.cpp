@@ -203,15 +203,13 @@ extern "C" void app_main(void) {
       logger.warn("Could not configure the M1 position range over CAN: {}", ec.message());
     }
 
-    // Test 2: profile position move. On top of the velocity PID this needs the
-    // position loop configured on the MCP (position PID gains, max speed).
+    // Position moves need the position loop configured on the MCP (PID gains
+    // and the min/max clamp) on top of the velocity PID.
     constexpr int32_t kMotor1MinimumPosition = -20'000;
     constexpr int32_t kMotor1MaximumPosition = 20'000;
-    constexpr int32_t kMotor1TargetPosition = 10'000;
     constexpr uint32_t kMotor1ProfileVelocity = 500;
     constexpr uint32_t kMotor1ProfileAcceleration = 500;
     constexpr uint32_t kMotor1ProfileDeceleration = 500;
-    constexpr int kPositionPolls = 5;
     logger.info("Setting M1 position limits: [{}, {}]", kMotor1MinimumPosition,
                 kMotor1MaximumPosition);
     if (!roboclaw.set_m1_position_limits(kMotor1MinimumPosition, kMotor1MaximumPosition, ec)) {
@@ -300,10 +298,10 @@ extern "C" void app_main(void) {
           }
         }
 
-        // Profile velocity mode has never produced motion on this firmware
-        // (targets accepted, demand stays 0); keep exercising it so a
-        // firmware update or config change that fixes it shows up here.
-        logger.info("=== Velocity setpoint sequence (profile velocity mode) ===");
+        // Closed-loop velocity via the mirrored packet-serial speed command
+        // (0x2023 = cmd 35); the standard profile-velocity mode is accepted
+        // but inert on this firmware.
+        logger.info("=== Velocity setpoint sequence ===");
         constexpr std::array<int32_t, 4> kVelocitySequence{400, -400, 800, 0};
         for (size_t i = 0; i < kVelocitySequence.size(); ++i) {
           const int32_t target = kVelocitySequence[i];
