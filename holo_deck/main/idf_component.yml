@@ -1,0 +1,13 @@
+## IDF Component Manager Manifest File
+dependencies:
+  idf:
+    version: '>=5.3'
+  espp/cli: '>=1.0'
+  # M5Stack Tab5 BSP (display / touch / IO expanders); replaces esp32-p4-eth
+  espp/m5stack-tab5: '>=1.0'
+  # physical 3-axis joystick input
+  espp/joystick: '>=1.0'
+  espp/adc: '>=1.0'
+  espp/math: '>=1.0'
+  # fixed-rate control / sampling loops
+  espp/timer: '>=1.0'
