@@ -132,7 +132,7 @@ bool MotorCanBus::request(const MotorPacket &command, MotorPacket &response,
     if (xQueueReceive(receive_queue_, &response, timeout_ticks - elapsed) != pdTRUE) {
       break;
     }
-    logger_.info("CAN RX id=0x{:x} cmd=0x{:02x} length={}", response.id, response.data[0],
+    logger_.debug("CAN RX id=0x{:x} cmd=0x{:02x} length={}", response.id, response.data[0],
            response.length);
     const uint32_t expected_reply_id_value = command.data[0] == 0x79
                            ? 0x300u

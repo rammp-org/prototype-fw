@@ -87,10 +87,14 @@ constexpr int32_t kPingPongTarget = 10'000;
   constexpr uint32_t kProfileDecel = 500;
   constexpr int32_t kPositionTolerance = 100; // encoder counts
 
-  auto read_position = [&]() -> int32_t {
+  // Read the M1 encoder, reporting whether the SDO read actually succeeded via
+  // \p ok. Callers must not treat a failed read (position defaults to 0) as a
+  // valid measurement -- a spurious 0 could otherwise satisfy the arrival
+  // tolerance (e.g. for target 0) and hide a comms failure.
+  auto read_position = [&](bool &ok) -> int32_t {
     int32_t position = 0;
     std::error_code read_ec;
-    mc.read_encoder(Axis::M1, position, read_ec);
+    ok = mc.read_encoder(Axis::M1, position, read_ec);
     return position;
   };
   auto command_position = [&](int32_t target) {
@@ -104,7 +108,12 @@ constexpr int32_t kPingPongTarget = 10'000;
     int iteration = 0;
     while (std::chrono::steady_clock::now() < deadline) {
       std::this_thread::sleep_for(250ms);
-      const int32_t position = read_position();
+      bool ok = false;
+      const int32_t position = read_position(ok);
+      if (!ok) {
+        logger.warn("  encoder read failed while waiting for {}", target);
+        continue; // don't let a spurious 0 count as "reached"
+      }
       if (std::abs(position - target) <= kPositionTolerance) {
         const auto elapsed = std::chrono::duration_cast<std::chrono::milliseconds>(
             std::chrono::steady_clock::now() - start);
@@ -118,8 +127,10 @@ constexpr int32_t kPingPongTarget = 10'000;
         logger.info("  moving: position={} speed={} counts/s (target {})", position, speed, target);
       }
     }
+    bool final_ok = false;
+    const int32_t final_pos = read_position(final_ok);
     logger.warn("  did NOT reach {} within {} s (position={})", target, timeout.count(),
-                read_position());
+                final_ok ? std::to_string(final_pos) : "read failed");
     return false;
   };
 

@@ -59,7 +59,7 @@ extern "C" void app_main(void) {
         // MotorActuator(communicate, 31),
         // MotorActuator(communicate, 32),
     };
-    logger.info("Twenty motor actuators configured with IDs 1-32");
+    logger.info("{} motor actuator(s) configured", actuators.size());
 
     // read all motor statuses see which one response. 
     for (auto &actuator : actuators) {
