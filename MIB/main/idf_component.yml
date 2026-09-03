@@ -2,25 +2,8 @@
 dependencies:
   idf:
     version: '>=5.3'
-  espp/esp32-p4-eth: '>=1.0'
-  # Local overrides carry fixes/features not yet in an espp release; drop each
-  # override once an espp release includes it.
-  #  - twai: TX frame-lifetime crash fix (the esp_driver_twai driver reads the
-  #    queued twai_frame_t from the TX ISR, so transmit() must keep it alive
-  #    until on_tx_done).
-  #  - canopen: Ds402Drive axis object-offset, so M2 (objects at +0x800) is
-  #    driven by the same helper as M1.
-  espp/twai:
-    version: '>=1.0'
-    override_path: '../../../../esp-cpp/espp/components/twai'
-  espp/canopen:
-    version: '>=1.0'
-    override_path: '../../../../esp-cpp/espp/components/canopen'
-  # espp/mcp266: the upstream dual-channel MCP266 CANopen controller (PR #758,
-  # not yet released). Only referenced when built with -DMIB_USE_ESPP_MCP266=1,
-  # to exercise the component instead of MIB's local Mcp266Controller. Drop the
-  # override once an espp/mcp266 release is available.
-  espp/mcp266:
-    version: '>=1.0'
-    override_path: '../../../../esp-cpp/espp/components/mcp266'
-  espp/logger: '>=1.0'
+  espp/esp32-p4-eth: '>=1.3.0'
+  espp/twai: '>=1.3.0'
+  espp/canopen: '>=1.3.0'
+  espp/mcp266: '>=1.3.0'
+  espp/logger: '>=1.3.0'

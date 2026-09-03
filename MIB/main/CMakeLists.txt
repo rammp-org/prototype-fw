@@ -1,12 +1,10 @@
-idf_component_register(SRCS "main.cpp" "mcp266_controller.cpp"
+idf_component_register(SRCS "main.cpp"
                        INCLUDE_DIRS "."
                        REQUIRES esp32-p4-eth twai canopen mcp266 logger esp_driver_twai
                                 esp_driver_gpio)
 
-# Forward build-time feature flags (set e.g. `idf.py -DMIB_USE_ESPP_MCP266=1 build`)
-# as compile definitions so the #if guards in main.cpp see them.
-foreach(flag MIB_USE_ESPP_MCP266 MIB_SCAN_OD)
-  if(DEFINED ${flag})
-    target_compile_definitions(${COMPONENT_LIB} PRIVATE ${flag}=${${flag}})
-  endif()
-endforeach()
+# Forward the optional MIB_SCAN_OD build flag (set e.g. `idf.py -DMIB_SCAN_OD=1 build`)
+# as a compile definition so the #if guard in main.cpp sees it.
+if(DEFINED MIB_SCAN_OD)
+  target_compile_definitions(${COMPONENT_LIB} PRIVATE MIB_SCAN_OD=${MIB_SCAN_OD})
+endif()

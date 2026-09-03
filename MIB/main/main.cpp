@@ -7,23 +7,9 @@
 #include "esp32-p4-eth.hpp"
 #include "logger.hpp"
 
-#include "mcp266_controller.hpp"
-
-// Drive the motor through the upstream espp/mcp266 component (espp::Mcp266)
-// instead of MIB's local mib::Mcp266Controller. Both expose the same
-// Axis-based API for the operations used below; the difference is that the
-// component is transport-agnostic (it takes a CanopenClient), so this path
-// also owns the Twai + CanopenClient. Build with -DMIB_USE_ESPP_MCP266=1 to
-// exercise the component on real hardware.
-#ifndef MIB_USE_ESPP_MCP266
-#define MIB_USE_ESPP_MCP266 0
-#endif
-
-#if MIB_USE_ESPP_MCP266
 #include "canopen_client.hpp"
 #include "mcp266.hpp"
 #include "twai.hpp"
-#endif
 
 using namespace std::chrono_literals;
 
@@ -33,6 +19,8 @@ using namespace std::chrono_literals;
 #ifndef MIB_SCAN_OD
 #define MIB_SCAN_OD 0
 #endif
+
+using Axis = espp::Mcp266::Axis;
 
 namespace {
 
@@ -59,13 +47,10 @@ constexpr int32_t kPingPongTarget = 10'000;
 }
 
 /// Configure M1, run a profile-position setpoint sequence, then a continuous
-/// ping-pong interleaved with Ethernet status reporting. Templated on the
-/// controller type so it drives either mib::Mcp266Controller or espp::Mcp266
-/// (both share the Axis-based API used here). The controller must already be
-/// initialized / started.
-template <class Mc>
-[[noreturn]] void run_motor_demo(Mc &mc, espp::Esp32P4Eth &board, espp::Logger &logger) {
-  using Axis = typename Mc::Axis;
+/// ping-pong interleaved with Ethernet status reporting. The controller must
+/// already be started.
+[[noreturn]] void run_motor_demo(espp::Mcp266 &mc, espp::Esp32P4Eth &board,
+                                 espp::Logger &logger) {
   std::error_code ec;
 
 #if MIB_SCAN_OD
@@ -213,11 +198,11 @@ extern "C" void app_main(void) {
 
   std::error_code ec;
 
-#if MIB_USE_ESPP_MCP266
-  // Component path: MIB owns the Twai + CanopenClient and drives espp::Mcp266.
-  // These are function-local statics so the Twai receive task and the client's
-  // send lambda keep valid references for the life of the program.
-  logger.info("Driving the MCP266 via the espp/mcp266 component (espp::Mcp266)...");
+  // The MCP266 controller (espp/mcp266) is transport-agnostic, so MIB owns the
+  // TWAI + CANopen client and drives espp::Mcp266 on top. These are
+  // function-local statics so the TWAI receive task and the client's send
+  // lambda keep valid references for the life of the program.
+  logger.info("Initializing MCP266 over CANopen (TWAI, node 10)...");
   static espp::CanopenClient *client_ptr = nullptr;
   static espp::Twai twai({
       .tx_gpio = 17,
@@ -264,26 +249,9 @@ extern "C" void app_main(void) {
     run_ethernet_only(board, logger);
   }
   if (!mcp.start(ec)) {
-    logger.error("Failed to start MCP266 component: {} -- is the node on the bus?", ec.message());
+    logger.error("Failed to start MCP266: {} -- is the node on the bus?", ec.message());
     run_ethernet_only(board, logger);
   }
-  logger.info("espp::Mcp266 started");
+  logger.info("MCP266 CANopen controller started");
   run_motor_demo(mcp, board, logger);
-#else
-  // Default path: MIB's local controller (owns its own transport).
-  mib::Mcp266Controller roboclaw({
-      .twai_tx_gpio = GPIO_NUM_17,
-      .twai_rx_gpio = GPIO_NUM_16,
-      .baudrate = 1000000,
-      .node_id = 10,
-      .log_level = espp::Logger::Verbosity::INFO,
-  });
-  logger.info("Initializing MCP266 Controller via CANopen (TWAI)...");
-  if (!roboclaw.initialize(ec)) {
-    logger.error("Failed to initialize MCP266 CANopen Controller: {}", ec.message());
-    run_ethernet_only(board, logger);
-  }
-  logger.info("MCP266 CANopen controller initialized");
-  run_motor_demo(roboclaw, board, logger);
-#endif
 }
