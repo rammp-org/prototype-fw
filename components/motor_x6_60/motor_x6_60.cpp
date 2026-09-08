@@ -5,9 +5,9 @@
 #include <climits>
 #include <utility>
 
-MotorX660::MotorX660(CommunicationFunction communication, uint8_t motor_id, float gear_ratio)
+MotorX660::MotorX660(CommunicationFunction communication, uint8_t motor_id)
     : espp::BaseComponent("MotorX660", espp::Logger::Verbosity::INFO),
-      communication_(std::move(communication)), motor_id_(motor_id), gear_ratio_(gear_ratio) {
+  communication_(std::move(communication)), motor_id_(motor_id) {
   set_log_tag("MotorX660-" + std::to_string(motor_id_));
 }
 
@@ -35,8 +35,7 @@ bool MotorX660::read_status(Status &status, uint32_t timeout_ms) {
   status.data = response.data;
   status.temperature_c = static_cast<int8_t>(response.data[1]);
   status.torque_raw = read_i16(response.data, 2);
-  status.velocity_rpm = static_cast<float>(read_i16(response.data, 4)) * 60.0f /
-                        (100.0f * gear_ratio_);
+  status.velocity_rpm = static_cast<float>(read_i16(response.data, 4)) * 60.0f / 360.0f;
   status.angle_degrees = static_cast<float>(read_i16(response.data, 6));
   return true;
 }
@@ -89,7 +88,7 @@ bool MotorX660::send_torque(int16_t torque_raw) {
 }
 
 bool MotorX660::send_velocity(float velocity_rpm) {
-  const float velocity_raw = velocity_rpm * gear_ratio_ * 100.0f;
+  const float velocity_raw = velocity_rpm * 6.0f * 100.0f;
   if (velocity_raw < static_cast<float>(INT32_MIN) ||
       velocity_raw > static_cast<float>(INT32_MAX)) return false;
   std::array<uint8_t, kPacketLength> command{};
@@ -108,18 +107,25 @@ bool MotorX660::set_position_limits(float minimum_degrees, float maximum_degrees
 bool MotorX660::set_position(float position_degrees, float max_speed_rpm) {
   const float limited_position =
       std::clamp(position_degrees, minimum_position_degrees_, maximum_position_degrees_);
-  if (!send_incremental_position(limited_position - virtual_position_degrees_, max_speed_rpm)) {
+  if (!set_absolute_position(encoder_offset_degrees_ + limited_position, max_speed_rpm)) {
     return false;
   }
   virtual_position_degrees_ = limited_position;
   return true;
 }
 
+bool MotorX660::zero_position(uint32_t timeout_ms) {
+  int32_t encoder_value = 0;
+  if (!read_multi_turn_encoder(encoder_value, timeout_ms)) return false;
+  encoder_offset_degrees_ =
+      static_cast<float>(encoder_value) * 360.0f / kEncoderCountsPerOutputRevolution;
+  virtual_position_degrees_ = 0.0f;
+  return true;
+}
+
 bool MotorX660::set_absolute_position(float position_degrees, float max_speed_rpm) {
-  const float limited_position =
-      std::clamp(position_degrees, minimum_position_degrees_, maximum_position_degrees_);
-  const float speed_raw = max_speed_rpm * gear_ratio_ * 6.0f;
-  const float position_raw = limited_position * 100.0f;
+  const float speed_raw = max_speed_rpm * 6.0f;
+  const float position_raw = position_degrees * 100.0f;
   if (speed_raw < 0.0f || speed_raw > static_cast<float>(UINT16_MAX) ||
       position_raw < static_cast<float>(INT32_MIN) ||
       position_raw > static_cast<float>(INT32_MAX)) {
@@ -131,7 +137,6 @@ bool MotorX660::set_absolute_position(float position_degrees, float max_speed_rp
   set_u16(command, 2, static_cast<uint16_t>(std::lround(speed_raw)));
   set_i32(command, 4, static_cast<int32_t>(std::lround(position_raw)));
   if (!send_command(command)) return false;
-  virtual_position_degrees_ = limited_position;
   return true;
 }
 

@@ -22,8 +22,7 @@ public:
     float angle_degrees{0.0f};
   };
 
-  explicit MotorX660(CommunicationFunction communication, uint8_t motor_id,
-                     float gear_ratio = 6.0f);
+  explicit MotorX660(CommunicationFunction communication, uint8_t motor_id);
 
   MotorX660(const MotorX660 &) = delete;
   MotorX660 &operator=(const MotorX660 &) = delete;
@@ -49,13 +48,13 @@ public:
   bool release_brake();
   bool lock_brake();
 
-  void zero_position() { virtual_position_degrees_ = 0.0f; }
+  bool zero_position(uint32_t timeout_ms = 100);
   float get_position() const { return virtual_position_degrees_; }
   uint8_t get_motor_id() const { return motor_id_; }
-  float get_gear_ratio() const { return gear_ratio_; }
 
 private:
   static constexpr size_t kPacketLength = 8;
+  static constexpr float kEncoderCountsPerOutputRevolution = 131072.0f;
 
   bool send_command(const std::array<uint8_t, kPacketLength> &command);
   bool request(uint8_t command_code, MotorPacket &response, uint32_t timeout_ms);
@@ -67,7 +66,7 @@ private:
 
   CommunicationFunction communication_;
   uint8_t motor_id_;
-  float gear_ratio_;
+  float encoder_offset_degrees_{0.0f};
   float virtual_position_degrees_{0.0f};
   float minimum_position_degrees_{-std::numeric_limits<float>::infinity()};
   float maximum_position_degrees_{std::numeric_limits<float>::infinity()};

@@ -12,7 +12,6 @@ namespace {
 constexpr gpio_num_t kCanRxGpio = GPIO_NUM_16;
 constexpr gpio_num_t kCanTxGpio = GPIO_NUM_17;
 constexpr uint8_t kMotorId = 1;
-constexpr float kGearRatio = 6.0f;
 }
 
 extern "C" void app_main(void) {
@@ -29,7 +28,7 @@ extern "C" void app_main(void) {
         return timeout_ms == 0 ? can_bus.send(command)
                                : can_bus.request(command, response, timeout_ms);
       };
-  MotorX660 actuator(communicate, kMotorId, kGearRatio);
+  MotorX660 actuator(communicate, kMotorId);
   actuator.set_position_limits(-1800.0f, 1800.0f);
 
   auto root_menu = std::make_unique<cli::Menu>("motor_x6_60_example");
@@ -57,8 +56,8 @@ extern "C" void app_main(void) {
   root_menu->Insert(
       "zero",
       [&actuator](std::ostream &out) {
-        actuator.zero_position();
-        out << "Virtual position set to zero.\n";
+        out << (actuator.zero_position() ? "Virtual position set to zero.\n"
+                                         : "Encoder read failed; position was not zeroed.\n");
       },
       "Set the current command reference to zero: zero");
   root_menu->Insert(
