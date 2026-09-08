@@ -39,3 +39,4 @@ __pycache__/
 
 # vs code
 .vscode/
+.DS_Store

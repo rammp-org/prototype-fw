@@ -27,6 +27,9 @@ public:
   bool release_brake();
   bool lock_brake();
 
+  uint8_t primary_id() const { return primary_.get_motor_id(); }
+  uint8_t secondary_id() const { return secondary_.get_motor_id(); }
+
 private:
   MotorActuator &primary_;
   MotorActuator &secondary_;

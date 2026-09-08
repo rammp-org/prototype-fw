@@ -1,0 +1,707 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>STEM Linkage Console (WebUSB / Web Serial)</title>
+  <meta name="description" content="Drive the STEM 5-bar seat linkage over USB: live linkage drawing from the firmware's tracked pose, drag the end effector (M3) to move, direct pose / pair commands and motor telemetry. Talks to the STEM module (7) of an espp dispatcher device; OTA and core dumps use the stock espp consoles.">
+  <style>
+    :root {
+      --bg: #0f1418; --panel: #161d24; --panel2: #1d262f; --line: #2a3540;
+      --fg: #e6edf3; --muted: #8a97a6; --accent: #4aa8ff; --ok: #3fb950; --warn: #d29922; --err: #f85149;
+      --radius: 10px;
+      --link1: #e5484d; --link2: #f5d90a; --link3: #46c56b; --link4: #b46cf0; --spring: #9aa4ad;
+    }
+    * { box-sizing: border-box; }
+    body { margin: 0; background: var(--bg); color: var(--fg);
+      font: 14px/1.5 ui-sans-serif, system-ui, -apple-system, Segoe UI, Roboto, sans-serif; }
+    header { display: flex; flex-wrap: wrap; gap: 10px; align-items: center;
+      padding: 12px 18px; border-bottom: 1px solid var(--line); background: var(--panel); }
+    h1 { font-size: 17px; margin: 0; font-weight: 650; }
+    h1 .muted { font-weight: 400; }
+    h2 { font-size: 13px; margin: 0 0 10px; text-transform: uppercase; letter-spacing: .08em; color: var(--muted); }
+    .muted { color: var(--muted); }
+    .spacer { flex: 1; }
+    button, input, select { font: inherit; color: var(--fg); background: var(--panel2); border: 1px solid var(--line);
+      padding: 6px 11px; border-radius: 8px; }
+    button { cursor: pointer; }
+    button:hover:not(:disabled) { border-color: var(--accent); }
+    button:disabled { opacity: 0.45; cursor: default; }
+    button.primary { background: var(--accent); border-color: var(--accent); color: #06121f; font-weight: 600; }
+    button.danger { background: #3a1d1d; border-color: var(--err); color: #ffb4ae; font-weight: 600; }
+    input[type=number] { width: 96px; font-variant-numeric: tabular-nums; }
+    label.inline { display: inline-flex; align-items: center; gap: 6px; }
+    .status-pill { padding: 4px 11px; border-radius: 999px; font-size: 12px; border: 1px solid var(--line); color: var(--muted); }
+    .status-pill.ok { color: var(--ok); border-color: var(--ok); }
+    .status-pill.err { color: var(--err); border-color: var(--err); }
+    .status-pill.busy { color: var(--accent); border-color: var(--accent); }
+    main { max-width: 1400px; margin: 0 auto; padding: 16px 18px 28px; display: grid;
+      grid-template-columns: minmax(360px, 1.3fr) minmax(320px, 1fr); gap: 16px; }
+    @media (max-width: 900px) { main { grid-template-columns: 1fr; } }
+    .panel { background: var(--panel); border: 1px solid var(--line); border-radius: var(--radius); padding: 14px 16px; }
+    .stack { display: flex; flex-direction: column; gap: 14px; }
+    .row { display: flex; flex-wrap: wrap; gap: 8px; align-items: center; }
+    .row + .row { margin-top: 8px; }
+    .kv { display: grid; grid-template-columns: auto 1fr; gap: 2px 12px; font-variant-numeric: tabular-nums; }
+    .kv .k { color: var(--muted); }
+    svg#canvas { display: block; width: 100%; height: auto; max-height: 72vh; margin: 0 auto; background: #0b0f13;
+      border: 1px solid var(--line); border-radius: 8px; touch-action: none; cursor: crosshair; user-select: none; }
+    .readout { display: grid; grid-template-columns: repeat(auto-fit, minmax(150px, 1fr)); gap: 6px 14px; margin-top: 10px;
+      font-variant-numeric: tabular-nums; }
+    .readout div { display: flex; justify-content: space-between; gap: 8px; border-bottom: 1px dotted var(--line); }
+    .readout .k { color: var(--muted); }
+    .readout .bad { color: var(--err); }
+    .readout .good { color: var(--ok); }
+    table { width: 100%; border-collapse: collapse; font-variant-numeric: tabular-nums; font-size: 13px; }
+    th, td { text-align: right; padding: 4px 6px; border-bottom: 1px solid var(--line); }
+    th:first-child, td:first-child { text-align: left; }
+    th { color: var(--muted); font-weight: 500; }
+    td.bad { color: var(--err); }
+    .pairs { display: grid; grid-template-columns: auto 1fr auto auto auto; gap: 6px 10px; align-items: center;
+      font-variant-numeric: tabular-nums; }
+    .pairs .name { font-weight: 600; text-transform: capitalize; }
+    #unsupported { display: none; background: #3a1d1d; border: 1px solid var(--err); border-radius: 8px;
+      padding: 12px 16px; margin: 0 18px; }
+    #log { background: #0b0f13; border: 1px solid var(--line); border-radius: 8px; padding: 8px 10px; height: 170px;
+      overflow-y: auto; font: 12px/1.5 ui-monospace, SFMono-Regular, Menlo, monospace; }
+    #log .t { color: var(--muted); }
+    #log .err { color: var(--err); }
+    #log .warn { color: var(--warn); }
+    #log .ok { color: var(--ok); }
+    #log .sys { color: var(--accent); }
+    a.pill { display: inline-block; text-decoration: none; color: var(--fg); background: var(--panel2);
+      border: 1px solid var(--line); padding: 5px 10px; border-radius: 999px; font-size: 12px; }
+    a.pill:hover { border-color: var(--accent); }
+    .legend { display: flex; flex-wrap: wrap; gap: 4px 14px; font-size: 12px; color: var(--muted); margin-top: 6px; }
+    .legend i { display: inline-block; width: 18px; height: 4px; border-radius: 2px; vertical-align: middle; margin-right: 5px; }
+    .hint { font-size: 12px; color: var(--muted); }
+  </style>
+</head>
+<body>
+  <header>
+    <h1>STEM Linkage Console <span class="muted">(WebUSB / Web Serial)</span></h1>
+    <div class="spacer"></div>
+    <label class="inline muted" style="font-size:12px;"><input type="checkbox" id="anyDevice" /> any device</label>
+    <button id="connectUsbBtn" class="primary">Connect (WebUSB)</button>
+    <button id="connectSerialBtn">Connect (Web Serial)</button>
+    <button id="disconnectBtn" disabled>Disconnect</button>
+    <span id="status" class="status-pill">idle</span>
+  </header>
+  <div id="unsupported">This browser supports neither WebUSB nor Web Serial. Use a Chromium-based browser (Chrome / Edge) over HTTPS or localhost.</div>
+
+  <main>
+    <section class="stack">
+      <div class="panel">
+        <h2>Linkage <span class="muted" style="text-transform:none;letter-spacing:0">— analysis frame, mm (origin M1, +x toward M2, +y up)</span></h2>
+        <svg id="canvas" viewBox="-160 -770 600 860" preserveAspectRatio="xMidYMid meet" aria-label="5-bar linkage drawing"></svg>
+        <div class="legend">
+          <span><i style="background:var(--link1)"></i>link1 M1→J2</span>
+          <span><i style="background:var(--link2)"></i>link2 M2→J1</span>
+          <span><i style="background:var(--link3)"></i>link3 J1→J3</span>
+          <span><i style="background:var(--link4)"></i>link4 bar M3–J3–J5–J2</span>
+          <span><i style="background:var(--spring)"></i>gas spring J4→J5</span>
+          <span><i style="background:var(--accent);opacity:.6"></i>target (drag)</span>
+          <span><i style="background:var(--muted);height:1px;border-top:1px dashed var(--muted);border-radius:0"></i>design travel</span>
+        </div>
+        <div class="readout">
+          <div><span class="k">tracked pose x_rel / y_rel</span><span id="poseRel">–</span></div>
+          <div><span class="k">tracked plate x / y</span><span id="posePlate">–</span></div>
+          <div><span class="k">target x_rel / y_rel</span><span id="targetRel">–</span></div>
+          <div><span class="k">target status</span><span id="targetStatus">–</span></div>
+          <div><span class="k">crank θ1 / θ2 (abs)</span><span id="thetas">–</span></div>
+          <div><span class="k">motion</span><span id="motion">–</span></div>
+        </div>
+        <p class="hint">Drag anywhere in the drawing to place the target (M3). The ghost turns red when the point is unreachable or a pair would leave its limits; the firmware applies the same checks and rejects such moves.</p>
+      </div>
+
+      <div class="panel">
+        <h2>Log</h2>
+        <div id="log"></div>
+      </div>
+    </section>
+
+    <section class="stack">
+      <div class="panel">
+        <h2>Pose command</h2>
+        <div class="row">
+          <label class="inline">x_rel <input id="xInput" type="number" step="1" value="0" /></label>
+          <label class="inline">y_rel <input id="yInput" type="number" step="1" value="0" /></label>
+          <label class="inline">rpm <input id="rpmInput" type="number" step="0.5" min="0" value="2" style="width:70px" /></label>
+        </div>
+        <div class="row">
+          <button id="moveBtn" class="primary" disabled>Move to target</button>
+          <button id="homeBtn" disabled>Home (0, 0)</button>
+          <button id="stopBtn" class="danger" disabled>STOP</button>
+        </div>
+        <div class="row">
+          <label class="inline"><input type="checkbox" id="moveOnRelease" checked /> move when the drag is released</label>
+          <label class="inline"><input type="checkbox" id="liveDrag" /> live (send while dragging, 4 Hz)</label>
+        </div>
+      </div>
+
+      <div class="panel">
+        <h2>Actuator pairs <span class="muted" style="text-transform:none;letter-spacing:0">— tracked position, deg</span></h2>
+        <div class="pairs" id="pairs"></div>
+        <div class="row" style="margin-top:10px">
+          <button id="zeroAllBtn" disabled>Zero all (no align)</button>
+          <button id="releaseBtn" class="danger" disabled>Release brakes</button>
+        </div>
+        <p class="hint">Positions are the firmware's tracked (commanded) values: the RMD status frame only carries the motor-side encoder, so there is no measured output-shaft angle. Re-zero after a STOP mid-move.</p>
+      </div>
+
+      <div class="panel">
+        <h2>Motor telemetry</h2>
+        <table>
+          <thead><tr><th>motor</th><th>pair</th><th>ok</th><th>temp °C</th><th>torque</th><th>rpm</th><th>tracked °</th></tr></thead>
+          <tbody id="motors"></tbody>
+        </table>
+        <div class="row" style="margin-top:8px">
+          <label class="inline"><input type="checkbox" id="stream" checked /> stream telemetry</label>
+          <label class="inline">period ms <input id="periodInput" type="number" min="50" max="5000" step="50" value="200" style="width:80px" /></label>
+          <span id="telemAge" class="muted"></span>
+        </div>
+      </div>
+
+      <div class="panel">
+        <h2>Device</h2>
+        <div class="kv">
+          <span class="k">device</span><span id="devName">not connected</span>
+          <span class="k">firmware</span><span id="devFw">–</span>
+          <span class="k">built</span><span id="devBuild">–</span>
+          <span class="k">IDF</span><span id="devIdf">–</span>
+          <span class="k">modules</span><span id="devModules">–</span>
+        </div>
+        <div class="row" style="margin-top:10px">
+          <a class="pill" href="dispatcher_hub.html" target="_blank" rel="noopener">Device Hub</a>
+          <a class="pill" href="ota_console.html" target="_blank" rel="noopener">OTA console</a>
+          <a class="pill" href="coredump_console.html" target="_blank" rel="noopener">Core dump console</a>
+          <a class="pill" href="https://esp-cpp.github.io/espp/apps/index.html" target="_blank" rel="noopener">espp apps (hosted)</a>
+        </div>
+        <p class="hint">The local links expect the espp consoles next to this file (see README.md). Each console opens its own USB connection: disconnect here first, or use the CDC (Web Serial) stream for one and WebUSB for the other.</p>
+      </div>
+    </section>
+  </main>
+
+  <script>
+    "use strict";
+    // ======================= stream_frame v2 (see espp stream_frame) =======================
+    const DEFAULT_VID = 0x1209, VENDOR_CLASS = 0xFF;
+    const MAGIC0 = 0x54, MAGIC1 = 0x4F, HEADER_SIZE = 9, CRC_SIZE = 4, CORRELATION_SIZE = 2;
+    const MAX_PAYLOAD = 4096, MAX_FRAME = HEADER_SIZE + CORRELATION_SIZE + MAX_PAYLOAD + CRC_SIZE;
+    const FLAGS_VERSION = 1, FLAGS_REQUEST = (FLAGS_VERSION << 4), FLAGS_REPLY_BIT = 0x01, FLAG_CORRELATION = 0x02;
+    const MODULE_DISCOVERY = 0xFF, T_LIST_MODULES = 0x00;
+
+    // ======================= STEM protocol (main/stem_protocol.hpp) =======================
+    const MODULE = 7, PROTOCOL_VERSION = 1;
+    const T = { GET_INFO: 0x10, GET_STATE: 0x11, MOVE_TO: 0x12, SET_PAIR: 0x13, HOME: 0x14, STOP: 0x15,
+                RELEASE: 0x16, ZERO: 0x17, SET_STREAMING: 0x18, SOLVE_IK: 0x19,
+                OK: 0x81, ERROR: 0x82, INFO: 0x90, STATE: 0x91, MOVED: 0x92, IK_RESULT: 0x93, TELEMETRY: 0x94 };
+    const REQ_NAME = {}; for (const [k, v] of Object.entries(T)) REQ_NAME[v] = k;
+    const FLAG = { STREAMING: 1, TARGET_VALID: 2, POSE_VALID: 4, MOTORS_OK: 8, CAN_OK: 16 };
+    const PAIR_NAMES = ["left", "right", "seat"], ALL_PAIRS = 0xFF;
+    const DISCOVERY_TIMEOUT_MS = 800;
+
+    const els = {};
+    for (const id of ["status","connectUsbBtn","connectSerialBtn","disconnectBtn","anyDevice","unsupported","canvas",
+      "poseRel","posePlate","targetRel","targetStatus","thetas","motion","log","xInput","yInput","rpmInput","moveBtn",
+      "homeBtn","stopBtn","moveOnRelease","liveDrag","pairs","zeroAllBtn","releaseBtn","motors","stream","periodInput",
+      "telemAge","devName","devFw","devBuild","devIdf","devModules"]) els[id] = document.getElementById(id);
+
+    function logLine(cls, text) {
+      const line = document.createElement("div");
+      const t = document.createElement("span"); t.className = "t"; t.textContent = new Date().toLocaleTimeString() + " ";
+      const b = document.createElement("span"); b.className = cls; b.textContent = text;
+      line.appendChild(t); line.appendChild(b); els.log.appendChild(line);
+      while (els.log.childNodes.length > 400) els.log.removeChild(els.log.firstChild);
+      els.log.scrollTop = els.log.scrollHeight;
+    }
+    function setStatus(state, text) { els.status.className = "status-pill" + (state ? " " + state : ""); els.status.textContent = text; }
+
+    // ---- CRC-32 (zlib), golden crc32("123456789") === 0xCBF43926 ----
+    const CRC_TABLE = (() => { const t = new Uint32Array(256); for (let i=0;i<256;i++){ let c=i; for(let k=0;k<8;k++) c=(c&1)?((c>>>1)^0xEDB88320):(c>>>1); t[i]=c>>>0; } return t; })();
+    function crc32(bytes) { let c=0xFFFFFFFF; for (let i=0;i<bytes.length;i++) c=CRC_TABLE[(c^bytes[i])&0xFF]^(c>>>8); return (~c)>>>0; }
+    if (crc32(new TextEncoder().encode("123456789")) !== 0xCBF43926) throw new Error("CRC-32 self-test failed");
+
+    // Reply-typed messages (high bit set) carry the frame reply flag, like the C++ build().
+    function buildFrame(type, payload, module = MODULE) {
+      payload = payload || new Uint8Array(0);
+      const frame = new Uint8Array(HEADER_SIZE + payload.length + CRC_SIZE);
+      const view = new DataView(frame.buffer);
+      view.setUint16(0, 0x4F54, true);
+      frame[2] = FLAGS_REQUEST | ((type & 0x80) ? FLAGS_REPLY_BIT : 0);
+      frame[3] = module; frame[4] = type;
+      view.setUint32(5, payload.length, true);
+      frame.set(payload, HEADER_SIZE);
+      view.setUint32(HEADER_SIZE + payload.length, crc32(frame.subarray(0, HEADER_SIZE + payload.length)), true);
+      return frame;
+    }
+
+    class StreamParser {
+      constructor() { this.buf = new Uint8Array(0); }
+      reset() { this.buf = new Uint8Array(0); }
+      feed(chunk) {
+        const merged = new Uint8Array(this.buf.length + chunk.length);
+        merged.set(this.buf, 0); merged.set(chunk, this.buf.length);
+        const frames = []; let pos = 0;
+        for (;;) {
+          while (pos < merged.length && !(merged[pos] === MAGIC0 && (pos + 1 >= merged.length || merged[pos + 1] === MAGIC1))) pos++;
+          if (merged.length - pos < 3) break;
+          const flags = merged[pos + 2];
+          const ext = (flags & FLAG_CORRELATION) ? CORRELATION_SIZE : 0;
+          const headerSize = HEADER_SIZE + ext;
+          if (merged.length - pos < headerSize) break;
+          const view = new DataView(merged.buffer, merged.byteOffset + pos);
+          const len = view.getUint32(5 + ext, true);
+          if (len > MAX_PAYLOAD) { pos++; continue; }
+          const total = headerSize + len + CRC_SIZE;
+          if (merged.length - pos < total) break;
+          const expected = view.getUint32(headerSize + len, true);
+          if (crc32(merged.subarray(pos, pos + headerSize + len)) !== expected) { pos++; continue; }
+          frames.push({ module: merged[pos + 3], type: merged[pos + 4], reply: (flags & FLAGS_REPLY_BIT) !== 0,
+                        payload: merged.slice(pos + headerSize, pos + headerSize + len) });
+          pos += total;
+        }
+        this.buf = merged.slice(pos);
+        return frames;
+      }
+    }
+    const parser = new StreamParser();
+
+    function parseDiscovery(payload) {
+      let i = 0;
+      const need = (n) => { if (i + n > payload.length) throw new Error("truncated discovery payload"); };
+      const u8 = () => { need(1); return payload[i++]; };
+      const str = () => { const n = u8(); need(n); const s = new TextDecoder().decode(payload.subarray(i, i + n)); i += n; return s; };
+      const version = u8(); u8();
+      const device = str(), fw = str();
+      const count = u8();
+      const modules = [];
+      for (let m = 0; m < count; m++) modules.push({ id: u8(), name: str(), app: str(), desc: str() });
+      return { version, device, fw, modules };
+    }
+
+    // ======================= Transports (WebUSB + Web Serial) =======================
+    let transport = null;
+    async function requestUsbDevice(anyDevice) {
+      const showAll = { filters: [{}] };
+      const vidOnly = { filters: [{ vendorId: DEFAULT_VID }] };
+      try { return await navigator.usb.requestDevice(anyDevice ? showAll : vidOnly); }
+      catch (e) { if (anyDevice && e && e.name === "TypeError") return await navigator.usb.requestDevice(vidOnly); throw e; }
+    }
+    class UsbTransport {
+      constructor() { this.device=null; this.iface=null; this.epIn=null; this.epOut=null; this.reading=false; }
+      async open(anyDevice) {
+        this.device = await requestUsbDevice(anyDevice);
+        await this.device.open();
+        if (this.device.configuration === null) await this.device.selectConfiguration(1);
+        const config = this.device.configuration; if (!config) throw new Error("no active USB configuration");
+        let found = null;
+        for (const itf of config.interfaces) { for (const alt of itf.alternates) {
+          if (alt.interfaceClass !== VENDOR_CLASS) continue;
+          let inEp=null, outEp=null;
+          for (const ep of alt.endpoints) { if (ep.type!=="bulk") continue; if (ep.direction==="in"&&!inEp) inEp=ep; else if (ep.direction==="out"&&!outEp) outEp=ep; }
+          if (inEp && outEp) { found = { itf: itf.interfaceNumber, alt: alt.alternateSetting, inEp, outEp }; break; }
+        } if (found) break; }
+        if (!found) throw new Error("no vendor-specific (0xFF) interface with a bulk IN+OUT endpoint pair was found");
+        await this.device.claimInterface(found.itf);
+        if (found.alt !== 0) await this.device.selectAlternateInterface(found.itf, found.alt);
+        this.iface = found.itf; this.epIn = found.inEp.endpointNumber; this.epOut = found.outEp.endpointNumber;
+      }
+      describe() { const d=this.device; return (d.productName||"USB device")+" ("+d.vendorId.toString(16).padStart(4,"0")+":"+d.productId.toString(16).padStart(4,"0")+") [WebUSB]"; }
+      async send(bytes) {
+        let sent = 0;
+        while (sent < bytes.length) {
+          const out = await this.device.transferOut(this.epOut, sent === 0 ? bytes : bytes.subarray(sent));
+          if (out.status === "stall") { try { await this.device.clearHalt("out", this.epOut); } catch(_){} throw new Error("OUT endpoint stalled"); }
+          if (out.status !== "ok") throw new Error("OUT transfer status: " + out.status);
+          const n = out.bytesWritten || 0; if (n === 0) throw new Error("OUT transfer made no progress"); sent += n;
+        }
+      }
+      async readLoop(onData) {
+        this.reading = true;
+        while (this.reading && this.device) {
+          let result;
+          try { result = await this.device.transferIn(this.epIn, MAX_FRAME); } catch(e) { if (this.reading) throw e; return; }
+          if (!this.reading) return;
+          if (result.status === "stall") { try { await this.device.clearHalt("in", this.epIn); } catch(_){} continue; }
+          if (result.data && result.data.byteLength) onData(new Uint8Array(result.data.buffer, result.data.byteOffset, result.data.byteLength));
+        }
+      }
+      async close() { this.reading = false; if (this.device) { if (this.iface !== null) { try { await this.device.releaseInterface(this.iface); } catch(_){} } try { await this.device.close(); } catch(_){} } this.device = null; }
+    }
+    class SerialTransport {
+      constructor() { this.port=null; this.reader=null; this.writer=null; this.reading=false; }
+      async open() { this.port = await navigator.serial.requestPort(); await this.port.open({ baudRate: 115200 }); this.writer = this.port.writable.getWriter(); }
+      describe() { const info = this.port.getInfo ? this.port.getInfo() : {}; let id = "Serial port"; if (info && info.usbVendorId != null) id = "USB serial ("+info.usbVendorId.toString(16).padStart(4,"0")+":"+(info.usbProductId||0).toString(16).padStart(4,"0")+")"; return id + " [Web Serial]"; }
+      async send(bytes) { await this.writer.write(bytes); }
+      async readLoop(onData) {
+        this.reading = true; this.reader = this.port.readable.getReader();
+        try { while (this.reading) { const { value, done } = await this.reader.read(); if (done) { if (this.reading) throw new Error("serial connection closed (EOF)"); break; } if (value && value.length) onData(new Uint8Array(value.buffer, value.byteOffset, value.byteLength)); } }
+        finally { try { this.reader.releaseLock(); } catch(_){} this.reader = null; }
+      }
+      async close() {
+        this.reading = false;
+        if (this.reader) { try { await this.reader.cancel(); } catch(_){} try { this.reader.releaseLock(); } catch(_){} this.reader = null; }
+        if (this.writer) { try { await this.writer.close(); } catch(_){} try { this.writer.releaseLock(); } catch(_){} this.writer = null; }
+        if (this.port) { try { await this.port.close(); } catch(_){} this.port = null; }
+      }
+    }
+
+    // ======================= Kinematics (mirror of main/ik_5bar.cpp) =======================
+    // Geometry.md defaults; replaced by the device's INFO reply when connected.
+    let geometry = { m1_x: 0, m1_y: 0, m2_x: 170, m2_y: 0, j4_x: -38, j4_y: 8, bar_m3_j2: 270, bar_m3_j3: 100,
+                     bar_m3_j5: 200, bar_j1_j3: 270, j5_perp: 12, crank1: 310, crank2: 270 };
+    let reference = { x: 170, y: 230, m1: -0.16, m2: 143.74, m3: 121.23 };
+    let limits = { min: -60, max: 60 };
+    const PLATE_Y_OFFSET = 151.5; // y_plate = M3_y + 151.5 (Geometry.md section 2)
+    const DESIGN = { x: [-34, 266], yPlate: [290, 720] };
+    const EDGE_POSES = [["home",66,360],["full down",66,290],["full up",66,720],["max fwd",266,360],["max rear",-34,360]];
+
+    const deg = (r) => r * 180 / Math.PI, rad = (d) => d * Math.PI / 180;
+    function normDeg(a) { let r = a % 360; if (r >= 180) r -= 360; if (r < -180) r += 360; return r; }
+    const cross = (a, b, c) => (b[0]-a[0])*(c[1]-a[1]) - (b[1]-a[1])*(c[0]-a[0]);
+    const isCrossed = (m1, m2, j1, j2) => cross(m1, j2, j1) > 0 && cross(m2, j1, j2) < 0; // pins keep links 1/2 crossed
+    const barSideOk = (j1, j2, j3) => cross(j1, j2, j3) > 0;                              // seat bar on the CCW side of J1->J2
+
+    function complete(m1, m2, m3, j1, j2, j3, g) {
+      const bx = j2[0]-m3[0], by = j2[1]-m3[1], mag = Math.hypot(bx, by);
+      if (mag < 1e-9) return null;
+      const ux = bx/mag, uy = by/mag, nx = -uy, ny = ux;
+      return { m3, j1, j2, j3,
+        j5: [m3[0] + g.bar_m3_j5*ux + g.j5_perp*nx, m3[1] + g.bar_m3_j5*uy + g.j5_perp*ny],
+        theta1: deg(Math.atan2(j2[1]-m1[1], j2[0]-m1[0])), theta2: deg(Math.atan2(j1[1]-m2[1], j1[0]-m2[0])),
+        m3Angle: deg(Math.atan2(m3[1]-j2[1], m3[0]-j2[0])) };
+    }
+    function solveIk(x, y, g = geometry, ref = reference) {
+      const m1 = [g.m1_x, g.m1_y], m2 = [g.m2_x, g.m2_y], m3 = [x, y];
+      const r = Math.hypot(x, y); if (r < 1e-9) return null;
+      const l1 = g.crank1, l2 = g.crank2, l3 = g.bar_j1_j3, l4 = g.bar_m3_j2, l4j3 = g.bar_m3_j3;
+      const dot = (l1*l1 - l4*l4 - r*r) / (2*l4);
+      if (Math.abs(dot / r) > 1 + 1e-5) return null;
+      const alpha = Math.atan2(y, x), beta = Math.acos(Math.max(-1, Math.min(1, dot / r)));
+      let best = null, bestScore = Infinity;
+      for (const a of [alpha + beta, alpha - beta]) {
+        const d0 = [Math.cos(a), Math.sin(a)];
+        const j2 = [x + l4*d0[0], y + l4*d0[1]], j3 = [x + l4j3*d0[0], y + l4j3*d0[1]];
+        const dx = j3[0]-m2[0], dy = j3[1]-m2[1], d = Math.hypot(dx, dy); if (d < 1e-9) continue;
+        const aa = (d*d + l2*l2 - l3*l3) / (2*d), hsq = l2*l2 - aa*aa; if (hsq < -1e-2) continue;
+        const h = Math.sqrt(Math.max(hsq, 0)), vx = dx/d, vy = dy/d;
+        for (const s of [1, -1]) {
+          const j1 = [m2[0] + aa*vx - s*h*vy, m2[1] + aa*vy + s*h*vx];
+          if (!isCrossed(m1, m2, j1, j2) || !barSideOk(j1, j2, j3)) continue;
+          const c = complete(m1, m2, m3, j1, j2, j3, g); if (!c) continue;
+          const score = Math.abs(normDeg(c.theta1 - ref.m1)) + Math.abs(normDeg(c.theta2 - ref.m2));
+          if (score < bestScore) { best = c; bestScore = score; }
+        }
+      }
+      return best;
+    }
+    function applyRef(s, ref) {
+      return { ...s, theta1Rel: normDeg(s.theta1 - ref.m1), theta2Rel: normDeg(s.theta2 - ref.m2), m3AngleRel: normDeg(s.m3Angle - ref.m3) };
+    }
+    function solveIkRef(xr, yr, g = geometry, ref = reference) { const s = solveIk(xr + ref.x, yr + ref.y, g, ref); return s ? applyRef(s, ref) : null; }
+    function solveFk(t1, t2, g = geometry) {
+      const m1 = [g.m1_x, g.m1_y], m2 = [g.m2_x, g.m2_y];
+      const l1 = g.crank1, l2 = g.crank2, l3 = g.bar_j1_j3, l4 = g.bar_m3_j2, lj2j3 = l4 - g.bar_m3_j3;
+      const j2 = [m1[0] + l1*Math.cos(rad(t1)), m1[1] + l1*Math.sin(rad(t1))];
+      const j1 = [m2[0] + l2*Math.cos(rad(t2)), m2[1] + l2*Math.sin(rad(t2))];
+      if (!isCrossed(m1, m2, j1, j2)) return null;
+      const dx = j2[0]-j1[0], dy = j2[1]-j1[1], d = Math.hypot(dx, dy);
+      if (d < 1e-9 || d > l3 + lj2j3 || d < Math.abs(l3 - lj2j3)) return null;
+      const a = (d*d + l3*l3 - lj2j3*lj2j3) / (2*d), h = Math.sqrt(Math.max(l3*l3 - a*a, 0)), vx = dx/d, vy = dy/d;
+      const j3 = [j1[0] + a*vx - h*vy, j1[1] + a*vy + h*vx];
+      if (!barSideOk(j1, j2, j3)) return null;
+      const bx = j3[0]-j2[0], by = j3[1]-j2[1], b = Math.hypot(bx, by); if (b < 1e-9) return null;
+      return complete(m1, m2, [j2[0] + l4*bx/b, j2[1] + l4*by/b], j1, j2, j3, g);
+    }
+    function solveFkRef(t1r, t2r, g = geometry, ref = reference) { const s = solveFk(t1r + ref.m1, t2r + ref.m2, g); return s ? applyRef(s, ref) : null; }
+    // Pair convention (StemController::pose_to_pair_deg): positive pair rotation = negative crank rotation.
+    const pairsFromSolution = (s) => [-s.theta1Rel, -s.theta2Rel, -s.m3AngleRel];
+    const withinLimits = (pairs) => pairs.every(p => p >= limits.min && p <= limits.max);
+
+    // ======================= Drawing =======================
+    const NS = "http://www.w3.org/2000/svg";
+    const svg = els.canvas;
+    const layers = {};
+    for (const name of ["grid", "design", "target", "current", "labels"]) { const g = document.createElementNS(NS, "g"); g.id = "L_" + name; svg.appendChild(g); layers[name] = g; }
+    function el(tag, attrs, parent) { const e = document.createElementNS(NS, tag); for (const [k, v] of Object.entries(attrs)) e.setAttribute(k, v); (parent || svg).appendChild(e); return e; }
+    const S = (p) => [p[0], -p[1]]; // analysis frame (y up) -> SVG (y down)
+    function line(p, q, color, width, parent, extra = {}) { const a = S(p), b = S(q); return el("line", { x1: a[0], y1: a[1], x2: b[0], y2: b[1], stroke: color, "stroke-width": width, "stroke-linecap": "round", ...extra }, parent); }
+    function dot(p, r, color, parent, extra = {}) { const a = S(p); return el("circle", { cx: a[0], cy: a[1], r, fill: color, ...extra }, parent); }
+    function text(p, s, parent, extra = {}) { const a = S(p); const t = el("text", { x: a[0] + 6, y: a[1] - 6, fill: "#c9d1d9", "font-size": 13, "font-family": "ui-sans-serif, system-ui, sans-serif", ...extra }, parent); t.textContent = s; return t; }
+    function clear(g) { while (g.firstChild) g.removeChild(g.firstChild); }
+
+    function drawStatic() {
+      clear(layers.grid); clear(layers.design);
+      for (let x = -150; x <= 450; x += 50) line([x, -80], [x, 780], x === 0 ? "#2f3d4a" : "#182028", 1, layers.grid);
+      for (let y = -50; y <= 750; y += 50) line([-160, y], [440, y], y === 0 ? "#2f3d4a" : "#182028", 1, layers.grid);
+      // design travel box (plate frame -> analysis frame) and the five edge poses
+      const y0 = DESIGN.yPlate[0] - PLATE_Y_OFFSET, y1 = DESIGN.yPlate[1] - PLATE_Y_OFFSET;
+      const a = S([DESIGN.x[0], y1]);
+      el("rect", { x: a[0], y: a[1], width: DESIGN.x[1] - DESIGN.x[0], height: y1 - y0, fill: "none", stroke: "#4b5866", "stroke-dasharray": "6 5", "stroke-width": 1 }, layers.design);
+      for (const [name, xp, yp] of EDGE_POSES) { const p = [xp, yp - PLATE_Y_OFFSET]; dot(p, 3, "#4b5866", layers.design); text(p, name, layers.design, { fill: "#6b7885", "font-size": 11 }); }
+      // ground: M1, M2, J4
+      const g = geometry;
+      dot([g.m1_x, g.m1_y], 6, "#c9d1d9", layers.design); text([g.m1_x, g.m1_y], "M1", layers.design);
+      dot([g.m2_x, g.m2_y], 6, "#c9d1d9", layers.design); text([g.m2_x, g.m2_y], "M2", layers.design);
+      dot([g.j4_x, g.j4_y], 4, "#c9d1d9", layers.design); text([g.j4_x, g.j4_y], "J4", layers.design, { x: S([g.j4_x, 0])[0] - 30 });
+    }
+    function drawPose(layer, s, opts) {
+      clear(layer);
+      if (!s) return;
+      const g = geometry, m1 = [g.m1_x, g.m1_y], m2 = [g.m2_x, g.m2_y], j4 = [g.j4_x, g.j4_y];
+      const op = opts.opacity, w = opts.width, extra = { opacity: op };
+      if (opts.bad) { const c = "var(--err)"; line(m1, s.j2, c, w, layer, extra); line(m2, s.j1, c, w, layer, extra); line(s.j1, s.j3, c, w, layer, extra); line(s.j2, s.m3, c, w, layer, extra); }
+      else {
+        line(m1, s.j2, "var(--link1)", w, layer, extra); line(m2, s.j1, "var(--link2)", w, layer, extra);
+        line(s.j1, s.j3, "var(--link3)", w, layer, extra); line(s.j2, s.m3, "var(--link4)", w, layer, extra);
+        line(s.j3, s.j5, "var(--link4)", w * 0.6, layer, extra); line(j4, s.j5, "var(--spring)", 2, layer, { opacity: op, "stroke-dasharray": "7 5" });
+      }
+      for (const [name, p] of [["J1", s.j1], ["J2", s.j2], ["J3", s.j3], ["J5", s.j5]]) { dot(p, 4, "#e6edf3", layer, extra); if (opts.labels) text(p, name, layer); }
+      dot(s.m3, opts.handle ? 9 : 6, opts.bad ? "var(--err)" : (opts.handle ? "var(--accent)" : "#ffffff"), layer, { opacity: Math.min(1, op + 0.3), stroke: "#0b0f13", "stroke-width": 1.5 });
+      if (opts.labels) text(s.m3, "M3", layer, { "font-weight": 600 });
+    }
+
+    // ======================= State =======================
+    let currentPairs = null;      // tracked pair positions from the device
+    let currentSolution = null;   // FK of the tracked positions
+    let target = { x: 0, y: 0 };  // x_rel / y_rel
+    let targetSolution = null, targetReachable = false, targetOk = false;
+    let lastTelemetry = 0, deviceState = null, motorsMeta = [];
+    let dragging = false, liveTimer = null, liveDirty = false;
+
+    function refreshTarget(x, y) {
+      target = { x, y };
+      const s = solveIkRef(x, y);
+      targetSolution = s; targetReachable = !!s;
+      targetOk = targetReachable && withinLimits(pairsFromSolution(s));
+      drawPose(layers.target, s, { opacity: 0.55, width: 5, handle: true, bad: !targetOk, labels: false });
+      if (!s) { // unreachable: still show the handle where the pointer is
+        const p = [x + reference.x, y + reference.y]; dot(p, 9, "var(--err)", layers.target, { opacity: 0.8 });
+      }
+      els.xInput.value = x.toFixed(1); els.yInput.value = y.toFixed(1);
+      els.targetRel.textContent = x.toFixed(1) + " / " + y.toFixed(1) + " mm";
+      const pairs = s ? pairsFromSolution(s) : null;
+      els.targetStatus.className = targetOk ? "good" : "bad";
+      els.targetStatus.textContent = !s ? "unreachable" : (targetOk ? "reachable · pairs " + pairs.map(v => v.toFixed(1)).join(" / ") + "°"
+        : "outside pair limits (" + pairs.map(v => v.toFixed(1)).join(" / ") + "°)");
+      els.moveBtn.disabled = !transport || !targetOk;
+    }
+    function refreshCurrent() {
+      currentSolution = currentPairs ? solveFkRef(-currentPairs[0], -currentPairs[1]) : null;
+      drawPose(layers.current, currentSolution, { opacity: 1, width: 7, handle: false, labels: true });
+      if (currentSolution) {
+        const s = currentSolution;
+        els.poseRel.textContent = (s.m3[0] - reference.x).toFixed(1) + " / " + (s.m3[1] - reference.y).toFixed(1) + " mm";
+        els.posePlate.textContent = s.m3[0].toFixed(1) + " / " + (s.m3[1] + PLATE_Y_OFFSET).toFixed(1) + " mm";
+        els.thetas.textContent = s.theta1.toFixed(2) + "° / " + s.theta2.toFixed(2) + "°";
+      } else { els.poseRel.textContent = currentPairs ? "(no FK solution)" : "–"; els.posePlate.textContent = "–"; els.thetas.textContent = "–"; }
+    }
+
+    // pointer -> analysis frame
+    function pointerToWorld(ev) {
+      const pt = new DOMPoint(ev.clientX, ev.clientY).matrixTransform(svg.getScreenCTM().inverse());
+      return [pt.x, -pt.y];
+    }
+    svg.addEventListener("pointerdown", (ev) => {
+      if (ev.button !== 0) return;
+      svg.setPointerCapture(ev.pointerId); dragging = true;
+      const p = pointerToWorld(ev); refreshTarget(p[0] - reference.x, p[1] - reference.y);
+      if (els.liveDrag.checked && transport) { liveDirty = true; if (!liveTimer) liveTimer = setInterval(() => { if (liveDirty && targetOk) { liveDirty = false; sendMove(); } }, 250); }
+    });
+    svg.addEventListener("pointermove", (ev) => {
+      if (!dragging) return;
+      const p = pointerToWorld(ev); refreshTarget(p[0] - reference.x, p[1] - reference.y); liveDirty = true;
+    });
+    const endDrag = (ev) => {
+      if (!dragging) return; dragging = false;
+      if (liveTimer) { clearInterval(liveTimer); liveTimer = null; }
+      if (transport && els.moveOnRelease.checked && targetOk) sendMove();
+      else if (transport && !targetOk) logLine("warn", "target not sent: " + els.targetStatus.textContent);
+    };
+    svg.addEventListener("pointerup", endDrag); svg.addEventListener("pointercancel", endDrag);
+    for (const input of [els.xInput, els.yInput]) input.addEventListener("change", () => refreshTarget(Number(els.xInput.value) || 0, Number(els.yInput.value) || 0));
+
+    // ======================= Protocol encode / decode =======================
+    const enc = {
+      f32s: (...vals) => { const b = new Uint8Array(4 * vals.length), dv = new DataView(b.buffer); vals.forEach((v, i) => dv.setFloat32(4 * i, v, true)); return b; },
+      setPair: (pair, degrees, rpm) => { const b = new Uint8Array(9), dv = new DataView(b.buffer); b[0] = pair; dv.setFloat32(1, degrees, true); dv.setFloat32(5, rpm, true); return b; },
+      zero: (pair, align) => new Uint8Array([pair, align ? 1 : 0]),
+      streaming: (enable, period) => { const b = new Uint8Array(3); b[0] = enable ? 1 : 0; new DataView(b.buffer).setUint16(1, period, true); return b; },
+    };
+    class Reader {
+      constructor(p) { this.p = p; this.dv = new DataView(p.buffer, p.byteOffset, p.byteLength); this.i = 0; }
+      need(n) { if (this.i + n > this.p.length) throw new Error("truncated payload"); }
+      u8() { this.need(1); return this.p[this.i++]; }
+      i8() { this.need(1); return this.dv.getInt8(this.i++); }
+      u16() { this.need(2); const v = this.dv.getUint16(this.i, true); this.i += 2; return v; }
+      i16() { this.need(2); const v = this.dv.getInt16(this.i, true); this.i += 2; return v; }
+      u32() { this.need(4); const v = this.dv.getUint32(this.i, true); this.i += 4; return v; }
+      f32() { this.need(4); const v = this.dv.getFloat32(this.i, true); this.i += 4; return v; }
+      str() { const n = this.u8(); this.need(n); const s = new TextDecoder().decode(this.p.subarray(this.i, this.i + n)); this.i += n; return s; }
+      rest() { return new TextDecoder().decode(this.p.subarray(this.i)); }
+    }
+    function decodeInfo(p) {
+      const r = new Reader(p), info = { version: r.u8(), project: r.str(), fw: r.str(), build: r.str(), idf: r.str(), pairs: [] };
+      const n = r.u8();
+      for (let i = 0; i < n; i++) info.pairs.push({ index: r.u8(), name: r.str(), primary: r.u8(), secondary: r.u8(), min: r.f32(), max: r.f32() });
+      const g = {}; for (const k of ["m1_x","m1_y","m2_x","m2_y","j4_x","j4_y","bar_m3_j2","bar_m3_j3","bar_m3_j5","bar_j1_j3","j5_perp","crank1","crank2"]) g[k] = r.f32();
+      info.geometry = g;
+      info.reference = { x: r.f32(), y: r.f32(), m1: r.f32(), m2: r.f32(), m3: r.f32() };
+      info.moveRpm = r.f32(); info.setRpm = r.f32(); info.maxRpm = r.f32(); info.period = r.u16(); info.streaming = r.u8() !== 0;
+      return info;
+    }
+    function decodeState(p) {
+      const r = new Reader(p), s = { uptime: r.u32(), flags: r.u8(), targetX: r.f32(), targetY: r.f32(), poseX: r.f32(), poseY: r.f32(), pairs: [r.f32(), r.f32(), r.f32()], motors: [] };
+      const n = r.u8();
+      for (let i = 0; i < n; i++) s.motors.push({ id: r.u8(), ok: r.u8() !== 0, temp: r.i8(), torque: r.i16(), rpm: r.f32(), tracked: r.f32() });
+      return s;
+    }
+
+    // ======================= Session =======================
+    let discoveryResolve = null;
+    function send(type, payload) {
+      if (!transport) return;
+      transport.send(buildFrame(type, payload)).catch(e => { logLine("err", "send failed: " + (e.message || e)); });
+    }
+    function sendMove() {
+      const rpm = Number(els.rpmInput.value) || 0;
+      send(T.MOVE_TO, enc.f32s(target.x, target.y, rpm));
+    }
+    async function checkModulePresent() {
+      if (!transport) return;
+      const payload = await new Promise((resolve) => {
+        let timer = null;
+        const settle = (p) => { clearTimeout(timer); if (discoveryResolve === settle) discoveryResolve = null; resolve(p); };
+        timer = setTimeout(() => settle(null), DISCOVERY_TIMEOUT_MS);
+        discoveryResolve = settle;
+        transport.send(buildFrame(T_LIST_MODULES, null, MODULE_DISCOVERY)).catch(() => settle(null));
+      });
+      if (!payload) { els.devModules.textContent = "(no discovery reply)"; return; }
+      let info; try { info = parseDiscovery(payload); } catch (_) { return; }
+      els.devModules.textContent = info.modules.map(m => m.name + " (#" + m.id + ")").join(", ") || "none";
+      if (info.modules.some(m => m.id === MODULE)) logLine("sys", "Device '" + info.device + "' advertises " + info.modules.length + " module(s); STEM module present.");
+      else logLine("warn", "This device does not advertise the STEM module (7). Detected: " + els.devModules.textContent);
+    }
+
+    function onFrame(f) {
+      if (f.module === MODULE_DISCOVERY && f.reply && f.type === T_LIST_MODULES) { if (discoveryResolve) { discoveryResolve(f.payload); discoveryResolve = null; } return; }
+      if (f.module !== MODULE || !f.reply) return;
+      try {
+        if (f.type === T.TELEMETRY || f.type === T.STATE) onState(decodeState(f.payload), f.type === T.TELEMETRY);
+        else if (f.type === T.INFO) onInfo(decodeInfo(f.payload));
+        else if (f.type === T.MOVED) { const r = new Reader(f.payload); const x = r.f32(), y = r.f32(), pairs = [r.f32(), r.f32(), r.f32()];
+          logLine("ok", "moving to x_rel " + x.toFixed(1) + ", y_rel " + y.toFixed(1) + " -> pairs " + pairs.map(v => v.toFixed(2)).join(" / ") + "°"); }
+        else if (f.type === T.OK) { const r = new Reader(f.payload); const req = r.u8(), value = r.u32(); logLine("ok", (REQ_NAME[req] || ("0x" + req.toString(16))) + " ok" + (req === T.SET_STREAMING ? " (period " + value + " ms)" : "")); }
+        else if (f.type === T.ERROR) { const r = new Reader(f.payload); const req = r.u8(), code = r.u32(); logLine("err", (REQ_NAME[req] || ("0x" + req.toString(16))) + " error " + code + ": " + r.rest()); }
+        else if (f.type === T.IK_RESULT) { const r = new Reader(f.payload); const x = r.f32(), y = r.f32(), reach = r.u8(), ok = r.u8(); logLine("sys", "device IK (" + x.toFixed(1) + ", " + y.toFixed(1) + "): " + (reach ? (ok ? "reachable, within limits" : "reachable, outside limits") : "unreachable")); }
+      } catch (e) { logLine("err", "malformed frame type 0x" + f.type.toString(16) + ": " + (e.message || e)); }
+    }
+    function onInfo(info) {
+      els.devName.textContent = info.project; els.devFw.textContent = info.fw; els.devBuild.textContent = info.build; els.devIdf.textContent = info.idf;
+      geometry = info.geometry; reference = info.reference;
+      if (info.pairs.length) { limits = { min: info.pairs[0].min, max: info.pairs[0].max }; motorsMeta = info.pairs; }
+      els.rpmInput.value = info.moveRpm; els.rpmInput.max = info.maxRpm;
+      logLine("sys", "info: " + info.project + " " + info.fw + " · protocol v" + info.version + " · reference (" + reference.x + ", " + reference.y + ") · limits [" + limits.min + ", " + limits.max + "]°");
+      drawStatic(); renderPairs(); refreshTarget(target.x, target.y); refreshCurrent();
+    }
+    function onState(s, isTelemetry) {
+      deviceState = s; lastTelemetry = performance.now();
+      currentPairs = s.pairs; refreshCurrent();
+      if (s.flags & FLAG.TARGET_VALID) { /* keep the user's target; show the device's in the log only on change */ }
+      const moving = s.motors.some(m => m.ok && Math.abs(m.rpm) > 0.05);
+      els.motion.className = moving ? "good" : ""; els.motion.textContent = (moving ? "moving" : "idle") + (s.flags & FLAG.CAN_OK ? "" : " · CAN DOWN") + (s.flags & FLAG.MOTORS_OK ? "" : " · motor status missing");
+      renderPairs(); renderMotors(s.motors);
+      if (!isTelemetry) logLine("sys", "state: pairs " + s.pairs.map(v => v.toFixed(2)).join(" / ") + "° · uptime " + (s.uptime / 1000).toFixed(0) + " s");
+    }
+    function renderPairs() {
+      els.pairs.innerHTML = "";
+      PAIR_NAMES.forEach((name, i) => {
+        const meta = motorsMeta[i];
+        const n = document.createElement("div"); n.className = "name"; n.textContent = name + (meta ? " (" + meta.primary + "/" + meta.secondary + ")" : ""); els.pairs.appendChild(n);
+        const v = document.createElement("div"); v.textContent = currentPairs ? currentPairs[i].toFixed(2) + "°" : "–"; els.pairs.appendChild(v);
+        const inp = document.createElement("input"); inp.type = "number"; inp.step = "1"; inp.value = "0"; inp.style.width = "80px"; inp.min = limits.min; inp.max = limits.max; els.pairs.appendChild(inp);
+        const setBtn = document.createElement("button"); setBtn.textContent = "Set"; setBtn.disabled = !transport;
+        setBtn.addEventListener("click", () => send(T.SET_PAIR, enc.setPair(i, Number(inp.value) || 0, 0))); els.pairs.appendChild(setBtn);
+        const zeroBtn = document.createElement("button"); zeroBtn.textContent = "Zero"; zeroBtn.disabled = !transport;
+        zeroBtn.addEventListener("click", () => send(T.ZERO, enc.zero(i, false))); els.pairs.appendChild(zeroBtn);
+      });
+    }
+    function renderMotors(motors) {
+      els.motors.innerHTML = "";
+      for (const m of motors) {
+        const tr = document.createElement("tr");
+        const pair = motorsMeta.find(p => p.primary === m.id || p.secondary === m.id);
+        const cells = [m.id, pair ? pair.name : "–", m.ok ? "✓" : "✗", m.ok ? m.temp : "–", m.ok ? m.torque : "–", m.ok ? m.rpm.toFixed(2) : "–", m.tracked.toFixed(2)];
+        cells.forEach((c, i) => { const td = document.createElement("td"); td.textContent = c; if (i === 2 && !m.ok) td.className = "bad"; tr.appendChild(td); });
+        els.motors.appendChild(tr);
+      }
+    }
+    setInterval(() => {
+      if (!transport || !els.stream.checked) { els.telemAge.textContent = ""; return; }
+      const age = lastTelemetry ? (performance.now() - lastTelemetry) / 1000 : Infinity;
+      els.telemAge.textContent = age > 3 ? "telemetry stale (" + (isFinite(age) ? age.toFixed(0) + " s" : "none yet") + ")" : "live";
+      els.telemAge.style.color = age > 3 ? "var(--warn)" : "var(--ok)";
+    }, 500);
+
+    function startStream() { send(T.SET_STREAMING, enc.streaming(true, Number(els.periodInput.value) || 200)); }
+    function stopStream() { send(T.SET_STREAMING, enc.streaming(false, Number(els.periodInput.value) || 200)); }
+    els.stream.addEventListener("change", () => { if (!transport) return; els.stream.checked ? startStream() : stopStream(); });
+    els.periodInput.addEventListener("change", () => { if (transport && els.stream.checked) startStream(); });
+
+    async function connect(kind) {
+      try {
+        setStatus("busy", "connecting…");
+        const t = kind === "usb" ? new UsbTransport() : new SerialTransport();
+        await t.open(els.anyDevice.checked);
+        transport = t; parser.reset(); lastTelemetry = 0;
+        setStatus("ok", "connected"); logLine("ok", "connected: " + t.describe());
+        t.readLoop((chunk) => { for (const f of parser.feed(chunk)) onFrame(f); })
+          .catch(e => { logLine("err", "read loop: " + (e.message || e)); onLinkLost(); });
+        setConnected(true);
+        checkModulePresent().catch(() => {});
+        send(T.GET_INFO); send(T.GET_STATE);
+        if (els.stream.checked) startStream();
+      } catch (e) {
+        logLine("err", "connect failed: " + (e && e.message ? e.message : e));
+        setStatus("err", "error"); transport = null; setConnected(false);
+      }
+    }
+    async function disconnect() {
+      if (transport) { try { stopStream(); await new Promise(r => setTimeout(r, 60)); await transport.close(); } catch(_){} transport = null; }
+      onLinkLost();
+    }
+    function onLinkLost() {
+      transport = null; setConnected(false); setStatus("", "idle");
+      els.devName.textContent = "not connected"; els.telemAge.textContent = "";
+    }
+    function setConnected(on) {
+      els.connectUsbBtn.disabled = on || !navigator.usb;
+      els.connectSerialBtn.disabled = on || !navigator.serial;
+      els.disconnectBtn.disabled = !on;
+      for (const b of [els.homeBtn, els.stopBtn, els.zeroAllBtn, els.releaseBtn]) b.disabled = !on;
+      els.moveBtn.disabled = !on || !targetOk;
+      renderPairs();
+    }
+
+    els.connectUsbBtn.addEventListener("click", () => connect("usb"));
+    els.connectSerialBtn.addEventListener("click", () => connect("serial"));
+    els.disconnectBtn.addEventListener("click", disconnect);
+    els.moveBtn.addEventListener("click", () => { refreshTarget(Number(els.xInput.value) || 0, Number(els.yInput.value) || 0); if (targetOk) sendMove(); else logLine("warn", "not sent: " + els.targetStatus.textContent); });
+    els.homeBtn.addEventListener("click", () => { refreshTarget(0, 0); send(T.HOME, enc.f32s(Number(els.rpmInput.value) || 0)); });
+    els.stopBtn.addEventListener("click", () => send(T.STOP));
+    els.zeroAllBtn.addEventListener("click", () => send(T.ZERO, enc.zero(ALL_PAIRS, false)));
+    els.releaseBtn.addEventListener("click", () => { if (window.confirm("Release all motor brakes? The seat will be free to move.")) send(T.RELEASE); });
+    if (!navigator.usb) els.connectUsbBtn.disabled = true;
+    if (!navigator.serial) els.connectSerialBtn.disabled = true;
+    if (!navigator.usb && !navigator.serial) els.unsupported.style.display = "block";
+    if (navigator.usb && navigator.usb.addEventListener)
+      navigator.usb.addEventListener("disconnect", (e) => { if (transport instanceof UsbTransport && e.device === transport.device) { logLine("err", "device disconnected"); onLinkLost(); } });
+
+    // Offline: the drawing works as a visualizer with the documented geometry.
+    drawStatic(); renderPairs(); refreshTarget(0, 0);
+    currentPairs = [0, 0, 0]; refreshCurrent(); currentPairs = null; // show the reference pose until the device reports
+    logLine("sys", "Ready. Connect a STEM device, or drag in the drawing to explore the IK offline (reference pose shown).");
+  </script>
+</body>
+</html>
