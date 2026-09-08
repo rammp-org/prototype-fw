@@ -7,6 +7,7 @@
 // the USB RX worker call in concurrently).
 
 #include <array>
+#include <atomic>
 #include <cstdint>
 #include <mutex>
 #include <optional>
@@ -51,6 +52,7 @@ struct State {
   float pose_x{0.0f};
   float pose_y{0.0f};
   std::array<float, kPairCount> pair_deg{}; ///< primary motor of each pair, Pair order
+  float seat_tilt_deg{0.0f};                ///< tilt offset applied on top of the IK seat angle
   std::array<MotorTelemetry, kMotorCount> motors{};
   bool motors_ok{false};
 };
@@ -103,6 +105,13 @@ public:
   /// Drive one pair to an absolute position (clamped by the pair itself).
   Result set_pair(Pair pair, float degrees, float rpm);
 
+  /// Seat tilt: an offset (pair degrees, positive = positive seat-pair
+  /// rotation) added to the IK's level seat angle on every move, so the seat
+  /// keeps the chosen tilt as the linkage moves. Re-commands the seat pair
+  /// immediately; rejected if the resulting seat angle leaves the limits.
+  Result set_seat_tilt(float tilt_deg, float rpm);
+  float seat_tilt() const { return seat_tilt_deg_.load(); }
+
   bool stop();
   bool release_brakes();
   /// Re-zero one pair (or all when `pair` is empty). Clears the tracked target.
@@ -116,11 +125,12 @@ private:
   float effective_rpm(float rpm, float fallback) const;
   Result command_pose(const PoseCommand &pose, float rpm);
   // Map an IK solution (angles relative to the reference) to the sign
-  // convention the pairs are commanded in.
+  // convention the pairs are commanded in (seat tilt included).
   std::array<float, kPairCount> pose_to_pair_deg(const IkSolution &solution) const;
 
   Config config_;
   mutable std::mutex mutex_;
+  std::atomic<float> seat_tilt_deg_{0.0f}; // atomic: read by the lock-free solve()
   bool target_valid_{false};
   float target_x_{0.0f};
   float target_y_{0.0f};

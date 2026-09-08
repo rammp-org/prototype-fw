@@ -134,6 +134,7 @@ std::vector<uint8_t> StemModule::build_state_frame(Msg type, const State &state,
   for (const float deg : state.pair_deg) {
     proto::put_f32(payload, deg);
   }
+  proto::put_f32(payload, state.seat_tilt_deg);
   payload.push_back(static_cast<uint8_t>(state.motors.size()));
   for (const auto &motor : state.motors) {
     payload.push_back(motor.id);
@@ -289,6 +290,17 @@ void StemModule::handle_frame(const espp::stream_frame::Frame &frame, Transport 
     logger_.info("telemetry streaming {} on {} (period {} ms)", *enable ? "on" : "off",
                  transport == Transport::Vendor ? "WebUSB" : "CDC", period_ms);
     send(proto::make_ok(request, period_ms));
+    break;
+  }
+
+  case Msg::SetSeatTilt: {
+    const auto tilt = proto::get_f32_at(payload, 0);
+    const auto rpm = proto::get_f32_at(payload, 4);
+    if (payload.size() != 8 || !tilt || !rpm) {
+      bad_args("SET_SEAT_TILT needs f32 tilt_deg, f32 rpm");
+      break;
+    }
+    reply_result(controller.set_seat_tilt(*tilt, *rpm), "seat tilt rejected");
     break;
   }
 

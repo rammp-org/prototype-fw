@@ -140,6 +140,13 @@ std::unique_ptr<cli::Menu> make_cli_menu(stem::StemController &controller,
       },
       "Move to the home position (reference pose): home");
   menu->Insert(
+      "tilt",
+      [&controller](std::ostream &out, float tilt_deg) {
+        out << "seat tilt " << tilt_deg << " deg: "
+            << stem::StemController::to_string(controller.set_seat_tilt(tilt_deg, 0.0f)) << "\n";
+      },
+      "Set the seat tilt offset (deg on top of the IK level angle), kept across moves: tilt <deg>");
+  menu->Insert(
       "stop",
       [&controller](std::ostream &out) {
         out << (controller.stop() ? "All pairs stopped.\n" : "Stop failed for some pair.\n");
@@ -153,6 +160,7 @@ std::unique_ptr<cli::Menu> make_cli_menu(stem::StemController &controller,
           out << stem::to_string(static_cast<stem::Pair>(i)) << ": " << state.pair_deg[i]
               << " deg\n";
         }
+        out << "seat tilt: " << state.seat_tilt_deg << " deg\n";
         out << "pose: ";
         if (state.pose_valid)
           out << "x_rel=" << state.pose_x << " y_rel=" << state.pose_y;
@@ -627,8 +635,8 @@ extern "C" void app_main(void) {
     espp::Cli input(*cli_ptr);
     input.Start();
   }).detach();
-  logger.info("CLI ready: set <pair> <deg>, move <x> <y>, home, stop, get, status, release, "
-              "zero <pair|all>, zero_align <pair|all>, ik <x> <y>, ik_ref <x> <y>");
+  logger.info("CLI ready: set <pair> <deg>, move <x> <y>, home, tilt <deg>, stop, get, status, "
+              "release, zero <pair|all>, zero_align <pair|all>, ik <x> <y>, ik_ref <x> <y>");
 
   bool have_ethernet_status = false;
   bool last_ethernet_status = false;

@@ -57,7 +57,7 @@
     th:first-child, td:first-child { text-align: left; }
     th { color: var(--muted); font-weight: 500; }
     td.bad { color: var(--err); }
-    .pairs { display: grid; grid-template-columns: auto 1fr auto auto auto; gap: 6px 10px; align-items: center;
+    .pairs { display: grid; grid-template-columns: auto 1fr auto auto auto auto; gap: 6px 10px; align-items: center;
       font-variant-numeric: tabular-nums; }
     .pairs .name { font-weight: 600; text-transform: capitalize; }
     #unsupported { display: none; background: #3a1d1d; border: 1px solid var(--err); border-radius: 8px;
@@ -144,9 +144,17 @@
         <div class="pairs" id="pairs"></div>
         <div class="row" style="margin-top:10px">
           <button id="zeroAllBtn" disabled>Zero all (no align)</button>
+          <button id="zeroAlignAllBtn" disabled>Zero-align all</button>
           <button id="releaseBtn" class="danger" disabled>Release brakes</button>
         </div>
-        <p class="hint">Positions are the firmware's tracked (commanded) values: the RMD status frame only carries the motor-side encoder, so there is no measured output-shaft angle. Re-zero after a STOP mid-move.</p>
+        <div class="row" style="margin-top:10px">
+          <label class="inline">seat tilt ° <input id="tiltInput" type="number" step="1" value="0" style="width:80px" /></label>
+          <button id="tiltBtn" disabled>Apply tilt</button>
+          <span id="tiltNow" class="muted">device: –</span>
+        </div>
+        <p class="hint">Positions are the firmware's tracked (commanded) values: the RMD status frame only carries the motor-side encoder, so there is no measured output-shaft angle. Re-zero after a STOP mid-move.
+          <b>Zero</b> marks the current position as 0 without moving (CLI <code>zero</code>); <b>Zero-align</b> first drives each motor to its encoder zero (the motors move), then zeros (CLI <code>zero_align</code>) — do this once per power-up after reaching the calibration pose.
+          <b>Seat tilt</b> is an offset the firmware adds to the IK's level seat angle on every move, so it persists as the linkage moves (positive = positive seat-pair rotation).</p>
       </div>
 
       <div class="panel">
@@ -194,7 +202,7 @@
     // ======================= STEM protocol (main/stem_protocol.hpp) =======================
     const MODULE = 7, PROTOCOL_VERSION = 1;
     const T = { GET_INFO: 0x10, GET_STATE: 0x11, MOVE_TO: 0x12, SET_PAIR: 0x13, HOME: 0x14, STOP: 0x15,
-                RELEASE: 0x16, ZERO: 0x17, SET_STREAMING: 0x18, SOLVE_IK: 0x19,
+                RELEASE: 0x16, ZERO: 0x17, SET_STREAMING: 0x18, SOLVE_IK: 0x19, SET_SEAT_TILT: 0x1A,
                 OK: 0x81, ERROR: 0x82, INFO: 0x90, STATE: 0x91, MOVED: 0x92, IK_RESULT: 0x93, TELEMETRY: 0x94 };
     const REQ_NAME = {}; for (const [k, v] of Object.entries(T)) REQ_NAME[v] = k;
     const FLAG = { STREAMING: 1, TARGET_VALID: 2, POSE_VALID: 4, MOTORS_OK: 8, CAN_OK: 16 };
@@ -204,7 +212,7 @@
     const els = {};
     for (const id of ["status","connectUsbBtn","connectSerialBtn","disconnectBtn","anyDevice","unsupported","canvas",
       "poseRel","posePlate","targetRel","targetStatus","thetas","motion","log","xInput","yInput","rpmInput","moveBtn",
-      "homeBtn","stopBtn","moveOnRelease","liveDrag","pairs","zeroAllBtn","releaseBtn","motors","stream","periodInput",
+      "homeBtn","stopBtn","moveOnRelease","liveDrag","pairs","zeroAllBtn","zeroAlignAllBtn","releaseBtn","tiltInput","tiltBtn","tiltNow","motors","stream","periodInput",
       "telemAge","devName","devFw","devBuild","devIdf","devModules"]) els[id] = document.getElementById(id);
 
     function logLine(cls, text) {
@@ -415,8 +423,10 @@
       return complete(m1, m2, [j2[0] + l4*bx/b, j2[1] + l4*by/b], j1, j2, j3, g);
     }
     function solveFkRef(t1r, t2r, g = geometry, ref = reference) { const s = solveFk(t1r + ref.m1, t2r + ref.m2, g); return s ? applyRef(s, ref) : null; }
-    // Pair convention (StemController::pose_to_pair_deg): positive pair rotation = negative crank rotation.
-    const pairsFromSolution = (s) => [-s.theta1Rel, -s.theta2Rel, -s.m3AngleRel];
+    // Pair convention (StemController::pose_to_pair_deg): positive pair rotation = negative crank
+    // rotation; the seat carries the device's tilt offset on top of the IK level angle.
+    let seatTilt = 0;
+    const pairsFromSolution = (s) => [-s.theta1Rel, -s.theta2Rel, -s.m3AngleRel + seatTilt];
     const withinLimits = (pairs) => pairs.every(p => p >= limits.min && p <= limits.max);
 
     // ======================= Drawing =======================
@@ -552,7 +562,7 @@
       return info;
     }
     function decodeState(p) {
-      const r = new Reader(p), s = { uptime: r.u32(), flags: r.u8(), targetX: r.f32(), targetY: r.f32(), poseX: r.f32(), poseY: r.f32(), pairs: [r.f32(), r.f32(), r.f32()], motors: [] };
+      const r = new Reader(p), s = { uptime: r.u32(), flags: r.u8(), targetX: r.f32(), targetY: r.f32(), poseX: r.f32(), poseY: r.f32(), pairs: [r.f32(), r.f32(), r.f32()], seatTilt: r.f32(), motors: [] };
       const n = r.u8();
       for (let i = 0; i < n; i++) s.motors.push({ id: r.u8(), ok: r.u8() !== 0, temp: r.i8(), torque: r.i16(), rpm: r.f32(), tracked: r.f32() });
       return s;
@@ -608,6 +618,8 @@
     function onState(s, isTelemetry) {
       deviceState = s; lastTelemetry = performance.now();
       currentPairs = s.pairs; refreshCurrent();
+      if (s.seatTilt !== seatTilt) { seatTilt = s.seatTilt; if (!dragging) refreshTarget(target.x, target.y); }
+      els.tiltNow.textContent = "device: " + s.seatTilt.toFixed(1) + "°";
       if (s.flags & FLAG.TARGET_VALID) { /* keep the user's target; show the device's in the log only on change */ }
       const moving = s.motors.some(m => m.ok && Math.abs(m.rpm) > 0.05);
       els.motion.className = moving ? "good" : ""; els.motion.textContent = (moving ? "moving" : "idle") + (s.flags & FLAG.CAN_OK ? "" : " · CAN DOWN") + (s.flags & FLAG.MOTORS_OK ? "" : " · motor status missing");
@@ -625,6 +637,10 @@
         setBtn.addEventListener("click", () => send(T.SET_PAIR, enc.setPair(i, Number(inp.value) || 0, 0))); els.pairs.appendChild(setBtn);
         const zeroBtn = document.createElement("button"); zeroBtn.textContent = "Zero"; zeroBtn.disabled = !transport;
         zeroBtn.addEventListener("click", () => send(T.ZERO, enc.zero(i, false))); els.pairs.appendChild(zeroBtn);
+        const alignBtn = document.createElement("button"); alignBtn.textContent = "Zero-align"; alignBtn.disabled = !transport;
+        alignBtn.title = "Same as the CLI zero_align: drive both motors of the pair to their encoder zero, then zero the pair";
+        alignBtn.addEventListener("click", () => { if (window.confirm("Zero-align the " + name + " pair? Both motors will MOVE to their encoder zero, then the pair is zeroed.")) send(T.ZERO, enc.zero(i, true)); });
+        els.pairs.appendChild(alignBtn);
       });
     }
     function renderMotors(motors) {
@@ -679,7 +695,7 @@
       els.connectUsbBtn.disabled = on || !navigator.usb;
       els.connectSerialBtn.disabled = on || !navigator.serial;
       els.disconnectBtn.disabled = !on;
-      for (const b of [els.homeBtn, els.stopBtn, els.zeroAllBtn, els.releaseBtn]) b.disabled = !on;
+      for (const b of [els.homeBtn, els.stopBtn, els.zeroAllBtn, els.zeroAlignAllBtn, els.releaseBtn, els.tiltBtn]) b.disabled = !on;
       els.moveBtn.disabled = !on || !targetOk;
       renderPairs();
     }
@@ -691,6 +707,9 @@
     els.homeBtn.addEventListener("click", () => { refreshTarget(0, 0); send(T.HOME, enc.f32s(Number(els.rpmInput.value) || 0)); });
     els.stopBtn.addEventListener("click", () => send(T.STOP));
     els.zeroAllBtn.addEventListener("click", () => send(T.ZERO, enc.zero(ALL_PAIRS, false)));
+    els.zeroAlignAllBtn.addEventListener("click", () => { if (window.confirm("Zero-align ALL pairs? Every motor will MOVE to its encoder zero, then all pairs are zeroed. Do this at the calibration pose.")) send(T.ZERO, enc.zero(ALL_PAIRS, true)); });
+    els.tiltBtn.addEventListener("click", () => send(T.SET_SEAT_TILT, enc.f32s(Number(els.tiltInput.value) || 0, 0)));
+    els.tiltInput.addEventListener("keydown", (ev) => { if (ev.key === "Enter") els.tiltBtn.click(); });
     els.releaseBtn.addEventListener("click", () => { if (window.confirm("Release all motor brakes? The seat will be free to move.")) send(T.RELEASE); });
     if (!navigator.usb) els.connectUsbBtn.disabled = true;
     if (!navigator.serial) els.connectSerialBtn.disabled = true;

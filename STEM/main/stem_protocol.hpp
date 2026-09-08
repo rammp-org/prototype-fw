@@ -67,6 +67,7 @@ enum class Msg : uint8_t {
   Zero = 0x17,         ///< u8 pair (kAllPairs = all), u8 align -> Ok(0)
   SetStreaming = 0x18, ///< u8 enable, u16 period_ms -> Ok(period_ms)
   SolveIk = 0x19,      ///< f32 x_rel, f32 y_rel -> IkResult (no motion)
+  SetSeatTilt = 0x1A,  ///< f32 tilt deg (seat-pair offset on the IK level angle), f32 rpm -> Ok(0) | Error
   // --- Generic replies (device -> host) --------------------------------------
   Ok = 0x81,    ///< u8 request type, u32 value
   Error = 0x82, ///< u8 request type, u32 code (std::errc), utf8 message
@@ -94,6 +95,7 @@ enum class Msg : uint8_t {
 //   f32 target x_rel, f32 target y_rel      (last accepted MOVE/HOME; 0 if !kTargetValid)
 //   f32 pose x_rel, f32 pose y_rel          (FK of the tracked crank angles; 0 if !kPoseValid)
 //   f32 left deg, f32 right deg, f32 seat deg (tracked pair positions, primary motor)
+//   f32 seat tilt deg                       (offset applied on top of the IK seat angle)
 //   u8  motor count; per motor: u8 id, u8 ok, i8 temperature C, i16 torque raw,
 //       f32 velocity rpm, f32 tracked position deg
 //

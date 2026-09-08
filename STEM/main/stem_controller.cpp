@@ -81,8 +81,44 @@ float StemController::effective_rpm(float rpm, float fallback) const {
 
 std::array<float, kPairCount> StemController::pose_to_pair_deg(const IkSolution &solution) const {
   // The pairs are mounted so that positive pair rotation is negative crank
-  // rotation (this is the sign convention the original CLI `move` used).
-  return {-solution.theta1_deg, -solution.theta2_deg, -solution.m3_angle_deg};
+  // rotation (this is the sign convention the original CLI `move` used). The
+  // IK's seat angle keeps the seat level; the tilt offset rides on top of it.
+  return {-solution.theta1_deg, -solution.theta2_deg,
+          -solution.m3_angle_deg + seat_tilt_deg_.load()};
+}
+
+StemController::Result StemController::set_seat_tilt(float tilt_deg, float rpm) {
+  if (!std::isfinite(tilt_deg)) {
+    return Result::InvalidArgument;
+  }
+  std::lock_guard<std::mutex> lock(mutex_);
+  // New seat angle: the IK level angle of the current target plus the tilt, or
+  // -- with no target -- the tracked seat angle shifted by the tilt change.
+  const float previous_tilt = seat_tilt_deg_.load();
+  float seat_deg = 0.0f;
+  if (target_valid_) {
+    IkSolution solution{};
+    if (!solve_ik_for_m3_reference(target_x_, target_y_, config_.reference, solution,
+                                   config_.geometry)) {
+      return Result::Unreachable; // cannot happen for an accepted target
+    }
+    seat_deg = -solution.m3_angle_deg + tilt_deg;
+  } else {
+    seat_deg = config_.seat.get_position()[0] - previous_tilt + tilt_deg;
+  }
+  if (seat_deg < config_.min_deg || seat_deg > config_.max_deg) {
+    logger_.warn("seat tilt {:.1f} deg would put the seat at {:.1f} deg, outside [{}, {}]",
+                 tilt_deg, seat_deg, config_.min_deg, config_.max_deg);
+    return Result::OutOfLimits;
+  }
+  const float speed = effective_rpm(rpm, config_.default_set_rpm);
+  if (!config_.seat.set_position(seat_deg, speed)) {
+    return Result::ActuatorFailed;
+  }
+  seat_tilt_deg_.store(tilt_deg);
+  logger_.info("seat tilt {:.2f} deg -> seat pair {:.2f} deg @ {:.1f} rpm", tilt_deg, seat_deg,
+               speed);
+  return Result::Ok;
 }
 
 bool StemController::solve(float x_rel, float y_rel, PoseCommand &out) const {
@@ -216,6 +252,7 @@ State StemController::snapshot(bool read_motors) {
   for (uint8_t i = 0; i < kPairCount; ++i) {
     state.pair_deg[i] = actuator(static_cast<Pair>(i)).get_position()[0];
   }
+  state.seat_tilt_deg = seat_tilt_deg_.load();
   // Tracked pair positions -> crank angles (inverse of pose_to_pair_deg) -> pose
   IkSolution fk{};
   if (solve_fk_reference(-state.pair_deg[static_cast<uint8_t>(Pair::Left)],

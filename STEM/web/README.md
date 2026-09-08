@@ -61,7 +61,18 @@ other).
   reference pose (the firmware / CLI convention, `home` = 0, 0); the readouts
   also give the plate-frame coordinates from `Geometry.md`.
 - **Actuator pairs**: tracked position per pair, direct `Set`, per-pair
-  `Zero`, `Zero all` and `Release brakes` (confirmation required).
+  `Zero` / `Zero-align`, `Zero all`, `Zero-align all` and `Release brakes`.
+  - `Zero` marks the current position as 0 without moving. `Zero-align` /
+    `Zero-align all` (confirmation required) first drive each motor to its
+    encoder zero — **the motors move** — then zero the pair: the once-per-power-up
+    calibration step, to be done after reaching the calibration pose. Same as the
+    CLI's `zero_align`.
+  - **Seat tilt**: an offset in seat-pair degrees that the firmware adds to the
+    IK's level seat angle on *every* move, so the seat keeps its tilt as the
+    linkage moves (a plain `Set` on the seat pair would be undone by the next
+    move). `Apply tilt` re-commands the seat immediately; the device's current
+    value is shown next to it and the drag preview's limit check includes it.
+    Same as the CLI's `tilt <deg>`.
 - **Motor telemetry**: per-motor status streamed by the firmware at the chosen
   period (device-side streaming; the page does not poll).
 
