@@ -176,11 +176,14 @@ void RtpsLink::on_xy_twist(const rammp::XYTwist &msg) {
     have_xy_twist_ = true;
     joystick_held_ = false;
   }
-  // HMI: x + = right, y + = forward, twist + = clockwise (all in [-1, 1],
-  // deadzoned). Controller: forward, left, counter-clockwise.
+  // HMI: x + = right, y + = forward, twist in [-1, 1] (all deadzoned).
+  // Controller: forward, left, counter-clockwise. The spec documents twist + as
+  // clockwise, but on the hardware passing it through unchanged is what makes
+  // a clockwise twist turn the platform clockwise (negating it inverted the
+  // rotation), so the sign is NOT flipped here.
   const float forward = std::clamp(msg.y, -1.0f, 1.0f);
   const float left = -std::clamp(msg.x, -1.0f, 1.0f);
-  const float ccw = -std::clamp(msg.twist, -1.0f, 1.0f);
+  const float ccw = std::clamp(msg.twist, -1.0f, 1.0f);
   controller_.set_joystick_input(forward, left, ccw);
 }
 
