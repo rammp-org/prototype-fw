@@ -61,9 +61,10 @@ inline constexpr ProfileLimits kProfileHigh{1.5f, 9.0f};
 /// (twist * scale * max-rotation). The platform's wheel angles give it weak
 /// rotation authority (see the kinematics note in HoloDeckPlatform: pure
 /// rotation only drives the wheels at ~0.27 RPM per chassis RPM), so full
-/// twist at 1x was far too slow on the platform; 10x was found right on
-/// hardware. Wheel commands stay bounded by kMaxWheelRpm regardless.
-inline constexpr float kTwistRotationScale = 10.0f;
+/// twist at 1x was far too slow on the platform; 20x was tuned on hardware
+/// (10x was still slow). Wheel commands stay bounded by kMaxWheelRpm
+/// regardless.
+inline constexpr float kTwistRotationScale = 20.0f;
 
 /////////////////////////////////////////////////////////////////////////////
 // RTPS link timing (must agree with the HMI: pace-hmi-fw main/hmi_rtps_spec.hpp)
