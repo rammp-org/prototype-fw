@@ -1,0 +1,19 @@
+cmake_minimum_required(VERSION 3.20)
+
+include($ENV{IDF_PATH}/tools/cmake/project.cmake)
+
+set(EXTRA_COMPONENT_DIRS
+  "../"
+  "../../canopen_bus"
+)
+
+set(
+  COMPONENTS
+  "main canopen_bus eyou_motor espp__cli"
+  CACHE STRING
+  "List of components to include"
+)
+
+project(eyou_motor_example)
+
+set(CMAKE_CXX_STANDARD 20)
