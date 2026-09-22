@@ -265,7 +265,9 @@ bool RtpsLink::watchdog_step() {
     status_text_ = "JOYSTICK LOST";
   } else if (age > config_.joystick_hold_timeout && !held) {
     logger_.warn("Joystick stream paused ({} ms): holding zero", age.count());
-    controller_.set_joystick_input(0.0f, 0.0f, 0.0f);
+    // not set_joystick_input(0, 0, 0): a synthetic zero must not count as the
+    // centered sample the post-enable guard waits for
+    controller_.hold_joystick();
     std::lock_guard<std::mutex> lock(mutex_);
     joystick_held_ = true;
   }

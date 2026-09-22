@@ -139,6 +139,11 @@ public:
   /// deadzoned: exactly 0 means centered). Any non-zero value makes the
   /// joystick the active source.
   void set_joystick_input(float forward, float left, float ccw);
+  /// Zero the joystick input WITHOUT counting it as a joystick sample: for a
+  /// watchdog whose stream has paused. Unlike set_joystick_input(0, 0, 0) it
+  /// cannot satisfy the post-enable re-center guard, so a stream that resumes
+  /// with the stick already deflected still has to center first.
+  void hold_joystick();
 
   /// Enter DRIVE mode. Zeroes the GUI setpoint and requires the physical
   /// joystick to be re-centered before it can take over, so the platform never

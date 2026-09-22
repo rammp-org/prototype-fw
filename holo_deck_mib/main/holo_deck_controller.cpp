@@ -90,6 +90,15 @@ void HoloDeckController::set_joystick_input(float forward, float left, float ccw
   }
 }
 
+void HoloDeckController::hold_joystick() {
+  std::lock_guard<std::mutex> lock(mutex_);
+  // not a sample: joystick_sample_seq_ is untouched so the re-center guard
+  // (recenter_after_seq_) still waits for a real centered reading
+  joystick_forward_ = 0.0f;
+  joystick_left_ = 0.0f;
+  joystick_ccw_ = 0.0f;
+}
+
 void HoloDeckController::enable() {
   std::lock_guard<std::mutex> lock(mutex_);
   if (mode_ == Mode::DRIVE) {
