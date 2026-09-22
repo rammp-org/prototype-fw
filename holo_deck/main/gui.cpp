@@ -15,8 +15,8 @@ constexpr float kSpeedSliderScale = 0.01f; // slider unit -> m/s
 // Max-rotation slider carries deg/s (matching its label); the controller's
 // unit is RPM, so one slider unit is 1/6 RPM.
 constexpr float kRotationSliderScale = 1.0f / hw_config::kRpmToDegPerSec; // slider unit -> RPM
-constexpr float kTwistScaleSliderScale = 0.1f; // slider unit -> x scale
-constexpr int kRotationCommandRange = 100;     // rotation slider is +/- this
+constexpr float kTwistScaleSliderScale = 0.1f;                            // slider unit -> x scale
+constexpr int kRotationCommandRange = 100; // rotation slider is +/- this
 } // namespace
 
 void Gui::init_ui() {
@@ -43,7 +43,7 @@ void Gui::init_ui() {
   // (content collapsed toward its shrink-wrapped size), which starved the
   // panels regardless of whether they used flex_grow or LV_PCT. Pixel sizes
   // computed from the real resolution are unambiguous.
-  constexpr int32_t kScreenPad = 8;  // matches pad_all on the screen below
+  constexpr int32_t kScreenPad = 8;   // matches pad_all on the screen below
   constexpr int32_t kContentGap = 10; // matches pad_column/pad_row on content
   const int32_t content_w = screen_w - 2 * kScreenPad;
   const int32_t panel_w = landscape ? (content_w - kContentGap) / 2 : content_w;
@@ -504,7 +504,7 @@ void Gui::update_state(const HoloDeckController::State &state) {
   // Rotation is shown in deg/s (more intuitive than chassis RPM).
   const float w_dps = state.w_rpm * hw_config::kRpmToDegPerSec;
   auto velocity_text = fmt::format("vx (fwd):  {:+.3f} m/s\n"
-                                   "vy (left): {:+.3f} m/s\n"
+                                   "vy (right):{:+.3f} m/s\n"
                                    "|v|:       {:.3f} m/s\n"
                                    "heading:   {:+.0f} deg\n"
                                    "rotation:  {:+.0f} deg/s (CCW)",
@@ -518,8 +518,10 @@ void Gui::update_state(const HoloDeckController::State &state) {
 
   // vector visualization (full deflection = the max-speed limit)
   const float max_speed = std::max(state.max_speed_mps, 1e-3f);
+  // the state's vy is right-positive (platform frame); the display helpers
+  // take left-positive
   set_vector_line(std::clamp(state.vx_mps / max_speed, -1.0f, 1.0f),
-                  std::clamp(state.vy_mps / max_speed, -1.0f, 1.0f));
+                  std::clamp(-state.vy_mps / max_speed, -1.0f, 1.0f));
 
   // motor tiles
   for (size_t i = 0; i < motor_tiles_.size(); ++i) {
@@ -542,7 +544,7 @@ void Gui::update_state(const HoloDeckController::State &state) {
   // read-only indicators of the live command otherwise
   if (!gui_active) {
     set_knob_position(std::clamp(state.vx_mps / max_speed, -1.0f, 1.0f),
-                      std::clamp(state.vy_mps / max_speed, -1.0f, 1.0f));
+                      std::clamp(-state.vy_mps / max_speed, -1.0f, 1.0f));
     const float max_rotation = std::max(state.max_rotation_rpm, 1e-3f);
     const int rotation_value = static_cast<int>(
         std::clamp(-state.w_rpm / max_rotation, -1.0f, 1.0f) * kRotationCommandRange);

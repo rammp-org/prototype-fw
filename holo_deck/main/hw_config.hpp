@@ -100,8 +100,10 @@ inline constexpr bool kJoystickYInverted = false;
 inline constexpr float kJoystickTwistCenterMv = 1650.0f;
 inline constexpr float kJoystickTwistMinMv = 150.0f;
 inline constexpr float kJoystickTwistMaxMv = 3150.0f;
-/// Set true if twisting counter-clockwise decreases the measured voltage.
-inline constexpr bool kJoystickTwistInverted = false;
+/// Set true if twisting counter-clockwise decreases the measured voltage. True
+/// on this stick (measured on hardware): with it the callback's `ccw` really is
+/// counter-clockwise-positive, matching the GUI rotation slider.
+inline constexpr bool kJoystickTwistInverted = true;
 
 /// Circular deadzone radius around center for the X/Y pair, as a fraction of
 /// the unit circle. Inside this radius the translation command is exactly 0
@@ -160,21 +162,21 @@ inline constexpr uint32_t kMotorStatusReadTimeoutMs = 12;
 
 /// Hard per-wheel OUTPUT-shaft speed limit (RPM): if any computed wheel speed
 /// exceeds this, all wheels are scaled down together (preserving the motion
-/// direction). This is the master safety cap that also bounds how fast the
-/// base can rotate: a pure chassis rotation of w RPM drives the wheels at
-/// roughly w * 4.6 RPM for this geometry, so this cap of 45 permits ~9.7 RPM
-/// (~58 deg/s) full rotation. Raise it (the RMD-X6-S2 has ample headroom -
-/// 45 output RPM is only ~1620 motor RPM through the 36:1 gear) for a faster
-/// base, or lower it to keep the platform gentle.
+/// direction). This is the master safety cap. It bounds translation (at 90
+/// output RPM a 0.21 m wheel is ~1 m/s); it does NOT bound rotation in
+/// practice, because with this platform's wheel angles a pure chassis rotation
+/// of w RPM only drives the wheels at ~0.27 * w RPM (see kDefaultTwistRotationScale
+/// and the kinematics note in HoloDeckPlatform). 90 output RPM is ~3240 motor RPM
+/// through the 36:1 gear, well inside the RMD-X6-S2's range; lower it to keep the
+/// platform gentle.
 inline constexpr float kMaxWheelRpm = 90.0f;
 /// Default (and maximum-selectable) translation speed limits, m/s.
 inline constexpr float kDefaultMaxSpeedMps = 1.0f;
 inline constexpr float kMinSelectableMaxSpeedMps = 0.1f;
 inline constexpr float kMaxSelectableMaxSpeedMps = 2.0f;
-/// Default (and maximum-selectable) chassis rotation rate limits, RPM. The
-/// selectable max is matched to what kMaxWheelRpm allows for pure rotation so
-/// the slider is not misleading; a full twist at the max reaches ~10 RPM
-/// (60 deg/s). Rotation is shown in deg/s in the GUI (1 RPM = 6 deg/s).
+/// Default (and maximum-selectable) chassis rotation rate limits, RPM (the
+/// `limits` CLI command takes RPM; the GUI slider shows deg/s, 1 RPM = 6 deg/s).
+/// The joystick twist additionally applies kDefaultTwistRotationScale.
 inline constexpr float kDefaultMaxRotationRpm = 6.0f;
 inline constexpr float kMinSelectableMaxRotationRpm = 1.0f;
 inline constexpr float kMaxSelectableMaxRotationRpm = 10.0f;

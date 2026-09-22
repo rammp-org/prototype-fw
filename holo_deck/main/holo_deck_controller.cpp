@@ -84,6 +84,7 @@ void HoloDeckController::set_joystick_input(float forward, float left, float ccw
   joystick_forward_ = std::clamp(forward, -1.0f, 1.0f);
   joystick_left_ = std::clamp(left, -1.0f, 1.0f);
   joystick_ccw_ = std::clamp(ccw, -1.0f, 1.0f);
+  ++joystick_sample_seq_;
   if (joystick_forward_ != 0.0f || joystick_left_ != 0.0f || joystick_ccw_ != 0.0f) {
     last_joystick_activity_ = std::chrono::steady_clock::now();
   }
@@ -100,7 +101,10 @@ void HoloDeckController::enable() {
   gui_vx_mps_ = 0.0f;
   gui_vy_mps_ = 0.0f;
   gui_w_rpm_ = 0.0f;
+  // The guard clears only on a sample that arrives AFTER this enable: the
+  // cached (possibly stale-zero) reading must not clear it.
   require_joystick_recenter_ = true;
+  recenter_after_seq_ = joystick_sample_seq_;
   source_ = Source::GUI;
   // The control loop resumes commanding velocities from here (no motor sends
   // are done from this setter - see the class docs).
@@ -180,6 +184,7 @@ HoloDeckController::State HoloDeckController::state() const {
   state.max_rotation_rpm = max_rotation_rpm_;
   state.twist_rotation_scale = twist_rotation_scale_;
   state.max_wheel_rpm = max_wheel_rpm_;
+  state.send_failing = send_failing_;
   state.motors = motor_status_;
   return state;
 }
@@ -192,12 +197,12 @@ void HoloDeckController::send_zeros() {
   }
 }
 
-void HoloDeckController::send_disable() {
+bool HoloDeckController::send_disable() {
+  bool ok = true;
   for (auto &motor : motors_) {
-    if (!motor.stop()) {
-      logger_.error("Failed to send control-level stop to motor {}", motor.get_motor_id());
-    }
+    ok = motor.stop() && ok;
   }
+  return ok;
 }
 
 bool HoloDeckController::control_step() {
@@ -216,52 +221,50 @@ bool HoloDeckController::control_step() {
     if (mode == Mode::STOPPED) {
       // fall through to the outside-the-lock send
     } else if (mode == Mode::DISABLED) {
-      if (!disable_sent_) {
-        disable_now = true;
-        disable_sent_ = true;
-      }
+      // retried every tick until every motor has acknowledged its stop
+      disable_now = !disable_sent_;
     } else {
-    // DRIVE: source arbitration. Any joystick deflection takes over - UNLESS
-    // we are still waiting for the joystick to re-center after enable (so a
-    // stick that was held at enable time cannot immediately drive). Once the
-    // joystick reads centered, it is cleared to take over again.
-    const auto now = std::chrono::steady_clock::now();
-    const bool joystick_deflected =
-        joystick_forward_ != 0.0f || joystick_left_ != 0.0f || joystick_ccw_ != 0.0f;
-    if (require_joystick_recenter_) {
-      if (!joystick_deflected) {
-        require_joystick_recenter_ = false; // centered; the joystick may take over
+      // DRIVE: source arbitration. Any joystick deflection takes over - UNLESS
+      // we are still waiting for the joystick to re-center after enable (so a
+      // stick that was held at enable time cannot immediately drive). Once the
+      // joystick reads centered, it is cleared to take over again.
+      const auto now = std::chrono::steady_clock::now();
+      const bool joystick_deflected =
+          joystick_forward_ != 0.0f || joystick_left_ != 0.0f || joystick_ccw_ != 0.0f;
+      if (require_joystick_recenter_) {
+        if (!joystick_deflected && joystick_sample_seq_ != recenter_after_seq_) {
+          require_joystick_recenter_ = false; // a post-enable centered sample: cleared
+        }
+      } else if (joystick_deflected) {
+        source_ = Source::JOYSTICK;
+      } else if (source_ == Source::JOYSTICK &&
+                 (now - last_joystick_activity_) > joystick_release_timeout_) {
+        // handover back to the GUI: zero its setpoint so nothing jumps
+        gui_vx_mps_ = 0.0f;
+        gui_vy_mps_ = 0.0f;
+        gui_w_rpm_ = 0.0f;
+        source_ = Source::GUI;
+        logger_.info("Joystick released; GUI setpoint zeroed and active");
       }
-    } else if (joystick_deflected) {
-      source_ = Source::JOYSTICK;
-    } else if (source_ == Source::JOYSTICK &&
-               (now - last_joystick_activity_) > joystick_release_timeout_) {
-      // handover back to the GUI: zero its setpoint so nothing jumps
-      gui_vx_mps_ = 0.0f;
-      gui_vy_mps_ = 0.0f;
-      gui_w_rpm_ = 0.0f;
-      source_ = Source::GUI;
-      logger_.info("Joystick released; GUI setpoint zeroed and active");
-    }
 
-    if (source_ == Source::JOYSTICK && !require_joystick_recenter_) {
-      vx = joystick_forward_ * max_speed_mps_;
-      // NOTE: vy is left-positive, but the platform's y-axis is right-positive,
-      //       so we negate it here to match the platform's frame.
-      vy = -joystick_left_ * max_speed_mps_;
-      // The twist scale deliberately lets the commanded rate exceed the
-      // nominal rotation limit (the per-wheel max_wheel_rpm scaling below
-      // still bounds the motors): the platform's rotation authority is much
-      // weaker than translation, so the twist axis needs its own gain.
-      w = -joystick_ccw_ * max_rotation_rpm_ * twist_rotation_scale_;
-    } else {
-      vx = gui_vx_mps_;
-      vy = gui_vy_mps_;
-      w = gui_w_rpm_;
-    }
-    vx_mps_ = vx;
-    vy_mps_ = vy;
-    w_rpm_ = w;
+      if (source_ == Source::JOYSTICK && !require_joystick_recenter_) {
+        vx = joystick_forward_ * max_speed_mps_;
+        // the joystick input is left-positive; the controller (and the platform)
+        // frame is right-positive, so convert here
+        vy = -joystick_left_ * max_speed_mps_;
+        // The twist scale deliberately lets the commanded rate exceed the
+        // nominal rotation limit (the per-wheel max_wheel_rpm scaling below
+        // still bounds the motors): the platform's rotation authority is much
+        // weaker than translation, so the twist axis needs its own gain.
+        w = joystick_ccw_ * max_rotation_rpm_ * twist_rotation_scale_;
+      } else {
+        vx = gui_vx_mps_;
+        vy = gui_vy_mps_;
+        w = gui_w_rpm_;
+      }
+      vx_mps_ = vx;
+      vy_mps_ = vy;
+      w_rpm_ = w;
     } // end DRIVE
   }
 
@@ -275,7 +278,14 @@ bool HoloDeckController::control_step() {
   }
   if (mode == Mode::DISABLED) {
     if (disable_now) {
-      send_disable();
+      const bool all_stopped = send_disable();
+      std::lock_guard<std::mutex> lock(mutex_);
+      if (mode_ == Mode::DISABLED) {
+        disable_sent_ = all_stopped; // a failed stop is retried next tick
+      }
+      if (!all_stopped && !send_failing_)
+        logger_.error("Failed to stop one or more motors; retrying");
+      send_failing_ = !all_stopped;
     }
     return false; // keep the timer running
   }
@@ -303,8 +313,10 @@ bool HoloDeckController::control_step() {
     success = motors_[motor_index].send_velocity(rpm) && success;
   }
 
+  Mode mode_after = Mode::DRIVE;
   {
     std::lock_guard<std::mutex> lock(mutex_);
+    mode_after = mode_;
     for (size_t i = 0; i < motor_status_.size(); ++i) {
       motor_status_[i].commanded_rpm = commanded_rpms[i];
     }
@@ -313,6 +325,14 @@ bool HoloDeckController::control_step() {
       logger_.error("Failed to send velocity command(s) to one or more motors");
     }
     send_failing_ = !success;
+  }
+  // A stop() / disable_motors() that landed while the frames above were on the
+  // wire is enacted NOW rather than on the next tick, so the stale drive frames
+  // are overridden within the same control period.
+  if (mode_after == Mode::STOPPED) {
+    send_zeros();
+  } else if (mode_after == Mode::DISABLED) {
+    send_disable();
   }
   return false; // keep the timer running
 }

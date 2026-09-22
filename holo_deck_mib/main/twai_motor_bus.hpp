@@ -27,7 +27,11 @@ public:
     gpio_num_t tx_gpio;          ///< TWAI TX -> transceiver TXD.
     gpio_num_t rx_gpio;          ///< TWAI RX <- transceiver RXD.
     uint32_t bitrate{1'000'000}; ///< Bus bit rate.
-    int tx_timeout_ms{5};        ///< Bound on one frame's transmit completion.
+    /// Bound on one frame's transmit completion. Only reached when the controller
+    /// is wedged: on a healthy 1 Mbit/s bus a frame completes in ~0.15 ms, and a
+    /// missing motor fails the single-shot attempt just as fast (no ACK), so a
+    /// 50 Hz tick's four set-points stay well inside the period either way.
+    int tx_timeout_ms{2};
     espp::Logger::Verbosity log_level{espp::Logger::Verbosity::WARN};
   };
 

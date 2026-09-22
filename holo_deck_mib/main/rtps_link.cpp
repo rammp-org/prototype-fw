@@ -1,5 +1,6 @@
 #include "rtps_link.hpp"
 
+#include <algorithm>
 #include <cmath>
 
 #include "format.hpp"
@@ -143,6 +144,12 @@ MIB::DriveProfile RtpsLink::active_profile() const {
   return profile_;
 }
 
+bool RtpsLink::hmi_alive() const {
+  std::lock_guard<std::mutex> lock(mutex_);
+  return have_message_ &&
+         (std::chrono::steady_clock::now() - last_message_) <= config_.joystick_lost_timeout;
+}
+
 std::optional<std::chrono::milliseconds> RtpsLink::joystick_age() const {
   std::lock_guard<std::mutex> lock(mutex_);
   if (!have_xy_twist_)
@@ -174,16 +181,15 @@ void RtpsLink::on_xy_twist(const rammp::XYTwist &msg) {
     std::lock_guard<std::mutex> lock(mutex_);
     last_xy_twist_ = std::chrono::steady_clock::now();
     have_xy_twist_ = true;
+    last_message_ = last_xy_twist_;
+    have_message_ = true;
     joystick_held_ = false;
   }
-  // HMI: x + = right, y + = forward, twist in [-1, 1] (all deadzoned).
-  // Controller: forward, left, counter-clockwise. The spec documents twist + as
-  // clockwise, but on the hardware passing it through unchanged is what makes
-  // a clockwise twist turn the platform clockwise (negating it inverted the
-  // rotation), so the sign is NOT flipped here.
+  // HMI: x + = right, y + = forward, twist + = clockwise (all in [-1, 1],
+  // deadzoned). Controller: forward, left, counter-clockwise.
   const float forward = std::clamp(msg.y, -1.0f, 1.0f);
   const float left = -std::clamp(msg.x, -1.0f, 1.0f);
-  const float ccw = std::clamp(msg.twist, -1.0f, 1.0f);
+  const float ccw = -std::clamp(msg.twist, -1.0f, 1.0f);
   controller_.set_joystick_input(forward, left, ccw);
 }
 
@@ -194,6 +200,8 @@ void RtpsLink::on_drive_command(const rammp::DriveCommand &msg) {
                profile_name(msg.profile));
   {
     std::lock_guard<std::mutex> lock(mutex_);
+    last_message_ = std::chrono::steady_clock::now();
+    have_message_ = true;
     joystick_lost_ = false;
     status_text_.clear();
   }
@@ -210,6 +218,8 @@ void RtpsLink::on_drive_command(const rammp::DriveCommand &msg) {
 
 void RtpsLink::on_seat_command(const rammp::SeatCommand &msg) {
   std::lock_guard<std::mutex> lock(mutex_);
+  last_message_ = std::chrono::steady_clock::now();
+  have_message_ = true;
   if (!seat_warned_) {
     seat_warned_ = true;
     logger_.warn("SeatCommand (axis {} -> {}) ignored: the holonomic platform has no seat",
@@ -252,10 +262,18 @@ MIB::MibStatus RtpsLink::build_status() {
   const auto state = controller_.state();
   MIB::MibStatus status;
   std::lock_guard<std::mutex> lock(mutex_);
-  if (!ready_.load()) {
-    status.systemState = MIB::MibSystemState::INITIALIZING;
-  } else if (!error_message_.empty()) {
+  // a configured error (CAN failed at boot) or a live motor-command failure
+  // is reported before readiness, so a broken bus never hides as INITIALIZING
+  std::string error = error_message_;
+  std::string footer = error_footer_;
+  if (error.empty() && state.send_failing) {
+    error = "Motor command failed";
+    footer = "A wheel motor is not acknowledging CAN commands";
+  }
+  if (!error.empty()) {
     status.systemState = MIB::MibSystemState::ERROR;
+  } else if (!ready_.load()) {
+    status.systemState = MIB::MibSystemState::INITIALIZING;
   } else if (state.enabled) {
     status.systemState = MIB::MibSystemState::ENABLED;
   } else {
@@ -263,8 +281,8 @@ MIB::MibStatus RtpsLink::build_status() {
   }
   status.activeProfile = profile_;
   status.currentSeatState = {}; // no seat on the holonomic platform
-  status.error_message = error_message_.empty() ? "No error" : error_message_;
-  status.error_footer = error_footer_;
+  status.error_message = error.empty() ? "No error" : error;
+  status.error_footer = footer;
   status.epoch_s = 0; // no clock on this board
   status.speed = std::sqrt(state.vx_mps * state.vx_mps + state.vy_mps * state.vy_mps);
   status.utc_offset_min = 0;
@@ -287,8 +305,9 @@ rammp::Diagnostics RtpsLink::build_diagnostics() {
       const auto &m = state.motors[row];
       item.values = {
           to_raw(static_cast<float>(m.temperature_c), spec.decimals[0]), // Temp [C]
-          static_cast<int32_t>(m.torque_raw),                            // "Current": torque raw
-          to_raw(m.angle_degrees, spec.decimals[2]),                     // Pos [deg]
+          to_raw(static_cast<float>(m.torque_raw) * hw_config::kTorqueRawToAmps,
+                 spec.decimals[1]),                  // Current [A]
+          to_raw(m.angle_degrees, spec.decimals[2]), // Pos [deg]
       };
     } else {
       item.values = {0, 0, 0};

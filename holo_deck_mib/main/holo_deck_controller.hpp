@@ -73,16 +73,19 @@ public:
     bool enabled{false};      ///< Convenience: mode == DRIVE.
     Source source{Source::STOPPED};
     float vx_mps{0.0f};                ///< Active commanded forward velocity.
-    float vy_mps{0.0f};                ///< Active commanded leftward velocity.
+    float vy_mps{0.0f};                ///< Active commanded velocity, + = RIGHT (platform frame).
     float w_rpm{0.0f};                 ///< Active commanded CCW rotation rate.
     float gui_vx_mps{0.0f};            ///< GUI/CLI setpoint (pre-arbitration).
-    float gui_vy_mps{0.0f};            ///< GUI/CLI setpoint (pre-arbitration).
+    float gui_vy_mps{0.0f};            ///< GUI/CLI setpoint (pre-arbitration), + = right.
     float gui_w_rpm{0.0f};             ///< GUI/CLI setpoint (pre-arbitration).
     float max_speed_mps{0.0f};         ///< Current translation limit.
     float max_rotation_rpm{0.0f};      ///< Current rotation-rate limit.
     float twist_rotation_scale{1.0f};  ///< Joystick-twist rotation scale.
     float max_wheel_rpm{0.0f};         ///< Per-wheel scaling limit.
     std::array<MotorStatus, 4> motors; ///< Indexed by motor id - 1.
+    /// True while the last control tick failed to deliver a velocity (or stop)
+    /// command to at least one motor: a CAN / motor fault the operator must see.
+    bool send_failing{false};
   };
 
   /// Configuration for the controller.
@@ -116,8 +119,10 @@ public:
   HoloDeckController(const HoloDeckController &) = delete;
   HoloDeckController &operator=(const HoloDeckController &) = delete;
 
-  /// Set the GUI/CLI velocity setpoint in real units. The translation vector
-  /// is clamped to the max-speed limit and w to the max-rotation limit.
+  /// Set the GUI/CLI velocity setpoint in real units, in the PLATFORM frame:
+  /// vx forward, vy RIGHT, w counter-clockwise (the normalized setters below
+  /// take a left-positive input and convert). The translation vector is
+  /// clamped to the max-speed limit and w to the max-rotation limit.
   void set_gui_velocity(float vx_mps, float vy_mps, float w_rpm);
 
   /// Set only the translation part of the GUI setpoint from normalized
@@ -176,7 +181,8 @@ protected:
   /// mutex_ - the CAN transport has its own locking.
   void send_zeros();
   /// Halt every motor at the control level via MotorActuator::stop() (DISABLED).
-  void send_disable();
+  /// \return true if every motor acknowledged its stop.
+  bool send_disable();
   static float clamp_positive(float value);
 
   HoloDeckPlatform &platform_;
@@ -191,6 +197,8 @@ protected:
   Mode mode_{Mode::STOPPED};
   bool disable_sent_{false};              ///< the one-shot motor stop for DISABLED was sent
   bool require_joystick_recenter_{false}; ///< ignore the joystick until it re-centers
+  uint32_t joystick_sample_seq_{0};       ///< +1 per set_joystick_input()
+  uint32_t recenter_after_seq_{0};        ///< the guard clears only on a LATER sample
   Source source_{Source::STOPPED};
   float gui_vx_mps_{0.0f};
   float gui_vy_mps_{0.0f};

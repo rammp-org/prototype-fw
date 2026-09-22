@@ -84,7 +84,9 @@ public:
   /// Callback for the DISABLE button: halt the motors at the control level.
   using disable_callback_t = std::function<void()>;
   /// Set the callback fired when the DISABLE button is pressed.
-  void set_disable_callback(disable_callback_t callback) { disable_callback_ = std::move(callback); }
+  void set_disable_callback(disable_callback_t callback) {
+    disable_callback_ = std::move(callback);
+  }
 
   /// Set the callback fired when the max-speed slider is moved.
   void set_max_speed_callback(limit_callback_t callback) {

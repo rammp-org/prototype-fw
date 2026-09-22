@@ -212,7 +212,10 @@ extern "C" void app_main(void) {
         out << "ethernet: "
             << (board.is_ethernet_connected() ? ip_to_string(board.ethernet_ip())
                                               : std::string("down"))
-            << "\nhmi:      " << (link.peer_matched() ? "matched" : "not matched");
+            << "\nhmi:      "
+            << (link.hmi_alive()      ? "alive"
+                : link.peer_matched() ? "matched, silent"
+                                      : "not found");
         if (const auto age = link.joystick_age())
           out << ", last XYTwist " << age->count() << " ms ago";
         out << "\nmode:     " << mode_name(state.mode)
@@ -247,10 +250,10 @@ extern "C" void app_main(void) {
   // link changes.
   bool last_matched = false;
   while (true) {
-    const bool matched = link.peer_matched();
-    if (matched != last_matched) {
-      logger.info("HMI {}", matched ? "connected" : "gone");
-      last_matched = matched;
+    const bool alive = link.hmi_alive();
+    if (alive != last_matched) {
+      logger.info("HMI {}", alive ? "connected" : "gone (no messages)");
+      last_matched = alive;
     }
     std::this_thread::sleep_for(1s);
   }

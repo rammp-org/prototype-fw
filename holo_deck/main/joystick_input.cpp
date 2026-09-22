@@ -134,10 +134,9 @@ void JoystickInput::apply_calibration(float x_center_mv, float y_center_mv, floa
                                          hw_config::kJoystickTwistMaxMv - twist_center_mv);
   const float twist_deadband =
       std::max(0.0f, twist_half_span) * hw_config::kJoystickTwistDeadzoneFraction;
-  twist_mapper_ = espp::FloatRangeMapper(
-      axis_calibration(twist_center_mv, hw_config::kJoystickTwistMinMv,
-                       hw_config::kJoystickTwistMaxMv, twist_deadband,
-                       hw_config::kJoystickTwistInverted));
+  twist_mapper_ = espp::FloatRangeMapper(axis_calibration(
+      twist_center_mv, hw_config::kJoystickTwistMinMv, hw_config::kJoystickTwistMaxMv,
+      twist_deadband, hw_config::kJoystickTwistInverted));
 }
 
 void JoystickInput::calibrate_center() {
@@ -147,20 +146,25 @@ void JoystickInput::calibrate_center() {
   float twist_center = hw_config::kJoystickTwistCenterMv;
 
   if (hw_config::kJoystickAutoCenter) {
+    // each axis accumulates on its own, so one failing channel does not stop
+    // the others from auto-centering
     double x_sum = 0.0, y_sum = 0.0, t_sum = 0.0;
-    size_t n = 0;
+    size_t x_n = 0, y_n = 0, t_n = 0;
     for (size_t i = 0; i < hw_config::kJoystickAutoCenterSamples; ++i) {
-      const auto x = xy_adc_.read_mv(x_channel_);
-      const auto y = xy_adc_.read_mv(y_channel_);
-      const auto t = twist_adc_.read_mv(twist_channel_);
-      if (x.has_value() && y.has_value() && t.has_value()) {
+      if (const auto x = xy_adc_.read_mv(x_channel_); x.has_value()) {
         x_sum += x.value();
+        ++x_n;
+      }
+      if (const auto y = xy_adc_.read_mv(y_channel_); y.has_value()) {
         y_sum += y.value();
+        ++y_n;
+      }
+      if (const auto t = twist_adc_.read_mv(twist_channel_); t.has_value()) {
         t_sum += t.value();
-        ++n;
+        ++t_n;
       }
     }
-    if (n == 0) {
+    if (x_n == 0 && y_n == 0 && t_n == 0) {
       logger_.warn("Auto-center: no valid ADC reads; using nominal centers");
     } else {
       // Adopt each measured center only if it is plausibly near mid-scale
@@ -174,10 +178,19 @@ void JoystickInput::calibrate_center() {
                      axis, measured, nominal);
         return nominal;
       };
-      x_center = adopt(static_cast<float>(x_sum / n), hw_config::kJoystickXCenterMv, "X");
-      y_center = adopt(static_cast<float>(y_sum / n), hw_config::kJoystickYCenterMv, "Y");
-      twist_center =
-          adopt(static_cast<float>(t_sum / n), hw_config::kJoystickTwistCenterMv, "twist");
+      if (x_n > 0)
+        x_center = adopt(static_cast<float>(x_sum / x_n), hw_config::kJoystickXCenterMv, "X");
+      else
+        logger_.warn("Auto-center: no valid X reads; keeping nominal");
+      if (y_n > 0)
+        y_center = adopt(static_cast<float>(y_sum / y_n), hw_config::kJoystickYCenterMv, "Y");
+      else
+        logger_.warn("Auto-center: no valid Y reads; keeping nominal");
+      if (t_n > 0)
+        twist_center =
+            adopt(static_cast<float>(t_sum / t_n), hw_config::kJoystickTwistCenterMv, "twist");
+      else
+        logger_.warn("Auto-center: no valid twist reads; keeping nominal");
       logger_.info("Auto-centered: x={:.0f} y={:.0f} twist={:.0f} mV", x_center, y_center,
                    twist_center);
     }

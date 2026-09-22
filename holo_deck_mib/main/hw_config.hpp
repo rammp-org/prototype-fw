@@ -24,6 +24,11 @@ inline constexpr gpio_num_t kCanTxGpio = GPIO_NUM_17;
 inline constexpr gpio_num_t kCanRxGpio = GPIO_NUM_16;
 /// Bus bit rate the motors are configured for.
 inline constexpr uint32_t kCanBitrateBps = 1'000'000;
+/// Amps per count of the RMD status reply's torque-current field (0x9C bytes
+/// 2..3), for the HMI's "Current [A]" diagnostics column. MyActuator's V3
+/// protocol reports it in 0.01 A/LSB; V2 firmware reports -2048..2047 for
+/// -33..33 A (use 33.0f / 2048.0f then). Verify against Motion Studio once.
+inline constexpr float kTorqueRawToAmps = 0.01f;
 
 /////////////////////////////////////////////////////////////////////////////
 // Control parameters

@@ -151,9 +151,10 @@ extern "C" void app_main(void) {
           out << "Motor ID must be between 1 and " << motors.size() << ".\n";
           return;
         }
-        if (controller.is_enabled()) {
-          out << "Controller is enabled; the control loop will override this within one "
-                 "cycle. Use `estop` first for direct motor control.\n";
+        if (controller.mode() != HoloDeckController::Mode::STOPPED) {
+          out << "Refused: direct motor control only while STOPPED (`estop` first). In DRIVE "
+                 "the loop overrides it; in DISABLED nothing would stop the motor again.\n";
+          return;
         }
         if (motors[motor_id - 1].send_velocity(rpm)) {
           out << "Motor " << motor_id << " speed set to " << rpm << " RPM.\n";
@@ -161,7 +162,7 @@ extern "C" void app_main(void) {
           out << "Failed to set motor " << motor_id << " speed.\n";
         }
       },
-      "Set a single motor speed directly (debug; e-stop first): set_speed <motor_id> <rpm>");
+      "Set a single motor speed directly (debug; only while STOPPED): set_speed <motor_id> <rpm>");
   auto set_velocity = [&controller](std::ostream &out, float x_mps, float y_mps, float w_rpm) {
     controller.set_gui_velocity(x_mps, y_mps, w_rpm);
     const auto state = controller.state();
@@ -215,14 +216,14 @@ extern "C" void app_main(void) {
         const auto state = controller.state();
         const char *mode_name = state.mode == HoloDeckController::Mode::DRIVE     ? "DRIVE"
                                 : state.mode == HoloDeckController::Mode::STOPPED ? "STOPPED"
-                                                                                 : "DISABLED";
+                                                                                  : "DISABLED";
         out << "mode:    " << mode_name << "\nsource:  " << source_name(state.source)
-            << "\ncommand: vx=" << state.vx_mps
-            << " m/s vy=" << state.vy_mps << " m/s w=" << state.w_rpm
-            << " RPM\nsetpoint (GUI/CLI): vx=" << state.gui_vx_mps << " m/s vy=" << state.gui_vy_mps
-            << " m/s w=" << state.gui_w_rpm << " RPM\nlimits:  " << state.max_speed_mps << " m/s, "
-            << state.max_rotation_rpm << " RPM (twist scale " << state.twist_rotation_scale
-            << "x), wheel " << state.max_wheel_rpm << " RPM\n";
+            << "\ncommand: vx=" << state.vx_mps << " m/s vy=" << state.vy_mps
+            << " m/s w=" << state.w_rpm << " RPM\nsetpoint (GUI/CLI): vx=" << state.gui_vx_mps
+            << " m/s vy=" << state.gui_vy_mps << " m/s w=" << state.gui_w_rpm
+            << " RPM\nlimits:  " << state.max_speed_mps << " m/s, " << state.max_rotation_rpm
+            << " RPM (twist scale " << state.twist_rotation_scale << "x), wheel "
+            << state.max_wheel_rpm << " RPM\n";
         for (const auto &motor : state.motors) {
           out << "motor " << static_cast<int>(motor.id) << ": cmd=" << motor.commanded_rpm
               << " RPM";

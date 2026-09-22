@@ -63,8 +63,12 @@ public:
 
   /// The drive profile the HMI last asked for.
   MIB::DriveProfile active_profile() const;
-  /// True while at least one remote reader / writer is matched.
+  /// True once discovery matched a remote reader / writer (never cleared: the
+  /// participant reports matches only). Use hmi_alive() for the live link.
   bool peer_matched() const { return peer_matched_.load(); }
+  /// True while the HMI is heard from: a message on any of its topics within
+  /// the joystick-lost timeout (it streams XYTwist continuously once matched).
+  bool hmi_alive() const;
   /// Age of the last XYTwist, or nullopt if none was ever received.
   std::optional<std::chrono::milliseconds> joystick_age() const;
 
@@ -102,6 +106,8 @@ protected:
   uint8_t diag_seq_{0};
   std::chrono::steady_clock::time_point last_xy_twist_{};
   bool have_xy_twist_{false};
+  std::chrono::steady_clock::time_point last_message_{}; ///< any HMI topic
+  bool have_message_{false};
   bool joystick_held_{false}; ///< zeros fed because the stream paused
   bool joystick_lost_{false}; ///< e-stopped because the stream stopped
   bool seat_warned_{false};

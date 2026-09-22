@@ -53,15 +53,18 @@ the GUI button and the CLI commands).
 A `HoloDeckController` owns the command state and a 50 Hz control loop:
 setpoint -> `HoloDeckPlatform::calculate_wheel_speeds(vx, vy, w)` -> scale all
 four wheels together so none exceeds the per-wheel RPM limit (`kMaxWheelRpm`,
-45 RPM output) -> CAN velocity commands. **Every motor command is issued from
+90 RPM output) -> CAN velocity commands. **Every motor command is issued from
 this one loop** - the mode setters never touch the bus - so a STOP can never be
 overtaken by an in-flight drive command from another thread.
 
-Frame convention: `vx` forward (m/s), `vy` left (m/s), `w` counter-clockwise.
-Rotation is stored in chassis RPM but shown in deg/s in the GUI. The rotation
-speed is bounded by the wheel limit: a pure spin at w RPM drives the wheels at
-~4.6*w RPM, so the 45 RPM cap allows ~9.7 RPM (~58 deg/s) - raise `kMaxWheelRpm`
-for a faster base (the RMD-X6-S2 has ample headroom).
+Frame convention inside the controller (the platform frame): `vx` forward
+(m/s), `vy` **right** (m/s), `w` counter-clockwise (chassis RPM). The touch
+pad, the physical joystick and the GUI readouts use left-positive at their
+boundary and convert. Rotation is stored in chassis RPM but shown in deg/s in
+the GUI. With this platform's wheel angles a pure spin at w RPM only drives the
+wheels at ~0.27*w RPM (weak rotation authority, see the kinematics note in
+`HoloDeckPlatform`), so the wheel cap never limits rotation in practice; the
+rotation rate is set by the max-rotation limit times the twist scale.
 
 **Modes**
 
@@ -84,8 +87,9 @@ for a faster base (the RMD-X6-S2 has ample headroom).
 * On (re-)enable the joystick must **re-center first** before it can take over,
   so a stick held deflected at enable time cannot make the platform lurch.
 
-Runtime-adjustable limits: max translation speed (m/s) and max rotation rate
-(deg/s), via GUI sliders or the `limits` CLI command; both clamp every source.
+Runtime-adjustable limits: max translation speed (m/s) and max rotation rate,
+via the GUI sliders (rotation in deg/s) or the `limits` CLI command (rotation
+in chassis **RPM**: 1 RPM = 6 deg/s); both clamp every source.
 
 ## GUI (touch)
 
@@ -118,9 +122,9 @@ Over the USB serial console (`idf.py monitor`):
 | `enable` | Enter DRIVE mode (clears STOP/DISABLE; setpoint zeroed) |
 | `estop` | E-stop: command zero velocity to all motors (they hold at 0) |
 | `disable` | Halt the motors at the control level (not held at zero); `enable` to resume |
-| `limits <max_mps> <max_rpm>` | Set the translation / rotation limits |
+| `limits <max_mps> <max_rpm>` | Set the translation (m/s) / rotation (chassis RPM, 1 RPM = 6 deg/s) limits |
 | `status` | Print the full controller + motor state |
-| `set_speed <id> <rpm>` | Direct single-motor command (debug; e-stop first, the control loop overrides it otherwise) |
+| `set_speed <id> <rpm>` | Direct single-motor command (debug; only accepted while STOPPED) |
 
 ## Building & flashing
 
