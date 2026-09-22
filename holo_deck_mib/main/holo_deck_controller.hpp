@@ -178,8 +178,10 @@ protected:
   bool control_step();
   bool status_step();
   /// Send zero velocity to every motor (STOPPED). Safe to call without holding
-  /// mutex_ - the CAN transport has its own locking.
-  void send_zeros();
+  /// mutex_ - the CAN transport has its own locking. Does not log: the caller
+  /// reports a failure on the transition (send_failing_), not every tick.
+  /// \return true if every motor accepted its zero command.
+  bool send_zeros();
   /// Halt every motor at the control level via MotorActuator::stop() (DISABLED).
   /// \return true if every motor acknowledged its stop.
   bool send_disable();

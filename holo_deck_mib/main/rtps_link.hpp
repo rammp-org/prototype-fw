@@ -106,6 +106,13 @@ protected:
   uint8_t diag_seq_{0};
   std::chrono::steady_clock::time_point last_xy_twist_{};
   bool have_xy_twist_{false};
+  /// What the watchdog times from: the last XYTwist, or the ENABLE request if
+  /// none has arrived since - a publisher that never starts is still "lost".
+  std::chrono::steady_clock::time_point watchdog_fed_{};
+  /// The watchdog is armed: DRIVE was requested by the HMI, or XYTwist is
+  /// streaming. A CLI `enable` on the bench (no joystick) is not watched until
+  /// the stream starts; cleared whenever the controller leaves DRIVE.
+  bool watch_joystick_{false};
   std::chrono::steady_clock::time_point last_message_{}; ///< any HMI topic
   bool have_message_{false};
   bool joystick_held_{false}; ///< zeros fed because the stream paused

@@ -181,6 +181,8 @@ void RtpsLink::on_xy_twist(const rammp::XYTwist &msg) {
     std::lock_guard<std::mutex> lock(mutex_);
     last_xy_twist_ = std::chrono::steady_clock::now();
     have_xy_twist_ = true;
+    watchdog_fed_ = last_xy_twist_;
+    watch_joystick_ = true;
     last_message_ = last_xy_twist_;
     have_message_ = true;
     joystick_held_ = false;
@@ -204,6 +206,13 @@ void RtpsLink::on_drive_command(const rammp::DriveCommand &msg) {
     have_message_ = true;
     joystick_lost_ = false;
     status_text_.clear();
+    if (enable) {
+      // the watchdog runs from the ENABLE itself, so the hold / e-stop
+      // thresholds apply even if the XYTwist stream never starts (set before
+      // the controller is enabled so no stale timestamp can trip it)
+      watchdog_fed_ = last_message_;
+      joystick_held_ = false;
+    }
   }
   if (enable) {
     if (!ready_.load()) {
@@ -211,6 +220,8 @@ void RtpsLink::on_drive_command(const rammp::DriveCommand &msg) {
       return;
     }
     controller_.enable(); // requires the joystick to re-center before it takes over
+    std::lock_guard<std::mutex> lock(mutex_);
+    watch_joystick_ = true; // after enable(): the watchdog clears it while not in DRIVE
   } else {
     controller_.stop();
   }
@@ -228,21 +239,24 @@ void RtpsLink::on_seat_command(const rammp::SeatCommand &msg) {
 }
 
 bool RtpsLink::watchdog_step() {
-  if (!controller_.is_enabled())
+  if (!controller_.is_enabled()) {
+    std::lock_guard<std::mutex> lock(mutex_);
+    watch_joystick_ = false; // re-armed by the next HMI ENABLE or XYTwist
     return false;
+  }
+  // timed from the last XYTwist or the HMI's ENABLE, whichever is later: a
+  // stream that never starts after ENABLE is held and then e-stopped like a
+  // stalled one
   std::chrono::milliseconds age{0};
-  bool have = false;
   bool held = false;
   {
     std::lock_guard<std::mutex> lock(mutex_);
-    have = have_xy_twist_;
+    if (!watch_joystick_)
+      return false; // a bench `enable` from the CLI, no joystick expected
     held = joystick_held_;
-    if (have)
-      age = std::chrono::duration_cast<std::chrono::milliseconds>(std::chrono::steady_clock::now() -
-                                                                  last_xy_twist_);
+    age = std::chrono::duration_cast<std::chrono::milliseconds>(std::chrono::steady_clock::now() -
+                                                                watchdog_fed_);
   }
-  if (!have)
-    return false; // enabled but never driven: the controller sits at zero
   if (age > config_.joystick_lost_timeout) {
     logger_.error("Joystick stream lost ({} ms): e-stop", age.count());
     controller_.stop();

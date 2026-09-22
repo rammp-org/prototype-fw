@@ -58,7 +58,9 @@ same motor protocol (`motor_actuator`), same controller (a copy of
 - Boots e-stopped; only a DriveCommand ENABLE (or the CLI) starts driving.
 - **Joystick watchdog**: no XYTwist for 500 ms while driving commands zero
   velocity; none for 2 s e-stops and reports `JOYSTICK LOST` in MibStatus until
-  the HMI sends ENABLE again.
+  the HMI sends ENABLE again. It is timed from the HMI's ENABLE as well as from
+  each XYTwist, so a stream that never starts is caught too. (A bench `enable`
+  from the CLI is not watched until a joystick stream appears.)
 - Every motor command comes from the single control loop, so an e-stop can never
   be overtaken by an in-flight drive command.
 - Wheel speeds are scaled together so none exceeds `kMaxWheelRpm`.

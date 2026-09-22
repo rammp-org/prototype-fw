@@ -189,12 +189,12 @@ HoloDeckController::State HoloDeckController::state() const {
   return state;
 }
 
-void HoloDeckController::send_zeros() {
+bool HoloDeckController::send_zeros() {
+  bool ok = true;
   for (auto &motor : motors_) {
-    if (!motor.send_velocity(0.0f)) {
-      logger_.error("Failed to send zero velocity to motor {}", motor.get_motor_id());
-    }
+    ok = motor.send_velocity(0.0f) && ok;
   }
+  return ok;
 }
 
 bool HoloDeckController::send_disable() {
@@ -273,7 +273,13 @@ bool HoloDeckController::control_step() {
   // stops the motors - they can be driving for at most one control period,
   // never indefinitely.
   if (mode == Mode::STOPPED) {
-    send_zeros();
+    // the zero command is the stop: a motor that does not take it is a fault
+    // the operator must see (and a recovered one clears a latched DRIVE fault)
+    const bool all_zeroed = send_zeros();
+    std::lock_guard<std::mutex> lock(mutex_);
+    if (!all_zeroed && !send_failing_)
+      logger_.error("Failed to send zero velocity to one or more motors; retrying");
+    send_failing_ = !all_zeroed;
     return false; // keep the timer running
   }
   if (mode == Mode::DISABLED) {
