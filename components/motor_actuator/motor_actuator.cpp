@@ -84,10 +84,36 @@ bool MotorCanBus::start(uint32_t bitrate) {
 
 bool MotorCanBus::send(const MotorPacket &command) {
   std::lock_guard<std::mutex> lock(transaction_mutex_);
-  return send_unlocked(command);
+  // Fire-and-forget: enqueue non-blocking, drop if the TX queue is full. A
+  // set-point that is dropped or still queued is superseded by the next tick;
+  // a mode transition that must not let a queued set-point run after its stop
+  // calls flush_pending() first.
+  return send_unlocked(command, /*wait_for_queue_space=*/false);
 }
 
-bool MotorCanBus::send_unlocked(const MotorPacket &command) {
+bool MotorCanBus::flush_pending() {
+  std::lock_guard<std::mutex> lock(transaction_mutex_);
+  if (node_ == nullptr) {
+    return false;
+  }
+  // The driver has no way to drop queued frames (and a disable/enable cycle
+  // RESUMES the pending transaction on IDF 6.x, it does not abort it), but the
+  // backlog is bounded: the node transmits single-shot (fail_retry_cnt 0, no
+  // hardware retry), so once a frame reaches the controller it completes or
+  // fails within about one frame time, and the whole backlog (3 queued + 1 in
+  // flight) is gone within ~1 ms at 1 Mbit/s. Wait that out: the caller's stop
+  // frames then find an empty queue, go out next, and nothing older follows.
+  static constexpr int kDrainTimeoutMs = 5;
+  const esp_err_t result = twai_node_transmit_wait_all_done(node_, kDrainTimeoutMs);
+  if (result != ESP_OK) {
+    logger_.warn("Motor CAN TX queue did not drain within {} ms: {}", kDrainTimeoutMs,
+                 esp_err_to_name(result));
+    return false;
+  }
+  return true;
+}
+
+bool MotorCanBus::send_unlocked(const MotorPacket &command, bool wait_for_queue_space) {
   if (node_ == nullptr) {
     logger_.error("Motor CAN is not started");
     return false;
@@ -96,20 +122,37 @@ bool MotorCanBus::send_unlocked(const MotorPacket &command) {
     logger_.error("Invalid CAN motor packet: id={}, length={}", command.id, command.length);
     return false;
   }
-  twai_frame_t frame{};
-  frame.header.id = command.data[0] == 0x79 ? 0x300u : 0x140u + command.id;
-  frame.header.dlc = command.length;
-  frame.buffer = const_cast<uint8_t *>(command.data.data());
-  frame.buffer_len = command.length;
-  esp_err_t result = twai_node_transmit(node_, &frame, 3);
+  // Copy into a persistent ring slot: the on-chip TWAI TX queue is zero-copy and
+  // reads this frame/buffer asynchronously from the ISR, so it must not live on
+  // the stack. Only advance the ring after a successful enqueue, so a slot is
+  // never reused while the driver may still reference it.
+  TxSlot &slot = tx_ring_[tx_ring_index_];
+  slot.payload = command.data;
+  slot.frame = twai_frame_t{};
+  slot.frame.header.id = command.data[0] == 0x79 ? 0x300u : 0x140u + command.id;
+  slot.frame.header.dlc = command.length;
+  slot.frame.buffer = slot.payload.data();
+  slot.frame.buffer_len = command.length;
+
+  // Never wait on wire completion: with no bus ACK (e.g. no motor attached) that
+  // would stall for the full timeout on every send. A brief enqueue wait is
+  // allowed for the request path so a poll is not dropped under transient queue
+  // pressure; fire-and-forget uses a non-blocking enqueue. The request/response
+  // path gets its reply via the RX queue, so it needs no TX-completion wait.
+  const uint32_t enqueue_timeout_ms = wait_for_queue_space ? 3 : 0;
+  esp_err_t result = twai_node_transmit(node_, &slot.frame, enqueue_timeout_ms);
   if (result == ESP_OK) {
-    result = twai_node_transmit_wait_all_done(node_, 10);
+    tx_ring_index_ = (tx_ring_index_ + 1) % kTxRingSize;
+    return true;
   }
-  if (result != ESP_OK) {
-    logger_.error("Motor CAN transmit failed: {}", esp_err_to_name(result));
-    return false;
+  if (wait_for_queue_space) {
+    logger_.warn("Motor CAN transmit failed: {}", esp_err_to_name(result));
+  } else {
+    // Expected and self-correcting when nothing is draining the bus; keep it off
+    // the error path so it does not spam a real-time control loop.
+    logger_.debug("Motor CAN frame dropped (non-blocking): {}", esp_err_to_name(result));
   }
-  return true;
+  return false;
 }
 
 bool MotorCanBus::request(const MotorPacket &command, MotorPacket &response,
@@ -332,6 +375,15 @@ bool MotorActuator::stop() {
   std::array<uint8_t, packet_length_> command{};
   command[0] = 0x81;
   return send_command(command);
+}
+
+bool MotorActuator::stop_acknowledged(uint32_t timeout_ms) {
+  MotorPacket response{};
+  if (!request(0x81, response, timeout_ms)) {
+    logger_.warn("Motor {} did not acknowledge stop within {} ms", motor_id_, timeout_ms);
+    return false;
+  }
+  return response.data[0] == 0x81;
 }
 
 bool MotorActuator::disable() { return send_torque(0); }

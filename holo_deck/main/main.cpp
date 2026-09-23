@@ -103,10 +103,16 @@ extern "C" void app_main(void) {
       .max_wheel_rpm = hw_config::kMaxWheelRpm,
       .max_speed_mps = hw_config::kDefaultMaxSpeedMps,
       .max_rotation_rpm = hw_config::kDefaultMaxRotationRpm,
+      .twist_rotation_scale = hw_config::kDefaultTwistRotationScale,
       .control_period = hw_config::kControlPeriod,
       .status_poll_period = hw_config::kStatusPollPeriod,
       .joystick_release_timeout = hw_config::kJoystickReleaseTimeout,
       .status_stale_timeout = hw_config::kMotorStatusStaleTimeout,
+      .status_read_timeout_ms = hw_config::kMotorStatusReadTimeoutMs,
+      // MotorCanBus queues set-points (fire-and-forget): on a STOP / DISABLE the
+      // controller drains what is still queued (bounded, ~1 ms) so its stop
+      // frames go out on an empty queue with nothing older behind them
+      .flush_pending_commands = [&can_bus]() { can_bus.flush_pending(); },
       .log_level = espp::Logger::Verbosity::INFO,
   });
 
@@ -134,8 +140,11 @@ extern "C" void app_main(void) {
   gui.set_rotation_callback(
       [&controller](float ccw) { controller.set_gui_rotation_normalized(ccw); });
   gui.set_enable_callback([&controller](bool enable) { controller.set_enabled(enable); });
+  gui.set_disable_callback([&controller]() { controller.disable_motors(); });
   gui.set_max_speed_callback([&controller](float mps) { controller.set_max_speed(mps); });
   gui.set_max_rotation_callback([&controller](float rpm) { controller.set_max_rotation(rpm); });
+  gui.set_twist_scale_callback(
+      [&controller](float scale) { controller.set_twist_rotation_scale(scale); });
 
   // CLI
   auto root_menu = std::make_unique<cli::Menu>("holo_deck");
@@ -146,9 +155,10 @@ extern "C" void app_main(void) {
           out << "Motor ID must be between 1 and " << motors.size() << ".\n";
           return;
         }
-        if (controller.is_enabled()) {
-          out << "Controller is enabled; the control loop will override this within one "
-                 "cycle. Use `estop` first for direct motor control.\n";
+        if (controller.mode() != HoloDeckController::Mode::STOPPED) {
+          out << "Refused: direct motor control only while STOPPED (`estop` first). In DRIVE "
+                 "the loop overrides it; in DISABLED nothing would stop the motor again.\n";
+          return;
         }
         if (motors[motor_id - 1].send_velocity(rpm)) {
           out << "Motor " << motor_id << " speed set to " << rpm << " RPM.\n";
@@ -156,7 +166,7 @@ extern "C" void app_main(void) {
           out << "Failed to set motor " << motor_id << " speed.\n";
         }
       },
-      "Set a single motor speed directly (debug; e-stop first): set_speed <motor_id> <rpm>");
+      "Set a single motor speed directly (debug; only while STOPPED): set_speed <motor_id> <rpm>");
   auto set_velocity = [&controller](std::ostream &out, float x_mps, float y_mps, float w_rpm) {
     controller.set_gui_velocity(x_mps, y_mps, w_rpm);
     const auto state = controller.state();
@@ -184,10 +194,17 @@ extern "C" void app_main(void) {
   root_menu->Insert(
       "estop",
       [&controller](std::ostream &out) {
-        controller.set_enabled(false);
-        out << "E-STOP: motors zeroed and disabled.\n";
+        controller.stop();
+        out << "E-STOP: commanding zero velocity (motors hold at 0).\n";
       },
-      "E-stop: zero all motors and disable the control loop");
+      "E-stop: command zero velocity to all motors (they hold at 0)");
+  root_menu->Insert(
+      "disable",
+      [&controller](std::ostream &out) {
+        controller.disable_motors();
+        out << "Motors DISABLED at the control level. Use `enable` to drive again.\n";
+      },
+      "Disable the motors at the control level (not held at zero by the loop)");
   root_menu->Insert(
       "limits",
       [&controller](std::ostream &out, float max_speed_mps, float max_rotation_rpm) {
@@ -201,12 +218,16 @@ extern "C" void app_main(void) {
       "status",
       [&controller](std::ostream &out) {
         const auto state = controller.state();
-        out << "enabled: " << (state.enabled ? "true" : "false")
-            << "\nsource:  " << source_name(state.source) << "\ncommand: vx=" << state.vx_mps
-            << " m/s vy=" << state.vy_mps << " m/s w=" << state.w_rpm
-            << " RPM\nsetpoint (GUI/CLI): vx=" << state.gui_vx_mps << " m/s vy=" << state.gui_vy_mps
-            << " m/s w=" << state.gui_w_rpm << " RPM\nlimits:  " << state.max_speed_mps << " m/s, "
-            << state.max_rotation_rpm << " RPM, wheel " << state.max_wheel_rpm << " RPM\n";
+        const char *mode_name = state.mode == HoloDeckController::Mode::DRIVE     ? "DRIVE"
+                                : state.mode == HoloDeckController::Mode::STOPPED ? "STOPPED"
+                                                                                  : "DISABLED";
+        out << "mode:    " << mode_name << "\nsource:  " << source_name(state.source)
+            << "\ncommand: vx=" << state.vx_mps << " m/s vy=" << state.vy_mps
+            << " m/s w=" << state.w_rpm << " RPM\nsetpoint (GUI/CLI): vx=" << state.gui_vx_mps
+            << " m/s vy=" << state.gui_vy_mps << " m/s w=" << state.gui_w_rpm
+            << " RPM\nlimits:  " << state.max_speed_mps << " m/s, " << state.max_rotation_rpm
+            << " RPM (twist scale " << state.twist_rotation_scale << "x), wheel "
+            << state.max_wheel_rpm << " RPM\n";
         for (const auto &motor : state.motors) {
           out << "motor " << static_cast<int>(motor.id) << ": cmd=" << motor.commanded_rpm
               << " RPM";

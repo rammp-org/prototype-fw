@@ -91,6 +91,15 @@ void HoloDeckController::set_joystick_input(float forward, float left, float ccw
   }
 }
 
+void HoloDeckController::hold_joystick() {
+  std::lock_guard<std::mutex> lock(mutex_);
+  // not a sample: joystick_sample_seq_ is untouched so the re-center guard
+  // (recenter_after_seq_) still waits for a real centered reading
+  joystick_forward_ = 0.0f;
+  joystick_left_ = 0.0f;
+  joystick_ccw_ = 0.0f;
+}
+
 void HoloDeckController::enable() {
   std::lock_guard<std::mutex> lock(mutex_);
   if (mode_ == Mode::DRIVE) {
@@ -204,18 +213,18 @@ HoloDeckController::State HoloDeckController::state() const {
   return state;
 }
 
-void HoloDeckController::send_zeros() {
+bool HoloDeckController::send_zeros() {
+  bool ok = true;
   for (auto &motor : motors_) {
-    if (!motor.send_velocity(0.0f)) {
-      logger_.error("Failed to send zero velocity to motor {}", motor.get_motor_id());
-    }
+    ok = motor.send_velocity(0.0f) && ok;
   }
+  return ok;
 }
 
 bool HoloDeckController::send_disable() {
-  // Acknowledged per motor (the RMD echoes 0x81), not just "the frame was
-  // queued": DISABLED is a one-shot that stops retrying once this returns
-  // true, so it must mean every motor really took the stop.
+  // Acknowledged per motor (the RMD echoes 0x81), not just "the frame left":
+  // DISABLED is a one-shot that stops retrying once this returns true, so it
+  // must mean every motor really took the stop.
   bool ok = true;
   for (auto &motor : motors_) {
     ok = motor.stop_acknowledged(kStopAckTimeoutMs) && ok;
@@ -292,7 +301,13 @@ bool HoloDeckController::control_step() {
   // never indefinitely.
   if (mode == Mode::STOPPED) {
     flush_transport_if_requested(); // first tick after the stop: drop queued set-points
-    send_zeros();
+    // the zero command is the stop: a motor that does not take it is a fault
+    // the operator must see (and a recovered one clears a latched DRIVE fault)
+    const bool all_zeroed = send_zeros();
+    std::lock_guard<std::mutex> lock(mutex_);
+    if (!all_zeroed && !send_failing_)
+      logger_.error("Failed to send zero velocity to one or more motors; retrying");
+    send_failing_ = !all_zeroed;
     return false; // keep the timer running
   }
   if (mode == Mode::DISABLED) {
@@ -374,6 +389,8 @@ bool HoloDeckController::status_step() {
     motor_status.valid = true;
     motor_status.velocity_rpm = status.velocity_rpm;
     motor_status.temperature_c = status.temperature_c;
+    motor_status.angle_degrees = status.angle_degrees;
+    motor_status.torque_raw = status.torque_raw;
     motor_status_time_[index] = now;
   }
   // a motor is stale until its first successful read, and again whenever the

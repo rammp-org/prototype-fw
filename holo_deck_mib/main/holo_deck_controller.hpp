@@ -52,8 +52,8 @@ public:
   /// The currently-active control source (meaningful only in DRIVE mode).
   enum class Source {
     STOPPED,  ///< E-stopped / disabled; motors are not being driven.
-    GUI,      ///< The touch GUI / CLI setpoint drives the platform.
-    JOYSTICK, ///< The physical joystick drives the platform.
+    GUI,      ///< The local (CLI) setpoint drives the platform.
+    JOYSTICK, ///< The remote joystick (RTPS XYTwist) drives the platform.
   };
 
   /// Last known status of one motor.
@@ -61,6 +61,8 @@ public:
     uint8_t id{0};             ///< Motor CAN id.
     float velocity_rpm{0.0f};  ///< Last reported velocity.
     int temperature_c{0};      ///< Last reported temperature.
+    float angle_degrees{0.0f}; ///< Last reported output-shaft angle.
+    int16_t torque_raw{0};     ///< Last reported torque (raw units).
     float commanded_rpm{0.0f}; ///< Last commanded wheel speed.
     bool valid{false};         ///< True once a status read has succeeded.
     bool stale{true};          ///< True if not successfully read recently.
@@ -145,6 +147,11 @@ public:
   /// deadzoned: exactly 0 means centered). Any non-zero value makes the
   /// joystick the active source.
   void set_joystick_input(float forward, float left, float ccw);
+  /// Zero the joystick input WITHOUT counting it as a joystick sample: for a
+  /// watchdog whose stream has paused. Unlike set_joystick_input(0, 0, 0) it
+  /// cannot satisfy the post-enable re-center guard, so a stream that resumes
+  /// with the stick already deflected still has to center first.
+  void hold_joystick();
 
   /// Enter DRIVE mode. Zeroes the GUI setpoint and requires the physical
   /// joystick to be re-centered before it can take over, so the platform never
@@ -184,8 +191,10 @@ protected:
   bool control_step();
   bool status_step();
   /// Send zero velocity to every motor (STOPPED). Safe to call without holding
-  /// mutex_ - the CAN transport has its own locking.
-  void send_zeros();
+  /// mutex_ - the CAN transport has its own locking. Does not log: the caller
+  /// reports a failure on the transition (send_failing_), not every tick.
+  /// \return true if every motor accepted its zero command.
+  bool send_zeros();
   /// Halt every motor at the control level (DISABLED) via
   /// MotorActuator::stop_acknowledged(), waiting up to kStopAckTimeoutMs per
   /// motor for its echo. \return true only if every motor acknowledged its stop.
