@@ -198,9 +198,12 @@ void HoloDeckController::send_zeros() {
 }
 
 bool HoloDeckController::send_disable() {
+  // Acknowledged per motor (the RMD echoes 0x81), not just "the frame was
+  // queued": DISABLED is a one-shot that stops retrying once this returns
+  // true, so it must mean every motor really took the stop.
   bool ok = true;
   for (auto &motor : motors_) {
-    ok = motor.stop() && ok;
+    ok = motor.stop_acknowledged(kStopAckTimeoutMs) && ok;
   }
   return ok;
 }

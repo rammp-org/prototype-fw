@@ -352,6 +352,15 @@ bool MotorActuator::stop() {
   return send_command(command);
 }
 
+bool MotorActuator::stop_acknowledged(uint32_t timeout_ms) {
+  MotorPacket response{};
+  if (!request(0x81, response, timeout_ms)) {
+    logger_.warn("Motor {} did not acknowledge stop within {} ms", motor_id_, timeout_ms);
+    return false;
+  }
+  return response.data[0] == 0x81;
+}
+
 bool MotorActuator::disable() { return send_torque(0); }
 bool MotorActuator::hold() { return send_velocity(0.0f); }
 

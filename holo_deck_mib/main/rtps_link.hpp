@@ -113,6 +113,10 @@ protected:
   /// streaming. A CLI `enable` on the bench (no joystick) is not watched until
   /// the stream starts; cleared whenever the controller leaves DRIVE.
   bool watch_joystick_{false};
+  /// Bumped every time the watchdog is armed, so a watchdog tick that saw the
+  /// controller disabled before an ENABLE slipped in does not disarm the new one.
+  uint32_t watch_generation_{0};
+  uint32_t rejected_twist_{0}; ///< XYTwist samples dropped for non-finite values
   std::chrono::steady_clock::time_point last_message_{}; ///< any HMI topic
   bool have_message_{false};
   bool joystick_held_{false}; ///< zeros fed because the stream paused

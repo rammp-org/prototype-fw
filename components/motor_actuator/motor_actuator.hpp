@@ -106,6 +106,12 @@ public:
   bool set_position(float position_degrees, float max_speed_rpm);
   bool send_incremental_position(float delta_degrees, float max_speed_rpm);
   bool stop();
+  /// Stop the motor (0x81) and wait for the motor's own acknowledgement: the
+  /// RMD echoes the command frame from its reply id. Unlike stop(), which only
+  /// reports that the frame left (queued, or completed on the bus, depending on
+  /// the transport), this returns true only when THIS motor answered, so a
+  /// control-level disable can retry until every motor has really stopped.
+  bool stop_acknowledged(uint32_t timeout_ms = 20);
   bool disable();
   bool hold();
   bool release_brake();

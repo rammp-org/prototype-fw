@@ -177,12 +177,26 @@ void RtpsLink::apply_profile(MIB::DriveProfile profile) {
 }
 
 void RtpsLink::on_xy_twist(const rammp::XYTwist &msg) {
+  // Network input: std::clamp passes NaN through, and a NaN would become an
+  // active joystick command all the way to the motor frames. Drop such a
+  // sample entirely, so it feeds neither the controller nor the watchdog (a
+  // publisher that only sends garbage is then treated as a lost stream).
+  if (!std::isfinite(msg.x) || !std::isfinite(msg.y) || !std::isfinite(msg.twist)) {
+    std::lock_guard<std::mutex> lock(mutex_);
+    if (rejected_twist_++ == 0)
+      logger_.error("XYTwist with non-finite values rejected (x={} y={} twist={})", msg.x, msg.y,
+                    msg.twist);
+    return;
+  }
   {
     std::lock_guard<std::mutex> lock(mutex_);
     last_xy_twist_ = std::chrono::steady_clock::now();
     have_xy_twist_ = true;
     watchdog_fed_ = last_xy_twist_;
-    watch_joystick_ = true;
+    if (!watch_joystick_) {
+      watch_joystick_ = true;
+      ++watch_generation_;
+    }
     last_message_ = last_xy_twist_;
     have_message_ = true;
     joystick_held_ = false;
@@ -206,25 +220,28 @@ void RtpsLink::on_drive_command(const rammp::DriveCommand &msg) {
     have_message_ = true;
     joystick_lost_ = false;
     status_text_.clear();
-    if (enable) {
-      // the watchdog runs from the ENABLE itself, so the hold / e-stop
-      // thresholds apply even if the XYTwist stream never starts (set before
-      // the controller is enabled so no stale timestamp can trip it)
-      watchdog_fed_ = last_message_;
-      joystick_held_ = false;
-    }
   }
-  if (enable) {
-    if (!ready_.load()) {
-      logger_.warn("ENABLE refused: the platform is not ready");
-      return;
-    }
-    controller_.enable(); // requires the joystick to re-center before it takes over
-    std::lock_guard<std::mutex> lock(mutex_);
-    watch_joystick_ = true; // after enable(): the watchdog clears it while not in DRIVE
-  } else {
+  if (!enable) {
     controller_.stop();
+    return;
   }
+  if (!ready_.load()) {
+    logger_.warn("ENABLE refused: the platform is not ready");
+    return;
+  }
+  {
+    // Arm the watchdog from the ENABLE itself, so the hold / e-stop thresholds
+    // apply even if the XYTwist stream never starts. Armed BEFORE the
+    // controller is enabled (no stale timestamp can trip it), and with a new
+    // generation, so a watchdog tick that saw the controller still disabled
+    // cannot disarm this ENABLE afterwards.
+    std::lock_guard<std::mutex> lock(mutex_);
+    watchdog_fed_ = std::chrono::steady_clock::now();
+    joystick_held_ = false;
+    watch_joystick_ = true;
+    ++watch_generation_;
+  }
+  controller_.enable(); // requires the joystick to re-center before it takes over
 }
 
 void RtpsLink::on_seat_command(const rammp::SeatCommand &msg) {
@@ -239,9 +256,17 @@ void RtpsLink::on_seat_command(const rammp::SeatCommand &msg) {
 }
 
 bool RtpsLink::watchdog_step() {
+  uint32_t generation = 0;
+  {
+    std::lock_guard<std::mutex> lock(mutex_);
+    generation = watch_generation_;
+  }
   if (!controller_.is_enabled()) {
     std::lock_guard<std::mutex> lock(mutex_);
-    watch_joystick_ = false; // re-armed by the next HMI ENABLE or XYTwist
+    // an ENABLE that armed the watchdog between the two checks above owns a
+    // newer generation: leave it armed
+    if (watch_generation_ == generation)
+      watch_joystick_ = false; // re-armed by the next HMI ENABLE or XYTwist
     return false;
   }
   // timed from the last XYTwist or the HMI's ENABLE, whichever is later: a

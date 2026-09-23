@@ -44,7 +44,10 @@ public:
   /// Bring up the TWAI node. \return true if the node is on the bus.
   bool start(std::error_code &ec);
 
-  /// Fire-and-forget: transmit one command frame.
+  /// Transmit one command frame and wait for it to complete on the bus (up to
+  /// Config::tx_timeout_ms): true means the frame was acknowledged by at least
+  /// one node, not that the addressed motor received it. For a per-motor
+  /// confirmation use request() (the RMD echoes every command it takes).
   bool send(const MotorPacket &command);
 
   /// Transmit one command frame and wait up to timeout_ms for the motor's reply.
@@ -66,7 +69,6 @@ protected:
   void on_receive(const espp::Twai::Message &m);
 
   Config config_;
-  espp::Twai twai_;
 
   std::mutex transaction_mutex_; ///< one transaction (send, or send + reply) at a time
 
@@ -79,4 +81,9 @@ protected:
 
   std::atomic<uint32_t> unexpected_rx_{0};
   std::atomic<uint32_t> tx_errors_{0};
+
+  /// Declared LAST on purpose: members are destroyed in reverse order, so the
+  /// transport (and its receive task, which calls on_receive() and touches the
+  /// reply state above) is torn down before that state goes away.
+  espp::Twai twai_;
 };

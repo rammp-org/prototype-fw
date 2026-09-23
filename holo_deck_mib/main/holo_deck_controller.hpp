@@ -187,9 +187,13 @@ protected:
   /// reports a failure on the transition (send_failing_), not every tick.
   /// \return true if every motor accepted its zero command.
   bool send_zeros();
-  /// Halt every motor at the control level via MotorActuator::stop() (DISABLED).
-  /// \return true if every motor acknowledged its stop.
+  /// Halt every motor at the control level (DISABLED) via
+  /// MotorActuator::stop_acknowledged(), waiting up to kStopAckTimeoutMs per
+  /// motor for its echo. \return true only if every motor acknowledged its stop.
   bool send_disable();
+  /// How long a motor gets to acknowledge its stop. Only paid in DISABLED (and
+  /// once on the transition into it), where the loop has nothing else to do.
+  static constexpr uint32_t kStopAckTimeoutMs = 10;
   static float clamp_positive(float value);
 
   HoloDeckPlatform &platform_;
