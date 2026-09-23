@@ -293,9 +293,6 @@ extern "C" void app_main(void) {
 
   if (can_ok) {
     controller.zero(std::nullopt, false);
-    if (!controller.load_zero()) {
-      logger.warn("Failed to load zero for one or more pairs, please load zero manually");
-    }
     for (auto &actuator : actuators) {
       MotorActuator::Status status{};
       if (actuator.read_status(status)) {

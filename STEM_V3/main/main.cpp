@@ -34,6 +34,7 @@
 #include "eyou_motor.hpp"
 #include "ik_5bar.hpp"
 #include "logger.hpp"
+#include "motor_actuator.hpp"
 #include "ota.hpp"
 #include "paired_eyou_actuator.hpp"
 #include "stem_controller.hpp"
@@ -51,6 +52,16 @@ namespace {
 constexpr uint16_t kUsbPid = 0x0d3a;
 constexpr gpio_num_t kCanTxGpio = GPIO_NUM_16;
 constexpr gpio_num_t kCanRxGpio = GPIO_NUM_17;
+
+// Base/seat swivel: two MotorActuator (RMD-style) motors sharing the same CAN
+// bus as the Eyou linkage motors. MotorActuator's own gear_ratio_ (36:1) is
+// internal to that actuator; on top of it an external 1:7 gear stage drives
+// the swivel, so the actuator's own output shaft must turn 7 deg for every
+// 1 deg of swivel (motor rotates 70 deg -> swivel rotates 10 deg).
+constexpr uint8_t kBaseSwivelMotorId = 5;
+constexpr uint8_t kSeatSwivelMotorId = 6;
+constexpr float kSwivelGearRatio = 7.0f;
+constexpr float kSwivelDefaultSpeedRpm = 10.0f;
 
 using Transport = stem::StemModule::Transport;
 using Frame = espp::stream_frame::Frame;
@@ -80,7 +91,8 @@ void print_solution(std::ostream &out, const stem::IkSolution &s) {
 // Console CLI: the same operations the USB module exposes, on top of the same
 // controller (so limits / rejections / tracked state agree).
 std::unique_ptr<cli::Menu> make_cli_menu(stem::StemController &controller,
-                                         std::span<EyouMotor> actuators) {
+                                         std::span<EyouMotor> actuators,
+                                         MotorActuator &base_swivel, MotorActuator &seat_swivel) {
   auto menu = std::make_unique<cli::Menu>("STEM");
   menu->Insert(
       "set",
@@ -237,6 +249,38 @@ std::unique_ptr<cli::Menu> make_cli_menu(stem::StemController &controller,
                                        : "Zero load failed for one or more pairs.\n");
       },
       "Load every pair's software zero from NVS: load_zero");
+  menu->Insert(
+      "set_base",
+      [&base_swivel](std::ostream &out, float swivel_degrees) {
+        const float actuator_degrees = swivel_degrees * kSwivelGearRatio;
+        out << (base_swivel.set_position(actuator_degrees, kSwivelDefaultSpeedRpm)
+                    ? "Base swivel angle command sent.\n"
+                    : "Base swivel angle command failed.\n");
+      },
+      "Set the base swivel angle, accounting for the 1:7 external gear: set_base <degrees>");
+  menu->Insert(
+      "set_seat_swivel",
+      [&seat_swivel](std::ostream &out, float swivel_degrees) {
+        const float actuator_degrees = swivel_degrees * kSwivelGearRatio;
+        out << (seat_swivel.set_position(actuator_degrees, kSwivelDefaultSpeedRpm)
+                    ? "Seat swivel angle command sent.\n"
+                    : "Seat swivel angle command failed.\n");
+      },
+      "Set the seat swivel angle, accounting for the 1:7 external gear: set_seat_swivel <degrees>");
+  menu->Insert(
+      "get_base",
+      [&base_swivel](std::ostream &out) {
+        out << "Base swivel angle: " << base_swivel.get_position() / kSwivelGearRatio
+            << " deg\n";
+      },
+      "Read the tracked base swivel angle: get_base");
+  menu->Insert(
+      "get_seat_swivel",
+      [&seat_swivel](std::ostream &out) {
+        out << "Seat swivel angle: " << seat_swivel.get_position() / kSwivelGearRatio
+            << " deg\n";
+      },
+      "Read the tracked seat swivel angle: get_seat_swivel");
   return menu;
 }
 
@@ -282,7 +326,19 @@ extern "C" void app_main(void) {
       EyouMotor(can_bus, 105),
       EyouMotor(can_bus, 106),
   }};
-  const bool can_ok = can_bus.start();
+  // MotorCanBus registers its own receivers inside start(), so construct it and
+  // the two swivel motors before starting the bus, and let its start() bring up
+  // the shared CanBus (do not call can_bus.start() separately).
+  MotorCanBus swivel_can_bus(can_bus);
+  MotorActuator::CommunicationFunction swivel_communicate =
+      [&swivel_can_bus](const MotorPacket &command, MotorPacket &response, uint32_t timeout_ms) {
+        if (timeout_ms == 0)
+          return swivel_can_bus.send(command);
+        return swivel_can_bus.request(command, response, timeout_ms);
+      };
+  MotorActuator base_swivel(swivel_communicate, kBaseSwivelMotorId);
+  MotorActuator seat_swivel(swivel_communicate, kSeatSwivelMotorId);
+  const bool can_ok = swivel_can_bus.start();
   if (!can_ok) {
     // Keep going: USB / OTA / core-dump access must not depend on the motors.
     logger.error("CAN bus failed to start; motor commands will fail until reboot");
@@ -318,6 +374,9 @@ extern "C" void app_main(void) {
       logger.error("Failed to enable one or more drives");
     }
     controller.zero(std::nullopt, false);
+    if (!controller.load_zero()) {
+      logger.warn("Failed to load zero for one or more pairs, please load zero manually");
+    }
     for (auto &actuator : actuators) {
       uint16_t statusword = 0;
       if (actuator.get_statusword(statusword)) {
@@ -654,14 +713,16 @@ extern "C" void app_main(void) {
   // --------------------------------------------------------------------------
   // Console CLI
   // --------------------------------------------------------------------------
-  static auto cli = std::make_unique<cli::Cli>(make_cli_menu(controller, actuators));
+  static auto cli = std::make_unique<cli::Cli>(
+      make_cli_menu(controller, actuators, base_swivel, seat_swivel));
   std::thread([cli_ptr = cli.get()] {
     espp::Cli input(*cli_ptr);
     input.Start();
   }).detach();
   logger.info("CLI ready: set <pair> <deg>, move <x> <y>, home, tilt <deg>, stop, get, status, "
               "release, zero <pair|all>, zero_align <pair|all>, save_zero, "
-              "load_zero, ik <x> <y>, ik_ref <x> <y>");
+              "load_zero, ik <x> <y>, ik_ref <x> <y>, set_base <deg>, set_seat_swivel <deg>, "
+              "get_base, get_seat_swivel");
 
   bool have_ethernet_status = false;
   bool last_ethernet_status = false;

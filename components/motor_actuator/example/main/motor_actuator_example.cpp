@@ -12,7 +12,7 @@ using namespace std::chrono_literals;
 namespace {
 constexpr gpio_num_t kCanRxGpio = GPIO_NUM_16;
 constexpr gpio_num_t kCanTxGpio = GPIO_NUM_17;
-constexpr uint8_t kMotorId = 1;
+constexpr uint8_t kMotorId = 6;
 }
 
 extern "C" void app_main(void) {
