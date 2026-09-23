@@ -1,19 +1,21 @@
-#include "canopen_bus.hpp"
+#include "can_bus.hpp"
 
 #include <algorithm>
 
-CanopenBus::CanopenBus(gpio_num_t rx_gpio, gpio_num_t tx_gpio)
-    : espp::BaseComponent("CanopenBus", espp::Logger::Verbosity::INFO), rx_gpio_(rx_gpio),
+CanBus::CanBus(gpio_num_t rx_gpio, gpio_num_t tx_gpio)
+    : espp::BaseComponent("CanBus", espp::Logger::Verbosity::INFO), rx_gpio_(rx_gpio),
       tx_gpio_(tx_gpio) {}
 
-CanopenBus::~CanopenBus() {
+CanBus::~CanBus() {
+  std::lock_guard<std::mutex> lock(lifecycle_mutex_);
   if (node_ != nullptr) {
     twai_node_disable(node_);
     twai_node_delete(node_);
   }
 }
 
-bool CanopenBus::register_receiver(uint32_t can_id, QueueHandle_t queue) {
+bool CanBus::register_receiver(uint32_t can_id, QueueHandle_t queue) {
+  std::lock_guard<std::mutex> lock(lifecycle_mutex_);
   if (node_ != nullptr || queue == nullptr) {
     return false;
   }
@@ -26,10 +28,10 @@ bool CanopenBus::register_receiver(uint32_t can_id, QueueHandle_t queue) {
   return false;
 }
 
-bool CanopenBus::on_receive(twai_node_handle_t handle, const twai_rx_done_event_data_t *,
-                             void *context) {
-  auto *bus = static_cast<CanopenBus *>(context);
-  CanopenFrame frame{};
+bool CanBus::on_receive(twai_node_handle_t handle, const twai_rx_done_event_data_t *,
+                         void *context) {
+  auto *bus = static_cast<CanBus *>(context);
+  CanFrame frame{};
   twai_frame_t twai_frame{};
   twai_frame.buffer = frame.data.data();
   twai_frame.buffer_len = frame.data.size();
@@ -51,7 +53,8 @@ bool CanopenBus::on_receive(twai_node_handle_t handle, const twai_rx_done_event_
   return task_woken == pdTRUE;
 }
 
-bool CanopenBus::start(uint32_t bitrate) {
+bool CanBus::start(uint32_t bitrate) {
+  std::lock_guard<std::mutex> lock(lifecycle_mutex_);
   if (node_ != nullptr) {
     return true;
   }
@@ -74,7 +77,7 @@ bool CanopenBus::start(uint32_t bitrate) {
     error = twai_node_enable(node_);
   }
   if (error != ESP_OK) {
-    logger_.error("Failed to start CANopen bus: {}", esp_err_to_name(error));
+    logger_.error("Failed to start CAN bus: {}", esp_err_to_name(error));
     if (node_ != nullptr) {
       twai_node_delete(node_);
       node_ = nullptr;
@@ -82,12 +85,12 @@ bool CanopenBus::start(uint32_t bitrate) {
     return false;
   }
 
-  logger_.info("CANopen bus started: RX GPIO {}, TX GPIO {}, {} bit/s",
-               static_cast<int>(rx_gpio_), static_cast<int>(tx_gpio_), bitrate);
+  logger_.info("CAN bus started: RX GPIO {}, TX GPIO {}, {} bit/s", static_cast<int>(rx_gpio_),
+               static_cast<int>(tx_gpio_), bitrate);
   return true;
 }
 
-bool CanopenBus::send(const CanopenFrame &message) const {
+bool CanBus::send(const CanFrame &message) const {
   std::lock_guard<std::mutex> lock(transmit_mutex_);
   if (node_ == nullptr || message.dlc > message.data.size()) {
     return false;

@@ -4,11 +4,12 @@ include($ENV{IDF_PATH}/tools/cmake/project.cmake)
 
 set(EXTRA_COMPONENT_DIRS
   "../"
+  "../../can_bus"
 )
 
 set(
   COMPONENTS
-  "main motor_actuator esp_driver_twai espp__cli"
+  "main can_bus motor_actuator espp__cli"
   CACHE STRING
   "List of components to include"
 )

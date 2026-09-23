@@ -29,7 +29,7 @@ constexpr uint16_t kControlwordImmediate = 0x0020;
 constexpr uint16_t kControlwordRelative = 0x0040;
 }
 
-EyouMotor::EyouMotor(CanopenBus &bus, uint8_t node_id)
+EyouMotor::EyouMotor(CanBus &bus, uint8_t node_id)
 		: espp::BaseComponent("EyouMotor", espp::Logger::Verbosity::INFO), bus_(bus), node_id_(node_id) {
 	receive_queue_ = xQueueCreate(16, sizeof(EyouCanFrame));
 	if (receive_queue_ == nullptr || !bus_.register_receiver(0x580 + node_id_, receive_queue_) ||

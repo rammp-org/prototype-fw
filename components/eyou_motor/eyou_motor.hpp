@@ -6,11 +6,11 @@
 #include <span>
 
 #include "base_component.hpp"
-#include "canopen_bus.hpp"
+#include "can_bus.hpp"
 #include "freertos/FreeRTOS.h"
 #include "freertos/queue.h"
 
-using EyouCanFrame = CanopenFrame;
+using EyouCanFrame = CanFrame;
 
 class EyouMotor : public espp::BaseComponent {
 public:
@@ -23,7 +23,7 @@ public:
   static constexpr float kPulsesPerOutputTurn = static_cast<float>((1U << 19) * 100U);
   static constexpr float kDegreesPerOutputTurn = 360.0f;
 
-  EyouMotor(CanopenBus &bus, uint8_t node_id = 1);
+  EyouMotor(CanBus &bus, uint8_t node_id = 1);
   ~EyouMotor();
 
   EyouMotor(const EyouMotor &) = delete;
@@ -60,7 +60,7 @@ private:
   bool degrees_to_profile_units(float degrees, uint32_t &pulses) const;
   static float pulses_to_degrees(int32_t pulses);
 
-  CanopenBus &bus_;
+  CanBus &bus_;
   uint8_t node_id_{1};
   QueueHandle_t receive_queue_{nullptr};
   mutable std::mutex transaction_mutex_;

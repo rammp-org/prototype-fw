@@ -3,6 +3,7 @@
 #include <thread>
 
 #include "cli.hpp"
+#include "can_bus.hpp"
 #include "logger.hpp"
 #include "motor_actuator.hpp"
 
@@ -17,7 +18,8 @@ constexpr uint8_t kMotorId = 1;
 extern "C" void app_main(void) {
   espp::Logger logger({.tag = "MotorActuatorExample", .level = espp::Logger::Verbosity::INFO});
 
-  MotorCanBus can_bus(kCanRxGpio, kCanTxGpio);
+  CanBus shared_can_bus(kCanRxGpio, kCanTxGpio);
+  MotorCanBus can_bus(shared_can_bus);
   if (!can_bus.start()) {
     logger.error("Failed to start CAN bus");
     return;

@@ -5,81 +5,59 @@
 #include <mutex>
 
 namespace {
-constexpr gpio_num_t kUnusedGpio = GPIO_NUM_NC;
 constexpr size_t kPacketLength = 8;
 }
 
 MotorCanBus::MotorCanBus(gpio_num_t rx_gpio, gpio_num_t tx_gpio)
-    : espp::BaseComponent("MotorCanBus", espp::Logger::Verbosity::INFO), rx_gpio_(rx_gpio),
-      tx_gpio_(tx_gpio) {}
+    : espp::BaseComponent("MotorCanBus", espp::Logger::Verbosity::INFO)
+    , owned_bus_(std::make_unique<CanBus>(rx_gpio, tx_gpio))
+    , bus_(owned_bus_.get()) {}
+
+MotorCanBus::MotorCanBus(CanBus &bus)
+    : espp::BaseComponent("MotorCanBus", espp::Logger::Verbosity::INFO), bus_(&bus) {}
 
 MotorCanBus::~MotorCanBus() {
-  if (node_ != nullptr) {
-    twai_node_disable(node_);
-    twai_node_delete(node_);
-  }
   if (receive_queue_ != nullptr) {
     vQueueDelete(receive_queue_);
   }
 }
 
-bool MotorCanBus::on_receive(twai_node_handle_t handle, const twai_rx_done_event_data_t *,
-                             void *context) {
-  auto *bus = static_cast<MotorCanBus *>(context);
-  MotorPacket packet{};
-  twai_frame_t frame{};
-  frame.buffer = packet.data.data();
-  frame.buffer_len = packet.data.size();
-  if (twai_node_receive_from_isr(handle, &frame) != ESP_OK) {
+bool MotorCanBus::register_receivers() {
+  if (receivers_registered_ || bus_ == nullptr || receive_queue_ == nullptr) {
+    return receivers_registered_;
+  }
+  for (uint32_t motor_id = 1; motor_id <= 32; ++motor_id) {
+    if (!bus_->register_receiver(0x240 + motor_id, receive_queue_)) {
+      return false;
+    }
+  }
+  if (!bus_->register_receiver(0x300, receive_queue_)) {
     return false;
   }
-  packet.id = frame.header.id;
-  packet.length = twaifd_dlc2len(frame.header.dlc);
-  BaseType_t higher_priority_task_woken = pdFALSE;
-  xQueueSendFromISR(bus->receive_queue_, &packet, &higher_priority_task_woken);
-  return higher_priority_task_woken == pdTRUE;
+  receivers_registered_ = true;
+  return true;
 }
 
 bool MotorCanBus::start(uint32_t bitrate) {
   std::lock_guard<std::mutex> lock(transaction_mutex_);
-  if (node_ != nullptr) {
-    return true;
+  if (bus_ == nullptr) {
+    return false;
   }
-  receive_queue_ = xQueueCreate(32, sizeof(MotorPacket));
+  if (receive_queue_ == nullptr) {
+    receive_queue_ = xQueueCreate(32, sizeof(CanFrame));
+  }
   if (receive_queue_ == nullptr) {
     logger_.error("Failed to create CAN receive queue");
     return false;
   }
-
-  twai_onchip_node_config_t config{};
-  config.io_cfg.rx = rx_gpio_;
-  config.io_cfg.tx = tx_gpio_;
-  config.io_cfg.quanta_clk_out = kUnusedGpio;
-  config.io_cfg.bus_off_indicator = kUnusedGpio;
-  config.bit_timing.bitrate = bitrate;
-  config.tx_queue_depth = 3;
-
-  esp_err_t result = twai_new_node_onchip(&config, &node_);
-  if (result != ESP_OK) {
-    logger_.error("Failed to create motor CAN node: {}", esp_err_to_name(result));
+  if (!register_receivers()) {
+    logger_.error("Failed to register motor CAN receivers");
     return false;
   }
-
-  twai_event_callbacks_t callbacks{};
-  callbacks.on_rx_done = on_receive;
-  result = twai_node_register_event_callbacks(node_, &callbacks, this);
-  if (result == ESP_OK) {
-    result = twai_node_enable(node_);
-  }
-  if (result != ESP_OK) {
-    logger_.error("Failed to start motor CAN node: {}", esp_err_to_name(result));
-    twai_node_delete(node_);
-    node_ = nullptr;
+  if (!bus_->start(bitrate)) {
+    logger_.error("Failed to start shared CAN bus");
     return false;
   }
-
-  logger_.info("CAN bus started: RX GPIO {}, TX GPIO {}, {} bit/s", static_cast<int>(rx_gpio_),
-               static_cast<int>(tx_gpio_), bitrate);
   return true;
 }
 
@@ -89,7 +67,7 @@ bool MotorCanBus::send(const MotorPacket &command) {
 }
 
 bool MotorCanBus::send_unlocked(const MotorPacket &command) {
-  if (node_ == nullptr) {
+  if (bus_ == nullptr) {
     logger_.error("Motor CAN is not started");
     return false;
   }
@@ -97,17 +75,13 @@ bool MotorCanBus::send_unlocked(const MotorPacket &command) {
     logger_.error("Invalid CAN motor packet: id={}, length={}", command.id, command.length);
     return false;
   }
-  twai_frame_t frame{};
-  frame.header.id = command.data[0] == 0x79 ? 0x300u : 0x140u + command.id;
-  frame.header.dlc = command.length;
-  frame.buffer = const_cast<uint8_t *>(command.data.data());
-  frame.buffer_len = command.length;
-  esp_err_t result = twai_node_transmit(node_, &frame, 3);
-  if (result == ESP_OK) {
-    result = twai_node_transmit_wait_all_done(node_, 10);
-  }
-  if (result != ESP_OK) {
-    logger_.error("Motor CAN transmit failed: {}", esp_err_to_name(result));
+  const CanFrame frame{
+      .id = command.data[0] == 0x79 ? 0x300u : 0x140u + command.id,
+      .dlc = static_cast<uint8_t>(command.length),
+      .data = command.data,
+  };
+  if (!bus_->send(frame)) {
+    logger_.error("Motor CAN transmit failed");
     return false;
   }
   return true;
@@ -120,7 +94,8 @@ bool MotorCanBus::request(const MotorPacket &command, MotorPacket &response,
     logger_.error("Motor CAN is not started");
     return false;
   }
-  while (xQueueReceive(receive_queue_, &response, 0) == pdTRUE) {
+  CanFrame frame{};
+  while (xQueueReceive(receive_queue_, &frame, 0) == pdTRUE) {
   }
   if (!send_unlocked(command)) {
     return false;
@@ -130,9 +105,14 @@ bool MotorCanBus::request(const MotorPacket &command, MotorPacket &response,
   const TickType_t timeout_ticks = pdMS_TO_TICKS(timeout_ms);
   while (xTaskGetTickCount() - start_tick < timeout_ticks) {
     const TickType_t elapsed = xTaskGetTickCount() - start_tick;
-    if (xQueueReceive(receive_queue_, &response, timeout_ticks - elapsed) != pdTRUE) {
+    if (xQueueReceive(receive_queue_, &frame, timeout_ticks - elapsed) != pdTRUE) {
       break;
     }
+    response = MotorPacket{
+        .id = frame.id,
+        .length = frame.dlc,
+        .data = frame.data,
+    };
     logger_.info("CAN RX id=0x{:x} cmd=0x{:02x} length={}", response.id, response.data[0],
            response.length);
     const uint32_t expected_reply_id_value = command.data[0] == 0x79

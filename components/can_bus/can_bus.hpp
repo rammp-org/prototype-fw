@@ -10,7 +10,7 @@
 #include "freertos/FreeRTOS.h"
 #include "freertos/queue.h"
 
-struct CanopenFrame {
+struct CanFrame {
   uint32_t id{0};
   bool extended{false};
   bool rtr{false};
@@ -18,16 +18,16 @@ struct CanopenFrame {
   std::array<uint8_t, 8> data{};
 };
 
-class CanopenBus : public espp::BaseComponent {
+class CanBus : public espp::BaseComponent {
 public:
-  CanopenBus(gpio_num_t rx_gpio, gpio_num_t tx_gpio);
-  ~CanopenBus();
+  CanBus(gpio_num_t rx_gpio, gpio_num_t tx_gpio);
+  ~CanBus();
 
-  CanopenBus(const CanopenBus &) = delete;
-  CanopenBus &operator=(const CanopenBus &) = delete;
+  CanBus(const CanBus &) = delete;
+  CanBus &operator=(const CanBus &) = delete;
 
   bool start(uint32_t bitrate = 1'000'000);
-  bool send(const CanopenFrame &frame) const;
+  bool send(const CanFrame &frame) const;
   bool register_receiver(uint32_t can_id, QueueHandle_t queue);
 
 private:
@@ -42,6 +42,7 @@ private:
   gpio_num_t rx_gpio_;
   gpio_num_t tx_gpio_;
   twai_node_handle_t node_{nullptr};
-  std::array<Receiver, 16> receivers_{};
+  std::array<Receiver, 64> receivers_{};
   mutable std::mutex transmit_mutex_;
+  std::mutex lifecycle_mutex_;
 };

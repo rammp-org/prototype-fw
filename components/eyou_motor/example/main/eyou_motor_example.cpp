@@ -1,5 +1,5 @@
 #include "eyou_motor.hpp"
-#include "canopen_bus.hpp"
+#include "can_bus.hpp"
 
 #include <chrono>
 #include <memory>
@@ -13,12 +13,12 @@ using namespace std::chrono_literals;
 namespace {
 constexpr gpio_num_t kCanRxGpio = GPIO_NUM_16;
 constexpr gpio_num_t kCanTxGpio = GPIO_NUM_17;
-constexpr uint8_t kNodeId = 105;
+constexpr uint8_t kNodeId = 1;
 }
 
 extern "C" void app_main(void) {
   espp::Logger logger({.tag = "EyouMotorExample", .level = espp::Logger::Verbosity::INFO});
-  CanopenBus bus(kCanRxGpio, kCanTxGpio);
+  CanBus bus(kCanRxGpio, kCanTxGpio);
   EyouMotor motor(bus, kNodeId);
   if (!bus.start()) {
     logger.error("Failed to start CAN bus");

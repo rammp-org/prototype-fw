@@ -4,12 +4,12 @@ include($ENV{IDF_PATH}/tools/cmake/project.cmake)
 
 set(EXTRA_COMPONENT_DIRS
   "../"
-  "../../canopen_bus"
+  "../../can_bus"
 )
 
 set(
   COMPONENTS
-  "main canopen_bus eyou_motor espp__cli"
+  "main can_bus eyou_motor espp__cli"
   CACHE STRING
   "List of components to include"
 )

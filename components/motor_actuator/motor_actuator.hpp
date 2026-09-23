@@ -4,12 +4,12 @@
 #include <cstdint>
 #include <functional>
 #include <limits>
+#include <memory>
 #include <mutex>
 #include <utility>
 
 #include "base_component.hpp"
-#include "esp_twai.h"
-#include "esp_twai_onchip.h"
+#include "can_bus.hpp"
 #include "freertos/FreeRTOS.h"
 #include "freertos/queue.h"
 #include "logger.hpp"
@@ -23,6 +23,10 @@ struct MotorPacket {
 class MotorCanBus : public espp::BaseComponent {
 public:
   MotorCanBus(gpio_num_t rx_gpio, gpio_num_t tx_gpio);
+  /// \brief Attach the MotorActuator protocol adapter to a shared CAN interface.
+  /// \details Construct all protocol adapters before starting \p bus so they can
+  ///          register their independent receive queues.
+  explicit MotorCanBus(CanBus &bus);
   ~MotorCanBus();
 
   MotorCanBus(const MotorCanBus &) = delete;
@@ -33,15 +37,14 @@ public:
   bool request(const MotorPacket &command, MotorPacket &response, uint32_t timeout_ms = 100);
 
 private:
-  static bool on_receive(twai_node_handle_t handle, const twai_rx_done_event_data_t *event,
-                         void *context);
+  bool register_receivers();
   bool send_unlocked(const MotorPacket &command);
 
-  gpio_num_t rx_gpio_;
-  gpio_num_t tx_gpio_;
-  twai_node_handle_t node_{nullptr};
+  std::unique_ptr<CanBus> owned_bus_;
+  CanBus *bus_{nullptr};
   QueueHandle_t receive_queue_{nullptr};
   std::mutex transaction_mutex_;
+  bool receivers_registered_{false};
 };
 
 class MotorActuator : public espp::BaseComponent {
