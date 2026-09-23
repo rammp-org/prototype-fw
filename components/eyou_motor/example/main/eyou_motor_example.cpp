@@ -47,6 +47,27 @@ extern "C" void app_main(void) {
           },
           "Read output position: get_position");
       root_menu->Insert(
+          "zero",
+          [&motor](std::ostream &out) {
+            out << (motor.zero() ? "Software zero position set to current position.\n"
+                                 : "Failed to set software zero position.\n");
+          },
+          "Set the software zero reference to the current position: zero");
+      root_menu->Insert(
+          "profile",
+          [&motor](std::ostream &out) {
+            EyouMotor::ProfilePositionConfig config{};
+            if (!motor.get_profile_position_config(config)) {
+              out << "Failed to read profile-position configuration.\n";
+              return;
+            }
+            out << "velocity=" << config.velocity_degrees_per_second
+                << " deg/s, acceleration=" << config.acceleration_degrees_per_second_squared
+                << " deg/s^2, deceleration=" << config.deceleration_degrees_per_second_squared
+                << " deg/s^2\n";
+          },
+          "Read back the Profile Position velocity/accel/decel: profile");
+      root_menu->Insert(
           "status",
           [&motor](std::ostream &out) {
             uint16_t statusword = 0;
@@ -95,6 +116,13 @@ extern "C" void app_main(void) {
           },
           "Read DS402 status and active error code: fault");
       root_menu->Insert(
+          "save",
+          [&motor](std::ostream &out) {
+            out << (motor.save_parameters() ? "Parameters saved to non-volatile memory.\n"
+                                            : "Failed to save parameters.\n");
+          },
+          "Persist the DS402 profile to non-volatile memory: save");
+      root_menu->Insert(
           "set_position",
           [&motor](std::ostream &out, float position) {
             out << (motor.move_absolute(position) ? "Absolute position command sent.\n"
@@ -115,8 +143,8 @@ extern "C" void app_main(void) {
         input.Start();
       }).detach();
 
-      logger.info("CLI ready: status, enable, disable, fault, fault_reset, get_position, "
-          "set_position <degrees>, move_incremental <degrees>");
+      logger.info("CLI ready: status, enable, disable, fault, fault_reset, save, get_position, "
+          "zero, profile, set_position <degrees>, move_incremental <degrees>");
   while (true) {
         std::this_thread::sleep_for(1s);
   }
