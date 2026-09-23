@@ -7,9 +7,11 @@
 #include "freertos/task.h"
 
 #include "esp_log.h"
+#include "nvs.hpp"
 
 namespace {
 constexpr char kTag[] = "EyouMotor";
+constexpr char kNvsNamespace[] = "eyou_motor";
 constexpr uint16_t kControlwordIndex = 0x6040;
 constexpr uint16_t kStatuswordIndex = 0x6041;
 constexpr uint16_t kErrorCodeIndex = 0x603F;
@@ -406,6 +408,52 @@ bool EyouMotor::zero(uint32_t timeout_ms) {
 	logger_.info("Software zero position set (actual position {} pulses)", zero_offset_pulses_);
 	return true;
 }
+
+bool EyouMotor::save_zero() {
+	std::lock_guard<std::mutex> lock(transaction_mutex_);
+	if (!zero_offset_pulses_.has_value()) {
+		logger_.warn("No software zero set; nothing to save for node {}", node_id_);
+		return false;
+	}
+	std::error_code ec;
+	espp::Nvs nvs;
+	nvs.init(ec);
+	if (ec) {
+		logger_.error("Failed to init NVS: {}", ec.message());
+		return false;
+	}
+	nvs.set_var(kNvsNamespace, zero_nvs_key(), *zero_offset_pulses_, ec);
+	if (ec) {
+		logger_.error("Failed to save software zero to NVS: {}", ec.message());
+		return false;
+	}
+	logger_.info("Saved software zero ({} pulses) to NVS for node {}", *zero_offset_pulses_, node_id_);
+	return true;
+}
+
+bool EyouMotor::load_zero() {
+	std::lock_guard<std::mutex> lock(transaction_mutex_);
+	std::error_code ec;
+	espp::Nvs nvs;
+	nvs.init(ec);
+	if (ec) {
+		logger_.error("Failed to init NVS: {}", ec.message());
+		return false;
+	}
+	int32_t zero_offset_pulses = 0;
+	nvs.get_var(kNvsNamespace, zero_nvs_key(), zero_offset_pulses, ec);
+	if (ec) {
+		logger_.warn("No saved software zero found in NVS for node {}: {}", node_id_, ec.message());
+		return false;
+	}
+	zero_offset_pulses_ = zero_offset_pulses;
+	logger_.info("Loaded software zero ({} pulses) from NVS for node {}", zero_offset_pulses,
+					 node_id_);
+	return true;
+}
+
+std::string EyouMotor::zero_nvs_key() const { return "zero_" + std::to_string(node_id_); }
+
 
 bool EyouMotor::set_position_limits(float minimum_degrees, float maximum_degrees) {
 	if (minimum_degrees > maximum_degrees) {

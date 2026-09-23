@@ -44,6 +44,18 @@ bool PairedEyouActuator::zero(uint32_t timeout_ms) {
   return primary_ok && secondary_ok;
 }
 
+bool PairedEyouActuator::save_zero() {
+  const bool primary_ok = primary_.save_zero();
+  const bool secondary_ok = secondary_.save_zero();
+  return primary_ok && secondary_ok;
+}
+
+bool PairedEyouActuator::load_zero() {
+  const bool primary_ok = primary_.load_zero();
+  const bool secondary_ok = secondary_.load_zero();
+  return primary_ok && secondary_ok;
+}
+
 bool PairedEyouActuator::get_position(std::array<float, 2> &position_degrees, uint32_t timeout_ms) {
   const bool primary_ok = primary_.get_position(position_degrees[0], timeout_ms);
   const bool secondary_ok = secondary_.get_position(position_degrees[1], timeout_ms);

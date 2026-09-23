@@ -6,6 +6,7 @@
 #include <mutex>
 #include <optional>
 #include <span>
+#include <string>
 
 #include "base_component.hpp"
 #include "can_bus.hpp"
@@ -44,6 +45,10 @@ public:
   // Reset the software zero reference to the current actual position; set_position
   // (move_absolute) is relative to this reference.
   bool zero(uint32_t timeout_ms = 1000);
+  // Persist the current software zero offset to NVS, keyed by node id, so it survives reboots.
+  bool save_zero();
+  // Load a previously saved software zero offset from NVS, keyed by node id.
+  bool load_zero();
   // Restrict move_absolute targets to [minimum_degrees, maximum_degrees].
   bool set_position_limits(float minimum_degrees, float maximum_degrees);
   // Move to an absolute position (degrees), relative to the software zero if set. The target is
@@ -97,6 +102,7 @@ private:
   bool degrees_to_profile_units(float degrees, uint32_t &pulses) const;
   static float pulses_to_degrees(int32_t pulses);
   static float profile_units_to_degrees(uint32_t pulses);
+  std::string zero_nvs_key() const;
 
   CanBus &bus_;
   uint8_t node_id_{1};

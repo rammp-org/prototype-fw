@@ -1,5 +1,6 @@
 ## IDF Component Manager Manifest File
 dependencies:
   espp/base_component: '>=1.0'
+  espp/nvs: '>=1.0'
   idf:
     version: '>=5.3'

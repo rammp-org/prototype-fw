@@ -59,6 +59,20 @@ extern "C" void app_main(void) {
       },
       "Set the software zero reference for both actuators: zero");
   root_menu->Insert(
+      "save_zero",
+      [&pair](std::ostream &out) {
+        out << (pair.save_zero() ? "Software zero saved to NVS.\n"
+                                 : "Failed to save software zero to NVS.\n");
+      },
+      "Persist both actuators' software zero to NVS: save_zero");
+  root_menu->Insert(
+      "load_zero",
+      [&pair](std::ostream &out) {
+        out << (pair.load_zero() ? "Software zero loaded from NVS.\n"
+                                 : "Failed to load software zero from NVS.\n");
+      },
+      "Load both actuators' software zero from NVS: load_zero");
+  root_menu->Insert(
       "enable",
       [&pair](std::ostream &out) {
         out << (pair.enable_drive() ? "Drives enabled.\n" : "Failed to enable drives.\n");
@@ -106,7 +120,7 @@ extern "C" void app_main(void) {
     input.Start();
   }).detach();
 
-  logger.info("CLI ready: get_position, zero, enable, disable, fault_reset, "
+  logger.info("CLI ready: get_position, zero, save_zero, load_zero, enable, disable, fault_reset, "
               "set_position <degrees>, move_incremental <degrees>, "
               "set_limits <minimum_degrees> <maximum_degrees>");
   while (true) {

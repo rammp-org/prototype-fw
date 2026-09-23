@@ -2,3 +2,6 @@ CONFIG_IDF_TARGET="esp32p4"
 CONFIG_ESP32P4_SELECTS_REV_LESS_V3=y
 CONFIG_ESP32P4_REV_MIN_100=y
 CONFIG_ESP_DEFAULT_CPU_FREQ_MHZ_360=y
+# app_main runs CANopen SDO transactions with fmt-based hex-dump logging directly
+# on the "main" task; the default 3584-byte stack overflows under that load.
+CONFIG_ESP_MAIN_TASK_STACK_SIZE=8192

@@ -13,7 +13,7 @@ using namespace std::chrono_literals;
 namespace {
 constexpr gpio_num_t kCanRxGpio = GPIO_NUM_16;
 constexpr gpio_num_t kCanTxGpio = GPIO_NUM_17;
-constexpr uint8_t kNodeId = 1;
+constexpr uint8_t kNodeId = 2;
 }
 
 extern "C" void app_main(void) {
@@ -53,6 +53,20 @@ extern "C" void app_main(void) {
                                  : "Failed to set software zero position.\n");
           },
           "Set the software zero reference to the current position: zero");
+      root_menu->Insert(
+          "save_zero",
+          [&motor](std::ostream &out) {
+            out << (motor.save_zero() ? "Software zero saved to NVS.\n"
+                                     : "Failed to save software zero to NVS.\n");
+          },
+          "Persist the current software zero to NVS: save_zero");
+      root_menu->Insert(
+          "load_zero",
+          [&motor](std::ostream &out) {
+            out << (motor.load_zero() ? "Software zero loaded from NVS.\n"
+                                     : "Failed to load software zero from NVS.\n");
+          },
+          "Load a previously saved software zero from NVS: load_zero");
       root_menu->Insert(
           "profile",
           [&motor](std::ostream &out) {
@@ -144,7 +158,7 @@ extern "C" void app_main(void) {
       }).detach();
 
       logger.info("CLI ready: status, enable, disable, fault, fault_reset, save, get_position, "
-          "zero, profile, set_position <degrees>, move_incremental <degrees>");
+          "zero, save_zero, load_zero, profile, set_position <degrees>, move_incremental <degrees>");
   while (true) {
         std::this_thread::sleep_for(1s);
   }

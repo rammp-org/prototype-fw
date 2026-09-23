@@ -27,6 +27,10 @@ public:
   // True if either motor reports the DS402 Fault state (or its status can't be read).
   bool is_faulted(uint32_t timeout_ms = 100);
   bool zero(uint32_t timeout_ms = 1000);
+  // Persist both motors' software zero offsets to NVS, keyed by node id.
+  bool save_zero();
+  // Load both motors' software zero offsets from NVS, keyed by node id.
+  bool load_zero();
   // Restrict set_position/move_incremental targets to [minimum_degrees, maximum_degrees] on the
   // primary; the secondary is limited to the negated range.
   bool set_position_limits(float minimum_degrees, float maximum_degrees);
