@@ -2,6 +2,7 @@
 
 #include <array>
 #include <cstdint>
+#include <limits>
 #include <mutex>
 #include <optional>
 #include <span>
@@ -30,6 +31,8 @@ public:
   EyouMotor(const EyouMotor &) = delete;
   EyouMotor &operator=(const EyouMotor &) = delete;
 
+  uint8_t node_id() const { return node_id_; }
+
   // Send a raw CAN frame on the bus (bypasses the CANopen/DS402 layer).
   bool send_raw(uint32_t can_id, std::span<const uint8_t> data, bool extended = false,
                 bool rtr = false) const;
@@ -41,7 +44,10 @@ public:
   // Reset the software zero reference to the current actual position; set_position
   // (move_absolute) is relative to this reference.
   bool zero(uint32_t timeout_ms = 1000);
-  // Move to an absolute position (degrees), relative to the software zero if set.
+  // Restrict move_absolute targets to [minimum_degrees, maximum_degrees].
+  bool set_position_limits(float minimum_degrees, float maximum_degrees);
+  // Move to an absolute position (degrees), relative to the software zero if set. The target is
+  // clamped to the configured position limits (see set_position_limits).
   // Retries up to 3 times if a send/acknowledge step fails.
   bool move_absolute(float target_degrees, bool immediate = true);
   // Move by a relative position increment (degrees) from the current position.
@@ -97,5 +103,7 @@ private:
   QueueHandle_t receive_queue_{nullptr};
   // Unset means get_position/move_absolute operate on the absolute encoder position.
   std::optional<int32_t> zero_offset_pulses_;
+  float minimum_position_degrees_{-std::numeric_limits<float>::infinity()};
+  float maximum_position_degrees_{std::numeric_limits<float>::infinity()};
   mutable std::mutex transaction_mutex_;
 };

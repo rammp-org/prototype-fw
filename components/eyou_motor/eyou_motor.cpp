@@ -407,10 +407,27 @@ bool EyouMotor::zero(uint32_t timeout_ms) {
 	return true;
 }
 
+bool EyouMotor::set_position_limits(float minimum_degrees, float maximum_degrees) {
+	if (minimum_degrees > maximum_degrees) {
+		logger_.error("Position minimum {} exceeds maximum {}", minimum_degrees, maximum_degrees);
+		return false;
+	}
+	minimum_position_degrees_ = minimum_degrees;
+	maximum_position_degrees_ = maximum_degrees;
+	logger_.info("Position limits set to [{}, {}] degrees", minimum_degrees, maximum_degrees);
+	return true;
+}
+
 bool EyouMotor::move_absolute(float target_degrees, bool immediate) {
 	std::lock_guard<std::mutex> lock(transaction_mutex_);
+	const float limited_target_degrees =
+			std::clamp(target_degrees, minimum_position_degrees_, maximum_position_degrees_);
+	if (limited_target_degrees != target_degrees) {
+		logger_.warn("Position {} degrees clamped to {} degrees", target_degrees,
+					 limited_target_degrees);
+	}
 	int32_t target_pulses = 0;
-	if (!degrees_to_pulses(target_degrees, target_pulses)) {
+	if (!degrees_to_pulses(limited_target_degrees, target_pulses)) {
 		return false;
 	}
 	const int64_t absolute_pulses = static_cast<int64_t>(target_pulses) + zero_offset_pulses_.value_or(0);
