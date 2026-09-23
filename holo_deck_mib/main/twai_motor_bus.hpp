@@ -32,6 +32,13 @@ public:
     /// missing motor fails the single-shot attempt just as fast (no ACK), so a
     /// 50 Hz tick's four set-points stay well inside the period either way.
     int tx_timeout_ms{2};
+    /// After a request times out, how long its reply may still turn up. A
+    /// reply carries only the motor id and the command byte, so one arriving
+    /// once the NEXT request to that motor / command is armed would be taken
+    /// for its answer (a repeated 0x81 stop, typically); such a request waits
+    /// out this window first, and a reply matching the timed-out request that
+    /// arrives inside it is discarded. An RMD answers well inside 1 ms.
+    uint32_t stale_reply_grace_ms{5};
     espp::Logger::Verbosity log_level{espp::Logger::Verbosity::WARN};
   };
 
@@ -61,10 +68,15 @@ public:
   uint32_t unexpected_rx_count() const { return unexpected_rx_.load(); }
   /// Transmits that failed (no ACK on the bus, bit error, ...).
   uint32_t tx_error_count() const { return tx_errors_.load(); }
+  /// Late replies to requests that had already timed out, discarded.
+  uint32_t stale_reply_count() const { return stale_rx_.load(); }
 
 protected:
   static uint32_t tx_id_for(const MotorPacket &command);
   static bool reply_matches(const MotorPacket &command, const espp::Twai::Message &m);
+  /// Whether a reply to \p a would also pass as a reply to \p b (same bus id
+  /// and command byte).
+  static bool same_reply_key(const MotorPacket &a, const MotorPacket &b);
   bool transmit_locked(const MotorPacket &command);
   void on_receive(const espp::Twai::Message &m);
 
@@ -78,9 +90,14 @@ protected:
   bool waiting_{false};
   std::optional<MotorPacket> pending_command_{}; ///< what the waiter sent
   std::optional<MotorPacket> reply_{};           ///< the matching reply, once seen
+  /// The last request that timed out, while its reply could still turn up
+  /// (until quarantine_until_); see Config::stale_reply_grace_ms.
+  std::optional<MotorPacket> quarantined_command_{};
+  std::chrono::steady_clock::time_point quarantine_until_{};
 
   std::atomic<uint32_t> unexpected_rx_{0};
   std::atomic<uint32_t> tx_errors_{0};
+  std::atomic<uint32_t> stale_rx_{0};
 
   /// Declared LAST on purpose: members are destroyed in reverse order, so the
   /// transport (and its receive task, which calls on_receive() and touches the

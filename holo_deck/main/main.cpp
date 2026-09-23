@@ -109,6 +109,10 @@ extern "C" void app_main(void) {
       .joystick_release_timeout = hw_config::kJoystickReleaseTimeout,
       .status_stale_timeout = hw_config::kMotorStatusStaleTimeout,
       .status_read_timeout_ms = hw_config::kMotorStatusReadTimeoutMs,
+      // MotorCanBus queues set-points (fire-and-forget): on a STOP / DISABLE the
+      // controller drains what is still queued (bounded, ~1 ms) so its stop
+      // frames go out on an empty queue with nothing older behind them
+      .flush_pending_commands = [&can_bus]() { can_bus.flush_pending(); },
       .log_level = espp::Logger::Verbosity::INFO,
   });
 

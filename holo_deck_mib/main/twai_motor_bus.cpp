@@ -1,6 +1,7 @@
 #include "twai_motor_bus.hpp"
 
 #include <chrono>
+#include <thread>
 
 namespace {
 constexpr size_t kPacketLength = 8;
@@ -51,6 +52,10 @@ bool TwaiMotorBus::reply_matches(const MotorPacket &command, const espp::Twai::M
   return m.id == kReplyBase + command.id || m.id == kCommandBase + command.id;
 }
 
+bool TwaiMotorBus::same_reply_key(const MotorPacket &a, const MotorPacket &b) {
+  return tx_id_for(a) == tx_id_for(b) && a.data[0] == b.data[0];
+}
+
 bool TwaiMotorBus::transmit_locked(const MotorPacket &command) {
   if (command.id < 1 || command.id > 32 || command.length > kPacketLength) {
     logger_.error("Invalid motor packet: id={} length={}", command.id, command.length);
@@ -74,6 +79,16 @@ bool TwaiMotorBus::transmit_locked(const MotorPacket &command) {
 void TwaiMotorBus::on_receive(const espp::Twai::Message &m) {
   // Twai receive task context: hand a matching reply to the waiter, count the rest
   std::lock_guard<std::mutex> lock(reply_mutex_);
+  if (quarantined_command_) {
+    if (std::chrono::steady_clock::now() >= quarantine_until_) {
+      quarantined_command_.reset(); // window over: nothing late is coming any more
+    } else if (reply_matches(*quarantined_command_, m)) {
+      // the late reply to a request that already timed out: nobody's answer
+      quarantined_command_.reset();
+      stale_rx_.fetch_add(1);
+      return;
+    }
+  }
   if (waiting_ && pending_command_ && !reply_ && reply_matches(*pending_command_, m)) {
     MotorPacket packet{};
     packet.id = pending_command_->id; // logical motor id, as the actuator expects
@@ -94,12 +109,24 @@ bool TwaiMotorBus::send(const MotorPacket &command) {
 bool TwaiMotorBus::request(const MotorPacket &command, MotorPacket &response, uint32_t timeout_ms) {
   std::lock_guard<std::mutex> lock(transaction_mutex_);
   {
-    std::lock_guard<std::mutex> rlock(reply_mutex_);
+    std::unique_lock<std::mutex> rlock(reply_mutex_);
+    // A reply to the previous, timed-out request to this motor / command would
+    // pass for this one's: wait out the window in which it can still arrive
+    // (on_receive() discards it meanwhile) before arming. Only ever paid right
+    // after a failure, and bounded by Config::stale_reply_grace_ms.
+    if (quarantined_command_ && same_reply_key(*quarantined_command_, command)) {
+      const auto until = quarantine_until_;
+      rlock.unlock();
+      std::this_thread::sleep_until(until);
+      rlock.lock();
+      quarantined_command_.reset();
+    }
     pending_command_ = command;
     reply_.reset();
     waiting_ = true;
   }
-  bool ok = transmit_locked(command);
+  const bool sent = transmit_locked(command);
+  bool ok = sent;
   if (ok) {
     std::unique_lock<std::mutex> rlock(reply_mutex_);
     ok = reply_cv_.wait_for(rlock, std::chrono::milliseconds(timeout_ms),
@@ -109,6 +136,12 @@ bool TwaiMotorBus::request(const MotorPacket &command, MotorPacket &response, ui
   }
   std::lock_guard<std::mutex> rlock(reply_mutex_);
   waiting_ = false;
+  if (sent && !ok) {
+    // the frame went out but no reply came in time: its reply may still show up
+    quarantined_command_ = command;
+    quarantine_until_ = std::chrono::steady_clock::now() +
+                        std::chrono::milliseconds(config_.stale_reply_grace_ms);
+  }
   pending_command_.reset();
   reply_.reset();
   return ok;

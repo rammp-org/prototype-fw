@@ -30,6 +30,12 @@ public:
   bool start(uint32_t bitrate = 1'000'000);
   bool send(const MotorPacket &command);
   bool request(const MotorPacket &command, MotorPacket &response, uint32_t timeout_ms = 100);
+  // Drain every frame still queued in the driver (bounded: single-shot
+  // transmit empties the 4-frame backlog within ~1 ms), for a mode transition
+  // that must not let an older set-point execute after the stop frames that
+  // follow: those then go out on an empty queue. Returns false if the queue
+  // did not drain in time (a wedged controller).
+  bool flush_pending();
 
 private:
   static bool on_receive(twai_node_handle_t handle, const twai_rx_done_event_data_t *event,

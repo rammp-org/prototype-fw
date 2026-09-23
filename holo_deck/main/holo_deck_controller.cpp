@@ -12,6 +12,7 @@ HoloDeckController::HoloDeckController(const Config &config)
     , joystick_release_timeout_(config.joystick_release_timeout)
     , status_stale_timeout_(config.status_stale_timeout)
     , status_read_timeout_ms_(config.status_read_timeout_ms)
+    , flush_pending_commands_(config.flush_pending_commands)
     , max_speed_mps_(clamp_positive(config.max_speed_mps))
     , max_rotation_rpm_(clamp_positive(config.max_rotation_rpm))
     , twist_rotation_scale_(clamp_positive(config.twist_rotation_scale))
@@ -121,6 +122,7 @@ void HoloDeckController::stop() {
   vx_mps_ = 0.0f;
   vy_mps_ = 0.0f;
   w_rpm_ = 0.0f;
+  flush_pending_ = true; // queued drive frames must not run after this stop
   logger_.info("E-STOP: commanding zero velocity");
 }
 
@@ -132,7 +134,20 @@ void HoloDeckController::disable_motors() {
   vy_mps_ = 0.0f;
   w_rpm_ = 0.0f;
   disable_sent_ = false; // the control loop issues the one-shot motor stop
+  flush_pending_ = true; // queued drive frames must not run after the stop
   logger_.info("Motors DISABLED at the control level");
+}
+
+void HoloDeckController::flush_transport_if_requested() {
+  bool flush = false;
+  {
+    std::lock_guard<std::mutex> lock(mutex_);
+    flush = flush_pending_;
+    flush_pending_ = false;
+  }
+  if (flush && flush_pending_commands_) {
+    flush_pending_commands_();
+  }
 }
 
 void HoloDeckController::set_enabled(bool enabled) {
@@ -276,11 +291,13 @@ bool HoloDeckController::control_step() {
   // stops the motors - they can be driving for at most one control period,
   // never indefinitely.
   if (mode == Mode::STOPPED) {
+    flush_transport_if_requested(); // first tick after the stop: drop queued set-points
     send_zeros();
     return false; // keep the timer running
   }
   if (mode == Mode::DISABLED) {
     if (disable_now) {
+      flush_transport_if_requested(); // first tick after the disable: drop queued set-points
       const bool all_stopped = send_disable();
       std::lock_guard<std::mutex> lock(mutex_);
       if (mode_ == Mode::DISABLED) {
@@ -330,11 +347,14 @@ bool HoloDeckController::control_step() {
     send_failing_ = !success;
   }
   // A stop() / disable_motors() that landed while the frames above were on the
-  // wire is enacted NOW rather than on the next tick, so the stale drive frames
-  // are overridden within the same control period.
+  // wire is enacted NOW rather than on the next tick: the drive frames just
+  // queued are dropped from the transport and overridden within the same
+  // control period.
   if (mode_after == Mode::STOPPED) {
+    flush_transport_if_requested();
     send_zeros();
   } else if (mode_after == Mode::DISABLED) {
+    flush_transport_if_requested();
     send_disable();
   }
   return false; // keep the timer running

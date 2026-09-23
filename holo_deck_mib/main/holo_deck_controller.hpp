@@ -2,6 +2,7 @@
 
 #include <array>
 #include <chrono>
+#include <functional>
 #include <mutex>
 
 #include "base_component.hpp"
@@ -110,6 +111,13 @@ public:
                                                         ///< timeout; bounds how long
                                                         ///< the shared CAN mutex is
                                                         ///< held by a status poll.
+    /// Optional transport hook: make sure no set-point the transport still has
+    /// queued can execute after the stop frames that follow (drop them, or
+    /// drain them within a bound so the stop frames go out on an empty queue).
+    /// Called on each transition into STOPPED / DISABLED, right before the
+    /// stop frames. Leave unset for a transport that sends synchronously
+    /// (nothing is ever left queued).
+    std::function<void()> flush_pending_commands{nullptr};
     espp::Logger::Verbosity log_level{espp::Logger::Verbosity::WARN};
   };
 
@@ -194,6 +202,9 @@ protected:
   /// How long a motor gets to acknowledge its stop. Only paid in DISABLED (and
   /// once on the transition into it), where the loop has nothing else to do.
   static constexpr uint32_t kStopAckTimeoutMs = 10;
+  /// Run Config::flush_pending_commands once if a stop() / disable_motors()
+  /// asked for it (before that transition's stop frames go out).
+  void flush_transport_if_requested();
   static float clamp_positive(float value);
 
   HoloDeckPlatform &platform_;
@@ -203,10 +214,12 @@ protected:
   std::chrono::milliseconds joystick_release_timeout_;
   std::chrono::milliseconds status_stale_timeout_;
   uint32_t status_read_timeout_ms_;
+  std::function<void()> flush_pending_commands_; ///< Config::flush_pending_commands
 
   mutable std::mutex mutex_;
   Mode mode_{Mode::STOPPED};
   bool disable_sent_{false};              ///< the one-shot motor stop for DISABLED was sent
+  bool flush_pending_{false}; ///< a STOP / DISABLE landed: flush the transport before enacting it
   bool require_joystick_recenter_{false}; ///< ignore the joystick until it re-centers
   uint32_t joystick_sample_seq_{0};       ///< +1 per set_joystick_input()
   uint32_t recenter_after_seq_{0};        ///< the guard clears only on a LATER sample

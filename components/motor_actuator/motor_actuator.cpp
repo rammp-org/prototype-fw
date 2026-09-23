@@ -84,8 +84,33 @@ bool MotorCanBus::start(uint32_t bitrate) {
 
 bool MotorCanBus::send(const MotorPacket &command) {
   std::lock_guard<std::mutex> lock(transaction_mutex_);
-  // Fire-and-forget: enqueue non-blocking, drop if the TX queue is full.
+  // Fire-and-forget: enqueue non-blocking, drop if the TX queue is full. A
+  // set-point that is dropped or still queued is superseded by the next tick;
+  // a mode transition that must not let a queued set-point run after its stop
+  // calls flush_pending() first.
   return send_unlocked(command, /*wait_for_queue_space=*/false);
+}
+
+bool MotorCanBus::flush_pending() {
+  std::lock_guard<std::mutex> lock(transaction_mutex_);
+  if (node_ == nullptr) {
+    return false;
+  }
+  // The driver has no way to drop queued frames (and a disable/enable cycle
+  // RESUMES the pending transaction on IDF 6.x, it does not abort it), but the
+  // backlog is bounded: the node transmits single-shot (fail_retry_cnt 0, no
+  // hardware retry), so once a frame reaches the controller it completes or
+  // fails within about one frame time, and the whole backlog (3 queued + 1 in
+  // flight) is gone within ~1 ms at 1 Mbit/s. Wait that out: the caller's stop
+  // frames then find an empty queue, go out next, and nothing older follows.
+  static constexpr int kDrainTimeoutMs = 5;
+  const esp_err_t result = twai_node_transmit_wait_all_done(node_, kDrainTimeoutMs);
+  if (result != ESP_OK) {
+    logger_.warn("Motor CAN TX queue did not drain within {} ms: {}", kDrainTimeoutMs,
+                 esp_err_to_name(result));
+    return false;
+  }
+  return true;
 }
 
 bool MotorCanBus::send_unlocked(const MotorPacket &command, bool wait_for_queue_space) {

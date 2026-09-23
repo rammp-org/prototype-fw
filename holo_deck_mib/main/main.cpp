@@ -130,6 +130,9 @@ extern "C" void app_main(void) {
       .joystick_release_timeout = hw_config::kJoystickReleaseTimeout,
       .status_stale_timeout = hw_config::kMotorStatusStaleTimeout,
       .status_read_timeout_ms = hw_config::kMotorStatusReadTimeoutMs,
+      // no flush hook: TwaiMotorBus transmits synchronously (a frame completes
+      // on the bus before the next is queued), so no set-point is ever left
+      // queued behind a stop
       .log_level = espp::Logger::Verbosity::INFO,
   });
 
