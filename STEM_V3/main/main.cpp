@@ -243,6 +243,24 @@ std::unique_ptr<cli::Menu> make_cli_menu(stem::StemController &controller,
       },
       "Persist every pair's software zero to NVS: save_zero");
   menu->Insert(
+      "read_zero",
+      [&controller](std::ostream &out) {
+        std::array<std::array<int32_t, 2>, stem::kPairCount> zero_pulses{};
+        if (!controller.read_zero(zero_pulses)) {
+          out << "Failed to read one or more saved software zeros from NVS.\n";
+          return;
+        }
+        const auto &config = controller.config();
+        const PairedEyouActuator *pairs[] = {&config.left, &config.right, &config.seat};
+        for (uint8_t i = 0; i < stem::kPairCount; ++i) {
+          out << stem::to_string(static_cast<stem::Pair>(i)) << " (nodes "
+              << static_cast<int>(pairs[i]->primary_id()) << ", "
+              << static_cast<int>(pairs[i]->secondary_id()) << "): " << zero_pulses[i][0]
+              << ", " << zero_pulses[i][1] << " pulses\n";
+        }
+      },
+      "Read every motor's saved software zero without loading it: read_zero");
+  menu->Insert(
       "load_zero",
       [&controller](std::ostream &out) {
         out << (controller.load_zero() ? "All pairs' zero loaded from NVS.\n"
@@ -720,7 +738,7 @@ extern "C" void app_main(void) {
     input.Start();
   }).detach();
   logger.info("CLI ready: set <pair> <deg>, move <x> <y>, home, tilt <deg>, stop, get, status, "
-              "release, zero <pair|all>, zero_align <pair|all>, save_zero, "
+              "release, zero <pair|all>, zero_align <pair|all>, save_zero, read_zero, "
               "load_zero, ik <x> <y>, ik_ref <x> <y>, set_base <deg>, set_seat_swivel <deg>, "
               "get_base, get_seat_swivel");
 

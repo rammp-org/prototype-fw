@@ -431,6 +431,25 @@ bool EyouMotor::save_zero() {
 	return true;
 }
 
+bool EyouMotor::read_saved_zero(int32_t &zero_offset_pulses) {
+	std::lock_guard<std::mutex> lock(transaction_mutex_);
+	std::error_code ec;
+	espp::Nvs nvs;
+	nvs.init(ec);
+	if (ec) {
+		logger_.error("Failed to init NVS: {}", ec.message());
+		return false;
+	}
+	int32_t saved_zero_offset_pulses = 0;
+	nvs.get_var(kNvsNamespace, zero_nvs_key(), saved_zero_offset_pulses, ec);
+	if (ec) {
+		logger_.warn("No saved software zero found in NVS for node {}: {}", node_id_, ec.message());
+		return false;
+	}
+	zero_offset_pulses = saved_zero_offset_pulses;
+	return true;
+}
+
 bool EyouMotor::load_zero() {
 	std::lock_guard<std::mutex> lock(transaction_mutex_);
 	std::error_code ec;

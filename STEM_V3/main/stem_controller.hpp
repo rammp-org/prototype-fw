@@ -121,6 +121,8 @@ public:
   bool zero(std::optional<Pair> pair, bool align);
   /// Persist every pair's software zero to NVS.
   bool save_zero();
+  /// Read every motor's saved software zero without changing active offsets.
+  bool read_zero(std::array<std::array<int32_t, 2>, kPairCount> &zero_offset_pulses);
   /// Load every pair's software zero from NVS. Clears the tracked target.
   bool load_zero();
 

@@ -50,6 +50,12 @@ bool PairedEyouActuator::save_zero() {
   return primary_ok && secondary_ok;
 }
 
+bool PairedEyouActuator::read_zero(std::array<int32_t, 2> &zero_offset_pulses) {
+  const bool primary_ok = primary_.read_saved_zero(zero_offset_pulses[0]);
+  const bool secondary_ok = secondary_.read_saved_zero(zero_offset_pulses[1]);
+  return primary_ok && secondary_ok;
+}
+
 bool PairedEyouActuator::load_zero() {
   const bool primary_ok = primary_.load_zero();
   const bool secondary_ok = secondary_.load_zero();

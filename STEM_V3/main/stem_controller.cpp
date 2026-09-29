@@ -260,6 +260,16 @@ bool StemController::save_zero() {
   return ok;
 }
 
+bool StemController::read_zero(
+    std::array<std::array<int32_t, 2>, kPairCount> &zero_offset_pulses) {
+  std::lock_guard<std::mutex> lock(mutex_);
+  bool ok = true;
+  for (uint8_t i = 0; i < kPairCount; ++i) {
+    ok = actuator(static_cast<Pair>(i)).read_zero(zero_offset_pulses[i]) && ok;
+  }
+  return ok;
+}
+
 bool StemController::load_zero() {
   std::lock_guard<std::mutex> lock(mutex_);
   bool ok = true;

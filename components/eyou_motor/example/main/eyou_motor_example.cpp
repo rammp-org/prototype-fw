@@ -13,7 +13,7 @@ using namespace std::chrono_literals;
 namespace {
 constexpr gpio_num_t kCanRxGpio = GPIO_NUM_16;
 constexpr gpio_num_t kCanTxGpio = GPIO_NUM_17;
-constexpr uint8_t kNodeId = 2;
+constexpr uint8_t kNodeId = 103;
 }
 
 extern "C" void app_main(void) {
@@ -60,6 +60,21 @@ extern "C" void app_main(void) {
                                      : "Failed to save software zero to NVS.\n");
           },
           "Persist the current software zero to NVS: save_zero");
+      root_menu->Insert(
+          "read_zero",
+          [&motor](std::ostream &out) {
+            int32_t zero_pulses = 0;
+            if (!motor.read_saved_zero(zero_pulses)) {
+              out << "Failed to read saved software zero from NVS.\n";
+              return;
+            }
+            const float zero_degrees = static_cast<float>(zero_pulses) *
+                                       EyouMotor::kDegreesPerOutputTurn /
+                                       EyouMotor::kPulsesPerOutputTurn;
+            out << "Saved software zero: " << zero_pulses << " pulses (" << zero_degrees
+                << " deg absolute encoder position).\n";
+          },
+          "Read the persisted software zero without loading it: read_zero");
       root_menu->Insert(
           "load_zero",
           [&motor](std::ostream &out) {
@@ -157,8 +172,9 @@ extern "C" void app_main(void) {
         input.Start();
       }).detach();
 
-      logger.info("CLI ready: status, enable, disable, fault, fault_reset, save, get_position, "
-          "zero, save_zero, load_zero, profile, set_position <degrees>, move_incremental <degrees>");
+        logger.info("CLI ready: status, enable, disable, fault, fault_reset, save, get_position, "
+          "zero, save_zero, read_zero, load_zero, profile, set_position <degrees>, "
+          "move_incremental <degrees>");
   while (true) {
         std::this_thread::sleep_for(1s);
   }

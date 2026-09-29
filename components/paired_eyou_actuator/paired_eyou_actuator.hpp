@@ -29,6 +29,8 @@ public:
   bool zero(uint32_t timeout_ms = 1000);
   // Persist both motors' software zero offsets to NVS, keyed by node id.
   bool save_zero();
+  // Read both saved software zero offsets without changing either active offset.
+  bool read_zero(std::array<int32_t, 2> &zero_offset_pulses);
   // Load both motors' software zero offsets from NVS, keyed by node id.
   bool load_zero();
   // Restrict set_position/move_incremental targets to [minimum_degrees, maximum_degrees] on the

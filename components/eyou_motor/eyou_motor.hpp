@@ -47,6 +47,8 @@ public:
   bool zero(uint32_t timeout_ms = 1000);
   // Persist the current software zero offset to NVS, keyed by node id, so it survives reboots.
   bool save_zero();
+  // Read the persisted software zero offset without changing the active offset.
+  bool read_saved_zero(int32_t &zero_offset_pulses);
   // Load a previously saved software zero offset from NVS, keyed by node id.
   bool load_zero();
   // Restrict move_absolute targets to [minimum_degrees, maximum_degrees].

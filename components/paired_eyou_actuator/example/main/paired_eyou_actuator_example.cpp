@@ -66,6 +66,19 @@ extern "C" void app_main(void) {
       },
       "Persist both actuators' software zero to NVS: save_zero");
   root_menu->Insert(
+      "read_zero",
+      [&pair](std::ostream &out) {
+        std::array<int32_t, 2> zero_pulses{};
+        if (!pair.read_zero(zero_pulses)) {
+          out << "Failed to read one or more saved software zeros from NVS.\n";
+          return;
+        }
+        out << "primary (node " << static_cast<int>(pair.primary_id()) << "): " << zero_pulses[0]
+            << " pulses, secondary (node " << static_cast<int>(pair.secondary_id()) << "): "
+            << zero_pulses[1] << " pulses\n";
+      },
+      "Read both saved software zero offsets without loading them: read_zero");
+  root_menu->Insert(
       "load_zero",
       [&pair](std::ostream &out) {
         out << (pair.load_zero() ? "Software zero loaded from NVS.\n"
@@ -120,7 +133,7 @@ extern "C" void app_main(void) {
     input.Start();
   }).detach();
 
-  logger.info("CLI ready: get_position, zero, save_zero, load_zero, enable, disable, fault_reset, "
+  logger.info("CLI ready: get_position, zero, save_zero, read_zero, load_zero, enable, disable, fault_reset, "
               "set_position <degrees>, move_incremental <degrees>, "
               "set_limits <minimum_degrees> <maximum_degrees>");
   while (true) {
