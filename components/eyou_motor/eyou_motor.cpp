@@ -593,13 +593,17 @@ bool EyouMotor::request_sdo_u32(uint16_t index, uint8_t expected_response_comman
 
 bool EyouMotor::get_position(float &position_degrees, uint32_t timeout_ms) {
 	std::lock_guard<std::mutex> lock(transaction_mutex_);
-	uint32_t raw_position = 0;
-	if (!request_sdo_u32(kPositionActualIndex, 0x43, raw_position, timeout_ms)) {
-		return false;
+	constexpr uint8_t kMaxAttempts = 3;
+	for (uint8_t attempt = 0; attempt < kMaxAttempts; ++attempt) {
+		uint32_t raw_position = 0;
+		if (!request_sdo_u32(kPositionActualIndex, 0x43, raw_position, timeout_ms)) {
+			continue;
+		}
+		const int32_t relative_pulses = static_cast<int32_t>(raw_position) - zero_offset_pulses_.value_or(0);
+		position_degrees = pulses_to_degrees(relative_pulses);
+		return true;
 	}
-	const int32_t relative_pulses = static_cast<int32_t>(raw_position) - zero_offset_pulses_.value_or(0);
-	position_degrees = pulses_to_degrees(relative_pulses);
-	return true;
+	return false;
 }
 
 bool EyouMotor::get_statusword(uint16_t &statusword, uint32_t timeout_ms) {

@@ -55,12 +55,12 @@ constexpr gpio_num_t kCanRxGpio = GPIO_NUM_17;
 
 // Base/seat swivel: two MotorActuator (RMD-style) motors sharing the same CAN
 // bus as the Eyou linkage motors. MotorActuator's own gear_ratio_ (36:1) is
-// internal to that actuator; on top of it an external 1:7 gear stage drives
-// the swivel, so the actuator's own output shaft must turn 7 deg for every
-// 1 deg of swivel (motor rotates 70 deg -> swivel rotates 10 deg).
+// internal to that actuator; on top of it an external 100:12 gear ratio drives
+// the swivel, so the actuator output shaft turns 100 deg for every 12 deg of
+// swivel (motor rotates 100 deg -> swivel rotates 12 deg).
 constexpr uint8_t kBaseSwivelMotorId = 5;
 constexpr uint8_t kSeatSwivelMotorId = 6;
-constexpr float kSwivelGearRatio = 7.0f;
+constexpr float kSwivelGearRatio = 100.0f / 12.0f;
 constexpr float kSwivelDefaultSpeedRpm = 10.0f;
 
 using Transport = stem::StemModule::Transport;
