@@ -1,0 +1,3 @@
+[submodule "external/rammp-rtps"]
+	path = external/rammp-rtps
+	url = https://github.com/rammp-org/rammp-rtps.git

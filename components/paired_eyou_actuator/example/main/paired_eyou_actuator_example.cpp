@@ -86,6 +86,15 @@ extern "C" void app_main(void) {
       },
       "Load both actuators' software zero from NVS: load_zero");
   root_menu->Insert(
+      "check_zero",
+      [&pair](std::ostream &out) {
+        float mismatch = 0.0f;
+        const bool ok = pair.check_mirrored(1.0f, mismatch);
+        out << (ok ? "Pair mirrored, mismatch=" : "ERROR: pair mismatch=") << mismatch
+            << " deg (tolerance 1 deg)\n";
+      },
+      "Check primary ~= -secondary within 1 deg: check_zero");
+  root_menu->Insert(
       "enable",
       [&pair](std::ostream &out) {
         out << (pair.enable_drive() ? "Drives enabled.\n" : "Failed to enable drives.\n");
@@ -133,7 +142,7 @@ extern "C" void app_main(void) {
     input.Start();
   }).detach();
 
-  logger.info("CLI ready: get_position, zero, save_zero, read_zero, load_zero, enable, disable, fault_reset, "
+  logger.info("CLI ready: get_position, zero, save_zero, read_zero, load_zero, check_zero, enable, disable, fault_reset, "
               "set_position <degrees>, move_incremental <degrees>, "
               "set_limits <minimum_degrees> <maximum_degrees>");
   while (true) {

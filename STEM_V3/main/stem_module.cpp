@@ -63,6 +63,9 @@ std::vector<uint8_t> StemModule::error_for(Msg request, Result result,
   case Result::ActuatorFailed:
     errc = std::errc::io_error;
     break;
+  case Result::ZeroMismatch:
+    errc = std::errc::operation_not_permitted;
+    break;
   case Result::InvalidArgument:
   case Result::Ok:
     break;

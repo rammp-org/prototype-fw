@@ -8,9 +8,15 @@ set(EXTRA_COMPONENT_DIRS
   "${CMAKE_CURRENT_LIST_DIR}/../components"
 )
 
+if(EXISTS "${CMAKE_CURRENT_LIST_DIR}/../external/rammp-rtps/components")
+  list(APPEND EXTRA_COMPONENT_DIRS "${CMAKE_CURRENT_LIST_DIR}/../external/rammp-rtps/components")
+else()
+  message(FATAL_ERROR "Missing external/rammp-rtps submodule. Run: git submodule update --init --recursive")
+endif()
+
 set(
   COMPONENTS
-  "main esptool_py esp_driver_twai esp32-p4-eth"
+  "main esptool_py esp_driver_twai esp32-p4-eth rammp_rtps_messages"
   CACHE STRING
   "List of components to include"
   )

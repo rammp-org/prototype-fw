@@ -34,9 +34,11 @@
 #include "eyou_motor.hpp"
 #include "ik_5bar.hpp"
 #include "logger.hpp"
+#include "messages.hpp"
 #include "motor_actuator.hpp"
 #include "ota.hpp"
 #include "paired_eyou_actuator.hpp"
+#include "rtps_participant.hpp"
 #include "stem_controller.hpp"
 #include "stem_module.hpp"
 #include "stream_frame.hpp"
@@ -265,8 +267,19 @@ std::unique_ptr<cli::Menu> make_cli_menu(stem::StemController &controller,
       [&controller](std::ostream &out) {
         out << (controller.load_zero() ? "All pairs' zero loaded from NVS.\n"
                                        : "Zero load failed for one or more pairs.\n");
+        if (controller.has_zero_mismatch()) {
+          out << "ERROR: pair zero mismatch detected; moves are blocked until re-zeroed.\n";
+        }
       },
       "Load every pair's software zero from NVS: load_zero");
+  menu->Insert(
+      "check_zero",
+      [&controller](std::ostream &out) {
+        out << (controller.check_pairs()
+                    ? "All pairs are mirrored within tolerance.\n"
+                    : "ERROR: pair zero mismatch detected; moves are blocked until re-zeroed.\n");
+      },
+      "Check every pair's positions are mirrored (primary ~= -secondary): check_zero");
   menu->Insert(
       "set_base",
       [&base_swivel](std::ostream &out, float swivel_degrees) {
@@ -324,11 +337,52 @@ extern "C" void app_main(void) {
               running.project_name, running.version, running.date, running.time,
               running.idf_version, ota.running_partition_label());
 
-  if (!board.initialize_ethernet()) {
+  std::mutex ethernet_ip_mutex;
+  std::string ethernet_ip;
+  espp::Esp32P4Eth::EthernetConfig ethernet_config{};
+  ethernet_config.mode = espp::Esp32P4Eth::DhcpMode::CLIENT;
+  ethernet_config.on_got_ip = [&](esp_ip4_addr_t ip) {
+    std::lock_guard<std::mutex> lock(ethernet_ip_mutex);
+    ethernet_ip = std::to_string(esp_ip4_addr1_16(&ip)) + "." +
+                  std::to_string(esp_ip4_addr2_16(&ip)) + "." +
+                  std::to_string(esp_ip4_addr3_16(&ip)) + "." +
+                  std::to_string(esp_ip4_addr4_16(&ip));
+  };
+  if (!board.initialize_ethernet(ethernet_config)) {
     logger.error("Failed to initialize Ethernet");
   } else {
-    logger.info("Ethernet initialized");
+    logger.info("Ethernet initialized as DHCP client");
   }
+
+  // on_got_ip runs in the event loop, so RTPS is brought up from this task instead.
+  std::unique_ptr<espp::RtpsParticipant> rtps_participant;
+  espp::Task rtps_task(
+      {.callback = [&](std::mutex &m, std::condition_variable &cv) -> bool {
+         std::string ip;
+         {
+           std::lock_guard<std::mutex> lock(ethernet_ip_mutex);
+           ip = ethernet_ip;
+         }
+         if (ip.empty()) {
+           std::unique_lock<std::mutex> lock(m);
+           cv.wait_for(lock, 100ms);
+           return false;
+         }
+         logger.info("Ethernet got IP {}; starting RTPS", ip);
+         auto participant = std::make_unique<espp::RtpsParticipant>(espp::RtpsParticipant::Config{
+             .interface_address = ip,
+             .log_level = espp::Logger::Verbosity::INFO,
+         });
+         if (!participant->start()) {
+           logger.error("Failed to start RTPS on {}", ip);
+           return true;
+         }
+         rtps_participant = std::move(participant);
+         logger.info("RTPS participant started on {}", ip);
+         return true;
+       },
+       .task_config = {.name = "stem_rtps", .stack_size_bytes = 8192}});
+  rtps_task.start();
 
   // --------------------------------------------------------------------------
   // CAN bus, actuators, pairs, controller
@@ -394,6 +448,9 @@ extern "C" void app_main(void) {
     controller.zero(std::nullopt, false);
     if (!controller.load_zero()) {
       logger.warn("Failed to load zero for one or more pairs, please load zero manually");
+    }
+    if (controller.has_zero_mismatch()) {
+      logger.error("Pair zero mismatch after load_zero: moves are blocked until re-zeroed");
     }
     for (auto &actuator : actuators) {
       uint16_t statusword = 0;
@@ -739,8 +796,8 @@ extern "C" void app_main(void) {
   }).detach();
   logger.info("CLI ready: set <pair> <deg>, move <x> <y>, home, tilt <deg>, stop, get, status, "
               "release, zero <pair|all>, zero_align <pair|all>, save_zero, read_zero, "
-              "load_zero, ik <x> <y>, ik_ref <x> <y>, set_base <deg>, set_seat_swivel <deg>, "
-              "get_base, get_seat_swivel");
+              "load_zero, check_zero, ik <x> <y>, ik_ref <x> <y>, set_base <deg>, "
+              "set_seat_swivel <deg>, get_base, get_seat_swivel");
 
   bool have_ethernet_status = false;
   bool last_ethernet_status = false;

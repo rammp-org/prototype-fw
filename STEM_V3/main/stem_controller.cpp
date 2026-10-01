@@ -45,6 +45,8 @@ const char *StemController::to_string(Result result) {
     return "actuator command failed";
   case Result::InvalidArgument:
     return "invalid argument";
+  case Result::ZeroMismatch:
+    return "pair zero mismatch (re-zero required)";
   }
   return "?";
 }
@@ -92,6 +94,10 @@ StemController::Result StemController::set_seat_tilt(float tilt_deg, float rpm) 
     return Result::InvalidArgument;
   }
   std::lock_guard<std::mutex> lock(mutex_);
+  if (zero_mismatch_[static_cast<uint8_t>(Pair::Seat)]) {
+    logger_.error("seat tilt rejected: seat pair zero mismatch");
+    return Result::ZeroMismatch;
+  }
   // New seat angle: the IK level angle of the current target plus the tilt, or
   // -- with no target -- the tracked seat angle shifted by the tilt change.
   const float previous_tilt = seat_tilt_deg_.load();
@@ -185,6 +191,10 @@ StemController::Result StemController::move_to(float x_rel, float y_rel, float r
     return Result::OutOfLimits;
   }
   std::lock_guard<std::mutex> lock(mutex_);
+  if (any_zero_mismatch_unlocked()) {
+    logger_.error("move x={:.1f} y={:.1f} rejected: pair zero mismatch", x_rel, y_rel);
+    return Result::ZeroMismatch;
+  }
   return command_pose(pose, rpm);
 }
 
@@ -197,6 +207,10 @@ StemController::Result StemController::set_pair(Pair pair, float degrees, float 
     return Result::InvalidArgument;
   }
   std::lock_guard<std::mutex> lock(mutex_);
+  if (zero_mismatch_[static_cast<uint8_t>(pair)]) {
+    logger_.error("set {} rejected: pair zero mismatch", stem::to_string(pair));
+    return Result::ZeroMismatch;
+  }
   (void)rpm; // EyouMotor moves at its pre-configured profile velocity, not a per-call speed.
   const bool ok = actuator(pair).set_position(degrees);
   // A single pair moved on its own: the end effector is no longer at a target.
@@ -240,11 +254,15 @@ bool StemController::zero(std::optional<Pair> pair, bool align) {
   if (pair.has_value()) {
     ok = actuator(*pair).zero();
     logger_.info("{} pair zeroed: {}", stem::to_string(*pair), ok ? "ok" : "FAILED");
+    check_pair_unlocked(*pair);
   } else {
     for (uint8_t i = 0; i < kPairCount; ++i) {
       ok = actuator(static_cast<Pair>(i)).zero() && ok;
     }
     logger_.info("all pairs zeroed: {}", ok ? "ok" : "FAILED");
+    for (uint8_t i = 0; i < kPairCount; ++i) {
+      check_pair_unlocked(static_cast<Pair>(i));
+    }
   }
   target_valid_ = false;
   return ok;
@@ -278,7 +296,39 @@ bool StemController::load_zero() {
   }
   logger_.info("all pairs' zero loaded from NVS: {}", ok ? "ok" : "FAILED");
   target_valid_ = false;
+  for (uint8_t i = 0; i < kPairCount; ++i) {
+    check_pair_unlocked(static_cast<Pair>(i));
+  }
   return ok;
+}
+
+bool StemController::check_pairs() {
+  std::lock_guard<std::mutex> lock(mutex_);
+  bool ok = true;
+  for (uint8_t i = 0; i < kPairCount; ++i) {
+    ok = check_pair_unlocked(static_cast<Pair>(i)) && ok;
+  }
+  return ok;
+}
+
+bool StemController::has_zero_mismatch() const {
+  std::lock_guard<std::mutex> lock(mutex_);
+  return any_zero_mismatch_unlocked();
+}
+
+bool StemController::check_pair_unlocked(Pair pair) {
+  float mismatch_degrees = 0.0f;
+  const bool ok = actuator(pair).check_mirrored(config_.mirror_tolerance_deg, mismatch_degrees);
+  zero_mismatch_[static_cast<uint8_t>(pair)] = !ok;
+  if (!ok) {
+    logger_.error("{} pair zero mismatch: moves are blocked until the pair is re-zeroed",
+                  stem::to_string(pair));
+  }
+  return ok;
+}
+
+bool StemController::any_zero_mismatch_unlocked() const {
+  return std::any_of(zero_mismatch_.begin(), zero_mismatch_.end(), [](bool m) { return m; });
 }
 
 

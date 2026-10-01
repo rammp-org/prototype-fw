@@ -1,5 +1,7 @@
 #include "paired_eyou_actuator.hpp"
 
+#include <cmath>
+
 PairedEyouActuator::PairedEyouActuator(EyouMotor &primary, EyouMotor &secondary)
     : espp::BaseComponent("PairedEyouActuator", espp::Logger::Verbosity::INFO), primary_(primary),
       secondary_(secondary) {
@@ -60,6 +62,25 @@ bool PairedEyouActuator::load_zero() {
   const bool primary_ok = primary_.load_zero();
   const bool secondary_ok = secondary_.load_zero();
   return primary_ok && secondary_ok;
+}
+
+bool PairedEyouActuator::check_mirrored(float tolerance_degrees, float &mismatch_degrees,
+                                        uint32_t timeout_ms) {
+  std::array<float, 2> position{};
+  if (!get_position(position, timeout_ms)) {
+    logger_.error("Mirror check failed: could not read both positions");
+    return false;
+  }
+  mismatch_degrees = position[0] + position[1];
+  if (std::fabs(mismatch_degrees) > tolerance_degrees) {
+    logger_.error("Mirror check failed: primary={:.3f} deg, secondary={:.3f} deg, "
+                  "mismatch={:.3f} deg (tolerance {:.3f} deg)",
+                  position[0], position[1], mismatch_degrees, tolerance_degrees);
+    return false;
+  }
+  logger_.info("Mirror check ok: primary={:.3f} deg, secondary={:.3f} deg, mismatch={:.3f} deg",
+               position[0], position[1], mismatch_degrees);
+  return true;
 }
 
 bool PairedEyouActuator::get_position(std::array<float, 2> &position_degrees, uint32_t timeout_ms) {

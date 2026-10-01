@@ -75,6 +75,7 @@ public:
     bool can_ok{true};               ///< whether the CAN bus came up (reported in State)
     float min_deg{-60.0f};           ///< pair position limits (applied to every pair)
     float max_deg{60.0f};
+    float mirror_tolerance_deg{1.0f}; ///< max |primary + secondary| for a pair to be usable
     // NOTE: EyouMotor moves at a pre-configured profile velocity (see
     // EyouMotor::configure_profile_position), not a per-call speed, so these are
     // kept only so the wire protocol / CLI keep the same rpm parameter shape;
@@ -87,7 +88,14 @@ public:
     espp::Logger::Verbosity log_level{espp::Logger::Verbosity::INFO};
   };
 
-  enum class Result : uint8_t { Ok, Unreachable, OutOfLimits, ActuatorFailed, InvalidArgument };
+  enum class Result : uint8_t {
+    Ok,
+    Unreachable,
+    OutOfLimits,
+    ActuatorFailed,
+    InvalidArgument,
+    ZeroMismatch
+  };
   static const char *to_string(Result result);
 
   explicit StemController(const Config &config);
@@ -123,8 +131,13 @@ public:
   bool save_zero();
   /// Read every motor's saved software zero without changing active offsets.
   bool read_zero(std::array<std::array<int32_t, 2>, kPairCount> &zero_offset_pulses);
-  /// Load every pair's software zero from NVS. Clears the tracked target.
+  /// Load every pair's software zero from NVS, then run check_pairs(). Clears the
+  /// tracked target. Returns the NVS load result; see has_zero_mismatch().
   bool load_zero();
+  /// Check every pair is mirrored within mirror_tolerance_deg. A mismatched pair
+  /// rejects all move commands until a new zero removes the mismatch.
+  bool check_pairs();
+  bool has_zero_mismatch() const;
 
   State snapshot(bool read_motors);
 
@@ -136,9 +149,12 @@ private:
   // Map an IK solution (angles relative to the reference) to the sign
   // convention the pairs are commanded in (seat tilt included).
   std::array<float, kPairCount> pose_to_pair_deg(const IkSolution &solution) const;
+  bool check_pair_unlocked(Pair pair);
+  bool any_zero_mismatch_unlocked() const;
 
   Config config_;
   mutable std::mutex mutex_;
+  std::array<bool, kPairCount> zero_mismatch_{};
   std::atomic<float> seat_tilt_deg_{0.0f}; // atomic: read by the lock-free solve()
   bool target_valid_{false};
   float target_x_{0.0f};
