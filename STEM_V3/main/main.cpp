@@ -69,6 +69,15 @@ constexpr float kSwivelDefaultSpeedRpm = 10.0f;
 
 constexpr const char *kSeatXyTwistTopic = "rammp/joystick/seat/xy_twist";
 constexpr const char *kSwivelXyTwistTopic = "rammp/joystick/swivel/xy_twist";
+constexpr float kSwivelJoystickDeadband = 0.2f;
+
+// Joystick-driven swivel state; directions are -1 (backward), 0 (stopped), +1 (forward).
+struct SwivelJoystick {
+  MotorActuator &base;
+  MotorActuator &seat;
+  int8_t base_direction{0};
+  int8_t seat_direction{0};
+};
 
 using Transport = stem::StemModule::Transport;
 using Frame = espp::stream_frame::Frame;
@@ -101,10 +110,39 @@ void handle_seat_xy_twist(espp::Logger &logger, const rammp::XYTwist &sample) {
               sample.y, sample.twist, static_cast<uint32_t>(sample.buttons));
 }
 
-// TODO: drive the swivel from the joystick.
-void handle_swivel_xy_twist(espp::Logger &logger, const rammp::XYTwist &sample) {
-  logger.info("{}: x={:.3f} y={:.3f} twist={:.3f} buttons=0x{:X}", kSwivelXyTwistTopic, sample.x,
-              sample.y, sample.twist, static_cast<uint32_t>(sample.buttons));
+int8_t joystick_direction(float value) {
+  if (value > kSwivelJoystickDeadband) {
+    return 1;
+  }
+  if (value < -kSwivelJoystickDeadband) {
+    return -1;
+  }
+  return 0;
+}
+
+// Commands only on a direction change: the joystick streams continuously.
+void drive_swivel(espp::Logger &logger, const char *name, MotorActuator &motor, float input,
+                  int8_t &current_direction) {
+  const int8_t direction = joystick_direction(input);
+  if (direction == current_direction) {
+    return;
+  }
+  const bool ok = direction == 0 ? motor.stop()
+                                 : motor.send_velocity(direction * kSwivelDefaultSpeedRpm);
+  if (!ok) {
+    logger.warn("{} swivel command failed", name);
+    return; // retried on the next joystick sample
+  }
+  current_direction = direction;
+  logger.info("{} swivel {}", name,
+              direction > 0 ? "forward" : (direction < 0 ? "backward" : "stop"));
+}
+
+// x drives the base swivel, y drives the seat swivel.
+void handle_swivel_xy_twist(espp::Logger &logger, SwivelJoystick &swivel,
+                            const rammp::XYTwist &sample) {
+  drive_swivel(logger, "base", swivel.base, sample.x, swivel.base_direction);
+  drive_swivel(logger, "seat", swivel.seat, sample.y, swivel.seat_direction);
 }
 
 // Console CLI: the same operations the USB module exposes, on top of the same
@@ -371,58 +409,6 @@ extern "C" void app_main(void) {
     logger.info("Ethernet initialized as DHCP client");
   }
 
-  // on_got_ip runs in the event loop, so RTPS is brought up from this task instead.
-  std::unique_ptr<espp::RtpsParticipant> rtps_participant;
-  std::unique_ptr<espp::Subscriber<rammp::XYTwist>> seat_xy_twist_subscriber;
-  std::unique_ptr<espp::Subscriber<rammp::XYTwist>> swivel_xy_twist_subscriber;
-  espp::Task rtps_task(
-      {.callback = [&](std::mutex &m, std::condition_variable &cv) -> bool {
-         std::string ip;
-         {
-           std::lock_guard<std::mutex> lock(ethernet_ip_mutex);
-           ip = ethernet_ip;
-         }
-         if (ip.empty()) {
-           std::unique_lock<std::mutex> lock(m);
-           cv.wait_for(lock, 100ms);
-           return false;
-         }
-         logger.info("Ethernet got IP {}; starting RTPS", ip);
-         auto participant = std::make_unique<espp::RtpsParticipant>(espp::RtpsParticipant::Config{
-             .interface_address = ip,
-             .log_level = espp::Logger::Verbosity::INFO,
-         });
-         if (!participant->start()) {
-           logger.error("Failed to start RTPS on {}", ip);
-           return true;
-         }
-         rtps_participant = std::move(participant);
-         logger.info("RTPS participant started on {}", ip);
-         seat_xy_twist_subscriber = std::make_unique<espp::Subscriber<rammp::XYTwist>>(
-             *rtps_participant,
-             espp::Subscriber<rammp::XYTwist>::Config{
-                 .topic = kSeatXyTwistTopic,
-                 .type_name = RAMMP_TYPE_XY_TWIST,
-                 .reliability = espp::RtpsParticipant::Reliability::BEST_EFFORT,
-                 .on_message = std::bind_front(&handle_seat_xy_twist, std::ref(logger))});
-         if (!seat_xy_twist_subscriber->is_valid()) {
-           logger.error("Failed to create RTPS subscriber for {}", kSeatXyTwistTopic);
-         }
-         swivel_xy_twist_subscriber = std::make_unique<espp::Subscriber<rammp::XYTwist>>(
-             *rtps_participant,
-             espp::Subscriber<rammp::XYTwist>::Config{
-                 .topic = kSwivelXyTwistTopic,
-                 .type_name = RAMMP_TYPE_XY_TWIST,
-                 .reliability = espp::RtpsParticipant::Reliability::BEST_EFFORT,
-                 .on_message = std::bind_front(&handle_swivel_xy_twist, std::ref(logger))});
-         if (!swivel_xy_twist_subscriber->is_valid()) {
-           logger.error("Failed to create RTPS subscriber for {}", kSwivelXyTwistTopic);
-         }
-         return true;
-       },
-       .task_config = {.name = "stem_rtps", .stack_size_bytes = 8192}});
-  rtps_task.start();
-
   // --------------------------------------------------------------------------
   // CAN bus, actuators, pairs, controller
   // --------------------------------------------------------------------------
@@ -501,6 +487,63 @@ extern "C" void app_main(void) {
       }
     }
   }
+
+  // --------------------------------------------------------------------------
+  // RTPS: on_got_ip runs in the event loop, so it is brought up from this task.
+  // Started after the motors exist because the subscribers command them.
+  // --------------------------------------------------------------------------
+  SwivelJoystick swivel_joystick{.base = base_swivel, .seat = seat_swivel};
+  std::unique_ptr<espp::RtpsParticipant> rtps_participant;
+  std::unique_ptr<espp::Subscriber<rammp::XYTwist>> seat_xy_twist_subscriber;
+  std::unique_ptr<espp::Subscriber<rammp::XYTwist>> swivel_xy_twist_subscriber;
+  espp::Task rtps_task(
+      {.callback = [&](std::mutex &m, std::condition_variable &cv) -> bool {
+         std::string ip;
+         {
+           std::lock_guard<std::mutex> lock(ethernet_ip_mutex);
+           ip = ethernet_ip;
+         }
+         if (ip.empty()) {
+           std::unique_lock<std::mutex> lock(m);
+           cv.wait_for(lock, 100ms);
+           return false;
+         }
+         logger.info("Ethernet got IP {}; starting RTPS", ip);
+         auto participant = std::make_unique<espp::RtpsParticipant>(espp::RtpsParticipant::Config{
+             .interface_address = ip,
+             .log_level = espp::Logger::Verbosity::INFO,
+         });
+         if (!participant->start()) {
+           logger.error("Failed to start RTPS on {}", ip);
+           return true;
+         }
+         rtps_participant = std::move(participant);
+         logger.info("RTPS participant started on {}", ip);
+         seat_xy_twist_subscriber = std::make_unique<espp::Subscriber<rammp::XYTwist>>(
+             *rtps_participant,
+             espp::Subscriber<rammp::XYTwist>::Config{
+                 .topic = kSeatXyTwistTopic,
+                 .type_name = RAMMP_TYPE_XY_TWIST,
+                 .reliability = espp::RtpsParticipant::Reliability::BEST_EFFORT,
+                 .on_message = std::bind_front(&handle_seat_xy_twist, std::ref(logger))});
+         if (!seat_xy_twist_subscriber->is_valid()) {
+           logger.error("Failed to create RTPS subscriber for {}", kSeatXyTwistTopic);
+         }
+         swivel_xy_twist_subscriber = std::make_unique<espp::Subscriber<rammp::XYTwist>>(
+             *rtps_participant,
+             espp::Subscriber<rammp::XYTwist>::Config{
+                 .topic = kSwivelXyTwistTopic,
+                 .type_name = RAMMP_TYPE_XY_TWIST,
+                 .reliability = espp::RtpsParticipant::Reliability::BEST_EFFORT,
+                 .on_message = std::bind_front(&handle_swivel_xy_twist, std::ref(logger),
+                                               std::ref(swivel_joystick))});
+         if (!swivel_xy_twist_subscriber->is_valid()) {
+           logger.error("Failed to create RTPS subscriber for {}", kSwivelXyTwistTopic);
+         }
+         return true;
+       },
+       .task_config = {.name = "stem_rtps", .stack_size_bytes = 8192}});
+  rtps_task.start();
 
   // --------------------------------------------------------------------------
   // USB composite device: vendor / WebUSB + CDC, each an independent frame stream
