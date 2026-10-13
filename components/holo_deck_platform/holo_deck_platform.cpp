@@ -5,7 +5,7 @@
 namespace {
 constexpr float kPi = 3.14159265358979323846f;
 constexpr float kRadiansPerDegree = kPi / 180.0f;
-constexpr float kRadiansPerMinute = 2.0f * kPi / 60.0f;
+constexpr float kRadPerSecPerRpm = 2.0f * kPi / 60.0f;
 constexpr float kWheelCircumferenceFactor = kPi;
 }
 
@@ -21,7 +21,7 @@ HoloDeckPlatform::WheelSpeeds HoloDeckPlatform::calculate_wheel_speeds(float x_m
 
   constexpr std::array<float, 4> x_positions = {1.0f, 1.0f, -1.0f, -1.0f};
   constexpr std::array<float, 4> y_positions = {1.0f, -1.0f, 1.0f, -1.0f};
-  const float angular_velocity_rad_per_second = w_rpm * kRadiansPerMinute;
+  const float angular_velocity_rad_per_second = w_rpm * kRadPerSecPerRpm;
   const float wheel_circumference_m = kWheelCircumferenceFactor * configuration_.wheel_diameter_m;
   std::array<float, 4> wheel_rpm{};
 

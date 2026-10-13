@@ -100,18 +100,43 @@ inline constexpr bool kJoystickYInverted = false;
 inline constexpr float kJoystickTwistCenterMv = 1650.0f;
 inline constexpr float kJoystickTwistMinMv = 150.0f;
 inline constexpr float kJoystickTwistMaxMv = 3150.0f;
-/// Set true if twisting counter-clockwise decreases the measured voltage.
-inline constexpr bool kJoystickTwistInverted = false;
+/// Set true if twisting counter-clockwise decreases the measured voltage. True
+/// on this stick (measured on hardware): with it the callback's `ccw` really is
+/// counter-clockwise-positive, matching the GUI rotation slider.
+inline constexpr bool kJoystickTwistInverted = true;
 
 /// Circular deadzone radius around center for the X/Y pair, as a fraction of
 /// the unit circle. Inside this radius the translation command is exactly 0
 /// (this is also what releases joystick control back to the GUI).
-inline constexpr float kJoystickCenterDeadzoneRadius = 0.12f;
+inline constexpr float kJoystickCenterDeadzoneRadius = 0.05f;
 /// Deadzone at the rim of the unit circle: deflections beyond
 /// (1 - kJoystickRangeDeadzone) count as full deflection.
-inline constexpr float kJoystickRangeDeadzone = 0.08f;
-/// Deadband (in mV) around the twist axis center inside which rotation is 0.
-inline constexpr float kJoystickTwistDeadbandMv = 200.0f;
+inline constexpr float kJoystickRangeDeadzone = 0.05f;
+/// Twist-axis center deadzone, as a fraction of the axis half-span, inside
+/// which rotation is exactly 0. Converted to a mV deadband against the
+/// (auto-captured or configured) center at runtime.
+inline constexpr float kJoystickTwistDeadzoneFraction = 0.05f;
+
+/// Boot-time auto-centering. The joystick is spring-return on all three axes,
+/// so its resting voltage at power-on IS the true center of each pot -
+/// capturing it makes the deadzones effective regardless of per-unit pot
+/// tolerance (the usual reason a fixed-center deadzone "does nothing"). At
+/// startup each axis is averaged over kJoystickAutoCenterSamples reads and, if
+/// the average is within kJoystickAutoCenterMaxDeviationMv of the nominal
+/// center below, adopted as that axis's center; otherwise the nominal center
+/// is kept and a warning is logged (the stick was likely not centered at
+/// boot). Set to false to always use the fixed nominal centers.
+inline constexpr bool kJoystickAutoCenter = true;
+inline constexpr size_t kJoystickAutoCenterSamples = 32;
+inline constexpr float kJoystickAutoCenterMaxDeviationMv = 500.0f;
+
+/// Joystick mounting orientation. The stick may be physically mounted rotated
+/// relative to the operator, so the raw (x, y) deflection is rotated CLOCKWISE
+/// by this many degrees (0, 90, 180, or 270) before it is mapped to the
+/// platform forward/left axes. With this hardware the stick's forward reads as
+/// UI-left and its right reads as UI-forward, i.e. it is mounted a quarter turn
+/// off; 90 corrects it (physical forward -> forward, physical right -> right).
+inline constexpr int kJoystickMountingRotationCwDeg = 90;
 
 /////////////////////////////////////////////////////////////////////////////
 // Control parameters
@@ -129,17 +154,46 @@ inline constexpr std::chrono::milliseconds kJoystickReleaseTimeout{500};
 /// A motor's status is shown as STALE when it has not been successfully read
 /// for this long.
 inline constexpr std::chrono::milliseconds kMotorStatusStaleTimeout{3000};
+/// Per-status-read reply timeout (ms). The read holds the shared CAN bus mutex
+/// for up to this long, so it is kept well under kControlPeriod to bound how
+/// long a colliding control-loop send can be delayed. A healthy motor replies
+/// in ~1 ms; when no motor answers the read simply reports STALE this cycle.
+inline constexpr uint32_t kMotorStatusReadTimeoutMs = 12;
 
-/// Hard per-wheel speed limit: if any computed wheel speed exceeds this, all
-/// wheels are scaled down together (preserving the motion direction).
-inline constexpr float kMaxWheelRpm = 30.0f;
+/// Hard per-wheel OUTPUT-shaft speed limit (RPM): if any computed wheel speed
+/// exceeds this, all wheels are scaled down together (preserving the motion
+/// direction). This is the master safety cap. It bounds translation (at 90
+/// output RPM a 0.21 m wheel is ~1 m/s); it does NOT bound rotation in
+/// practice, because with this platform's wheel angles a pure chassis rotation
+/// of w RPM only drives the wheels at ~0.27 * w RPM (see kDefaultTwistRotationScale
+/// and the kinematics note in HoloDeckPlatform). 90 output RPM is ~3240 motor RPM
+/// through the 36:1 gear, well inside the RMD-X6-S2's range; lower it to keep the
+/// platform gentle.
+inline constexpr float kMaxWheelRpm = 90.0f;
 /// Default (and maximum-selectable) translation speed limits, m/s.
-inline constexpr float kDefaultMaxSpeedMps = 0.25f;
-inline constexpr float kMinSelectableMaxSpeedMps = 0.05f;
-inline constexpr float kMaxSelectableMaxSpeedMps = 0.50f;
-/// Default (and maximum-selectable) chassis rotation rate limits, RPM.
-inline constexpr float kDefaultMaxRotationRpm = 3.0f;
-inline constexpr float kMinSelectableMaxRotationRpm = 0.5f;
-inline constexpr float kMaxSelectableMaxRotationRpm = 6.0f;
+inline constexpr float kDefaultMaxSpeedMps = 1.0f;
+inline constexpr float kMinSelectableMaxSpeedMps = 0.1f;
+inline constexpr float kMaxSelectableMaxSpeedMps = 2.0f;
+/// Default (and maximum-selectable) chassis rotation rate limits, RPM (the
+/// `limits` CLI command takes RPM; the GUI slider shows deg/s, 1 RPM = 6 deg/s).
+/// The joystick twist additionally applies kDefaultTwistRotationScale.
+inline constexpr float kDefaultMaxRotationRpm = 6.0f;
+inline constexpr float kMinSelectableMaxRotationRpm = 1.0f;
+inline constexpr float kMaxSelectableMaxRotationRpm = 10.0f;
+
+/// Conversion for the (intuitive) deg/s display of chassis rotation.
+inline constexpr float kRpmToDegPerSec = 6.0f;
+
+/// Joystick-twist rotation scale: multiplies the rotation rate commanded from
+/// a full twist deflection (twist * scale * max-rotation). Values > 1
+/// compensate the platform's weak rotation authority - the configured wheel
+/// drive directions are nearly radial, so pure rotation commands only ~0.27
+/// wheel RPM per chassis RPM (the kMaxWheelRpm comment's 4.6 figure assumes
+/// TANGENTIAL drive directions, i.e. wheel angles rotated 90 degrees; see the
+/// kinematics note in HoloDeckPlatform). Wheel commands remain bounded by
+/// kMaxWheelRpm regardless of this scale.
+inline constexpr float kDefaultTwistRotationScale = 1.0f;
+inline constexpr float kMinSelectableTwistScale = 0.1f;
+inline constexpr float kMaxSelectableTwistScale = 20.0f;
 
 } // namespace hw_config

@@ -11,18 +11,96 @@ namespace {
 constexpr float kRadiansToDegrees = 180.0f / 3.14159265358979323846f;
 // slider integer scaling: the LVGL sliders carry integers, the limits are
 // floats
-constexpr float kSpeedSliderScale = 0.01f;   // slider unit -> m/s
-constexpr float kRotationSliderScale = 0.1f; // slider unit -> RPM
-constexpr int kRotationCommandRange = 100;   // rotation slider is +/- this
+constexpr float kSpeedSliderScale = 0.01f; // slider unit -> m/s
+// Max-rotation slider carries deg/s (matching its label); the controller's
+// unit is RPM, so one slider unit is 1/6 RPM.
+constexpr float kRotationSliderScale = 1.0f / hw_config::kRpmToDegPerSec; // slider unit -> RPM
+constexpr float kTwistScaleSliderScale = 0.1f;                            // slider unit -> x scale
+constexpr int kRotationCommandRange = 100; // rotation slider is +/- this
 } // namespace
 
 void Gui::init_ui() {
   std::lock_guard<std::recursive_mutex> lock(mutex_);
-  init_top_bar();
-  init_vector_display();
-  init_motor_tiles();
-  init_drag_pad();
-  init_sliders();
+  lv_obj_t *screen = lv_screen_active();
+
+  // Effective display size at runtime (the BSP may present the native 720x1280
+  // portrait panel rotated to 1280x720 landscape). Lay everything out relative
+  // to these so the UI fills the screen and never overlaps in either case.
+  lv_display_t *disp = lv_display_get_default();
+  const int32_t screen_w = lv_display_get_horizontal_resolution(disp);
+  const int32_t screen_h = lv_display_get_vertical_resolution(disp);
+  const bool landscape = screen_w >= screen_h;
+  logger_.info("Display resolution {}x{} ({})", screen_w, screen_h,
+               landscape ? "landscape" : "portrait");
+  // The drag pad / vector circle scale with the smaller screen dimension so
+  // they always fit next to the other panel.
+  const int32_t small_dim = std::min(screen_w, screen_h);
+  pad_size_ = std::clamp(static_cast<int>(small_dim / (landscape ? 3 : 2)), 200, 340);
+  viz_size_ = static_cast<int>(pad_size_ * 0.85f);
+
+  // Explicit pixel geometry for the content row/column and its two panels.
+  // Percentage widths on `content` did not resolve to the full screen width
+  // (content collapsed toward its shrink-wrapped size), which starved the
+  // panels regardless of whether they used flex_grow or LV_PCT. Pixel sizes
+  // computed from the real resolution are unambiguous.
+  constexpr int32_t kScreenPad = 8;   // matches pad_all on the screen below
+  constexpr int32_t kContentGap = 10; // matches pad_column/pad_row on content
+  const int32_t content_w = screen_w - 2 * kScreenPad;
+  const int32_t panel_w = landscape ? (content_w - kContentGap) / 2 : content_w;
+
+  // Root: a vertical flex of [top bar][content (grows)][motor row], full width.
+  lv_obj_clear_flag(screen, LV_OBJ_FLAG_SCROLLABLE);
+  lv_obj_set_style_pad_all(screen, 8, 0);
+  lv_obj_set_style_pad_row(screen, 8, 0);
+  lv_obj_set_flex_flow(screen, LV_FLEX_FLOW_COLUMN);
+  lv_obj_set_flex_align(screen, LV_FLEX_ALIGN_START, LV_FLEX_ALIGN_START, LV_FLEX_ALIGN_START);
+
+  init_top_bar(screen);
+
+  // Content area grows to fill the middle; a row in landscape (left panel +
+  // right panel), a column in portrait (stacked).
+  lv_obj_t *content = lv_obj_create(screen);
+  lv_obj_remove_style_all(content);
+  lv_obj_set_width(content, content_w);
+  lv_obj_set_flex_grow(content, 1);
+  lv_obj_clear_flag(content, LV_OBJ_FLAG_SCROLLABLE);
+  lv_obj_set_flex_flow(content, landscape ? LV_FLEX_FLOW_ROW : LV_FLEX_FLOW_COLUMN);
+  lv_obj_set_flex_align(content, LV_FLEX_ALIGN_START, LV_FLEX_ALIGN_START, LV_FLEX_ALIGN_START);
+  lv_obj_set_style_pad_column(content, kContentGap, 0);
+  lv_obj_set_style_pad_row(content, kContentGap, 0);
+
+  // Each panel gets an explicit pixel width (half the row in landscape, full
+  // width when stacked in portrait). In landscape the panels fill the content
+  // height and sit side-by-side; in portrait they stack and take their content
+  // height (LV_PCT(100) there would make the first panel consume the whole
+  // column and push the second off-screen).
+
+  // Left panel: velocity vector + numeric readouts + limits.
+  lv_obj_t *left = lv_obj_create(content);
+  lv_obj_remove_style_all(left);
+  lv_obj_set_width(left, panel_w);
+  lv_obj_set_height(left, landscape ? LV_PCT(100) : LV_SIZE_CONTENT);
+  lv_obj_clear_flag(left, LV_OBJ_FLAG_SCROLLABLE);
+  lv_obj_set_flex_flow(left, LV_FLEX_FLOW_COLUMN);
+  lv_obj_set_flex_align(left, LV_FLEX_ALIGN_START, LV_FLEX_ALIGN_CENTER, LV_FLEX_ALIGN_START);
+  lv_obj_set_style_pad_row(left, 10, 0);
+  init_vector_display(left, viz_size_);
+
+  // Right panel: touch drag-pad + rotation / limit sliders.
+  lv_obj_t *right = lv_obj_create(content);
+  lv_obj_remove_style_all(right);
+  lv_obj_set_width(right, panel_w);
+  lv_obj_set_height(right, landscape ? LV_PCT(100) : LV_SIZE_CONTENT);
+  lv_obj_clear_flag(right, LV_OBJ_FLAG_SCROLLABLE);
+  lv_obj_set_flex_flow(right, LV_FLEX_FLOW_COLUMN);
+  lv_obj_set_flex_align(right, LV_FLEX_ALIGN_START, LV_FLEX_ALIGN_CENTER, LV_FLEX_ALIGN_START);
+  lv_obj_set_style_pad_row(right, 8, 0);
+  init_drag_pad(right, pad_size_);
+  init_sliders(right);
+
+  // Bottom: the four motor tiles in a row, full width.
+  init_motor_tiles(screen);
+
   ui_ready_ = true;
 }
 
@@ -35,6 +113,7 @@ void Gui::deinit_ui() {
   source_label_ = nullptr;
   enable_button_ = nullptr;
   enable_button_label_ = nullptr;
+  disable_button_ = nullptr;
   vector_circle_ = nullptr;
   vector_line_ = nullptr;
   velocity_label_ = nullptr;
@@ -45,6 +124,7 @@ void Gui::deinit_ui() {
   pad_knob_ = nullptr;
   pad_label_ = nullptr;
   rotation_slider_ = nullptr;
+  twist_scale_slider_ = nullptr;
   rotation_label_ = nullptr;
   max_speed_slider_ = nullptr;
   max_speed_label_ = nullptr;
@@ -52,42 +132,55 @@ void Gui::deinit_ui() {
   max_rotation_label_ = nullptr;
 }
 
-void Gui::init_top_bar() {
-  lv_obj_t *screen = lv_screen_active();
+void Gui::init_top_bar(lv_obj_t *parent) {
+  // A fixed-height row: title | source badge (grows) | DISABLE | ENABLE/STOP.
+  lv_obj_t *bar = lv_obj_create(parent);
+  lv_obj_remove_style_all(bar);
+  lv_obj_set_width(bar, LV_PCT(100));
+  lv_obj_set_height(bar, LV_SIZE_CONTENT);
+  lv_obj_clear_flag(bar, LV_OBJ_FLAG_SCROLLABLE);
+  lv_obj_set_flex_flow(bar, LV_FLEX_FLOW_ROW);
+  lv_obj_set_flex_align(bar, LV_FLEX_ALIGN_START, LV_FLEX_ALIGN_CENTER, LV_FLEX_ALIGN_CENTER);
+  lv_obj_set_style_pad_column(bar, 12, 0);
 
-  lv_obj_t *title = lv_label_create(screen);
+  lv_obj_t *title = lv_label_create(bar);
   lv_label_set_text(title, "Holo Deck");
-  lv_obj_align(title, LV_ALIGN_TOP_LEFT, 20, 30);
 
   // the active-source indicator is the most prominent element in the bar; it
-  // is recolored by show_source()
-  source_label_ = lv_label_create(screen);
+  // grows to take the middle space and is recolored by show_source()
+  source_label_ = lv_label_create(bar);
   lv_label_set_text(source_label_, "STOPPED");
   lv_obj_set_style_bg_opa(source_label_, LV_OPA_COVER, 0);
   lv_obj_set_style_bg_color(source_label_, lv_palette_main(LV_PALETTE_RED), 0);
   lv_obj_set_style_text_color(source_label_, lv_color_white(), 0);
-  lv_obj_set_style_pad_all(source_label_, 16, 0);
+  lv_obj_set_style_pad_all(source_label_, 12, 0);
   lv_obj_set_style_radius(source_label_, 8, 0);
-  lv_obj_align(source_label_, LV_ALIGN_TOP_MID, 0, 18);
+  lv_obj_set_style_text_align(source_label_, LV_TEXT_ALIGN_CENTER, 0);
+  lv_obj_set_flex_grow(source_label_, 1);
 
-  enable_button_ = lv_btn_create(screen);
-  lv_obj_set_size(enable_button_, 220, 70);
-  lv_obj_align(enable_button_, LV_ALIGN_TOP_RIGHT, -20, 10);
+  // DISABLE: halt the motors at the control level (distinct from STOP).
+  disable_button_ = lv_btn_create(bar);
+  lv_obj_set_height(disable_button_, 64);
+  lv_obj_set_style_bg_color(disable_button_, lv_palette_main(LV_PALETTE_GREY), 0);
+  lv_obj_t *disable_label = lv_label_create(disable_button_);
+  lv_label_set_text(disable_label, LV_SYMBOL_POWER " DISABLE");
+  lv_obj_center(disable_label);
+  lv_obj_add_event_cb(disable_button_, event_callback, LV_EVENT_PRESSED, this);
+
+  enable_button_ = lv_btn_create(bar);
+  lv_obj_set_height(enable_button_, 64);
   lv_obj_set_style_bg_color(enable_button_, lv_palette_main(LV_PALETTE_GREEN), 0);
   enable_button_label_ = lv_label_create(enable_button_);
-  lv_label_set_text(enable_button_label_, "ENABLE");
+  lv_label_set_text(enable_button_label_, LV_SYMBOL_PLAY " ENABLE");
   lv_obj_center(enable_button_label_);
   lv_obj_add_event_cb(enable_button_, event_callback, LV_EVENT_PRESSED, this);
 }
 
-void Gui::init_vector_display() {
-  lv_obj_t *screen = lv_screen_active();
-
+void Gui::init_vector_display(lv_obj_t *parent, int viz_size) {
   // circle showing the commanded velocity vector (direction + magnitude,
   // full radius = the max-speed limit)
-  vector_circle_ = lv_obj_create(screen);
-  lv_obj_set_size(vector_circle_, VIZ_SIZE, VIZ_SIZE);
-  lv_obj_align(vector_circle_, LV_ALIGN_TOP_LEFT, 30, TOP_BAR_HEIGHT + 20);
+  vector_circle_ = lv_obj_create(parent);
+  lv_obj_set_size(vector_circle_, viz_size, viz_size);
   lv_obj_set_style_radius(vector_circle_, LV_RADIUS_CIRCLE, 0);
   lv_obj_clear_flag(vector_circle_, LV_OBJ_FLAG_SCROLLABLE);
   lv_obj_clear_flag(vector_circle_, LV_OBJ_FLAG_CLICKABLE);
@@ -110,43 +203,40 @@ void Gui::init_vector_display() {
   lv_obj_add_style(vector_line_, &vector_line_style_, 0);
   set_vector_line(0.0f, 0.0f);
 
-  velocity_label_ = lv_label_create(screen);
+  velocity_label_ = lv_label_create(parent);
   lv_label_set_text(velocity_label_, "");
-  lv_obj_align(velocity_label_, LV_ALIGN_TOP_LEFT, VIZ_SIZE + 60, TOP_BAR_HEIGHT + 40);
 
-  limits_label_ = lv_label_create(screen);
+  limits_label_ = lv_label_create(parent);
   lv_label_set_text(limits_label_, "");
-  lv_obj_align(limits_label_, LV_ALIGN_TOP_LEFT, VIZ_SIZE + 60, TOP_BAR_HEIGHT + 200);
 }
 
-void Gui::init_motor_tiles() {
-  lv_obj_t *screen = lv_screen_active();
-  static constexpr int TILE_WIDTH = 285;
-  static constexpr int TILE_HEIGHT = 120;
-  static constexpr int TILE_X = 30;
-  static constexpr int TILE_Y = 450;
+void Gui::init_motor_tiles(lv_obj_t *parent) {
+  // A full-width row of four equal tiles.
+  lv_obj_t *row = lv_obj_create(parent);
+  lv_obj_remove_style_all(row);
+  lv_obj_set_width(row, LV_PCT(100));
+  lv_obj_set_height(row, LV_SIZE_CONTENT);
+  lv_obj_clear_flag(row, LV_OBJ_FLAG_SCROLLABLE);
+  lv_obj_set_flex_flow(row, LV_FLEX_FLOW_ROW);
+  lv_obj_set_style_pad_column(row, 8, 0);
   for (size_t i = 0; i < motor_tiles_.size(); ++i) {
-    lv_obj_t *tile = lv_obj_create(screen);
-    lv_obj_set_size(tile, TILE_WIDTH, TILE_HEIGHT);
-    lv_obj_align(tile, LV_ALIGN_TOP_LEFT, TILE_X + static_cast<int>(i % 2) * (TILE_WIDTH + 15),
-                 TILE_Y + static_cast<int>(i / 2) * (TILE_HEIGHT + 15));
+    lv_obj_t *tile = lv_obj_create(row);
+    lv_obj_set_flex_grow(tile, 1);
+    lv_obj_set_height(tile, LV_SIZE_CONTENT);
     lv_obj_clear_flag(tile, LV_OBJ_FLAG_SCROLLABLE);
     lv_obj_set_style_border_width(tile, 3, 0);
     lv_obj_set_style_border_color(tile, lv_palette_main(LV_PALETTE_GREY), 0);
+    lv_obj_set_style_pad_all(tile, 8, 0);
     lv_obj_t *label = lv_label_create(tile);
     lv_label_set_text_fmt(label, "M%d\nwaiting...", static_cast<int>(i) + 1);
-    lv_obj_align(label, LV_ALIGN_TOP_LEFT, 0, 0);
     motor_tiles_[i] = tile;
     motor_tile_labels_[i] = label;
   }
 }
 
-void Gui::init_drag_pad() {
-  lv_obj_t *screen = lv_screen_active();
-
-  pad_ = lv_obj_create(screen);
-  lv_obj_set_size(pad_, PAD_SIZE, PAD_SIZE);
-  lv_obj_align(pad_, LV_ALIGN_TOP_RIGHT, -180, TOP_BAR_HEIGHT + 20);
+void Gui::init_drag_pad(lv_obj_t *parent, int pad_size) {
+  pad_ = lv_obj_create(parent);
+  lv_obj_set_size(pad_, pad_size, pad_size);
   lv_obj_set_style_radius(pad_, LV_RADIUS_CIRCLE, 0);
   lv_obj_clear_flag(pad_, LV_OBJ_FLAG_SCROLLABLE);
   lv_obj_add_event_cb(pad_, event_callback, LV_EVENT_PRESSING, this);
@@ -161,53 +251,48 @@ void Gui::init_drag_pad() {
   lv_obj_clear_flag(pad_knob_, LV_OBJ_FLAG_CLICKABLE);
   lv_obj_center(pad_knob_);
 
-  pad_label_ = lv_label_create(screen);
+  pad_label_ = lv_label_create(parent);
   lv_label_set_text(pad_label_, "Drag to translate (up = forward)");
-  lv_obj_align_to(pad_label_, pad_, LV_ALIGN_OUT_BOTTOM_MID, 0, 8);
 }
 
-void Gui::init_sliders() {
-  lv_obj_t *screen = lv_screen_active();
-  static constexpr int SLIDER_X = -60;
-  static constexpr int SLIDER_Y = TOP_BAR_HEIGHT + PAD_SIZE + 80;
-  static constexpr int SLIDER_SPACING = 75;
-
+void Gui::init_sliders(lv_obj_t *parent) {
   struct SliderSpec {
     lv_obj_t **slider;
     lv_obj_t **label;
     int min;
     int max;
     int value;
-    int y_offset;
   };
   const SliderSpec sliders[] = {
-      {&rotation_slider_, &rotation_label_, -kRotationCommandRange, kRotationCommandRange, 0, 0},
+      {&rotation_slider_, &rotation_label_, -kRotationCommandRange, kRotationCommandRange, 0},
       {&max_speed_slider_, &max_speed_label_,
        static_cast<int>(hw_config::kMinSelectableMaxSpeedMps / kSpeedSliderScale),
        static_cast<int>(hw_config::kMaxSelectableMaxSpeedMps / kSpeedSliderScale),
-       static_cast<int>(hw_config::kDefaultMaxSpeedMps / kSpeedSliderScale), SLIDER_SPACING},
+       static_cast<int>(hw_config::kDefaultMaxSpeedMps / kSpeedSliderScale)},
       {&max_rotation_slider_, &max_rotation_label_,
        static_cast<int>(hw_config::kMinSelectableMaxRotationRpm / kRotationSliderScale),
        static_cast<int>(hw_config::kMaxSelectableMaxRotationRpm / kRotationSliderScale),
-       static_cast<int>(hw_config::kDefaultMaxRotationRpm / kRotationSliderScale),
-       2 * SLIDER_SPACING},
+       static_cast<int>(hw_config::kDefaultMaxRotationRpm / kRotationSliderScale)},
+      {&twist_scale_slider_, &twist_scale_label_,
+       static_cast<int>(hw_config::kMinSelectableTwistScale / kTwistScaleSliderScale),
+       static_cast<int>(hw_config::kMaxSelectableTwistScale / kTwistScaleSliderScale),
+       static_cast<int>(hw_config::kDefaultTwistRotationScale / kTwistScaleSliderScale)},
   };
   for (const auto &spec : sliders) {
-    lv_obj_t *label = lv_label_create(screen);
-    lv_obj_align(label, LV_ALIGN_TOP_RIGHT, SLIDER_X - (SLIDER_WIDTH - 440),
-                 SLIDER_Y + spec.y_offset);
-    lv_obj_t *slider = lv_slider_create(screen);
-    lv_obj_set_width(slider, SLIDER_WIDTH);
+    lv_obj_t *label = lv_label_create(parent);
+    lv_obj_t *slider = lv_slider_create(parent);
+    lv_obj_set_width(slider, LV_PCT(90));
     lv_slider_set_range(slider, spec.min, spec.max);
     lv_slider_set_value(slider, spec.value, LV_ANIM_OFF);
-    lv_obj_align(slider, LV_ALIGN_TOP_RIGHT, SLIDER_X, SLIDER_Y + spec.y_offset + 28);
     lv_obj_add_event_cb(slider, event_callback, LV_EVENT_VALUE_CHANGED, this);
     *spec.slider = slider;
     *spec.label = label;
   }
   lv_label_set_text(rotation_label_, "Rotation (left = CCW)");
   lv_label_set_text(max_speed_label_, "Max speed");
-  lv_label_set_text(max_rotation_label_, "Max rotation");
+  lv_label_set_text(max_rotation_label_, "Max rotation (deg/s)");
+  lv_label_set_text_fmt(twist_scale_label_, "Twist scale: %.1fx",
+                        static_cast<double>(hw_config::kDefaultTwistRotationScale));
 }
 
 bool Gui::update(std::mutex &m, std::condition_variable &cv) {
@@ -250,6 +335,9 @@ void Gui::on_pressed(lv_event_t *e) {
     // request the opposite of the last known state: STOP when enabled
     // (e-stop always wins, from any source), ENABLE when stopped
     enable_callback_(!last_enabled_);
+  } else if (target == disable_button_ && disable_callback_) {
+    // control-level motor disable (independent of the ENABLE/STOP toggle)
+    disable_callback_();
   }
 }
 
@@ -273,7 +361,7 @@ void Gui::on_pad_pressing(lv_event_t *e) {
   lv_obj_get_coords(pad_, &coords);
   const float center_x = (coords.x1 + coords.x2) / 2.0f;
   const float center_y = (coords.y1 + coords.y2) / 2.0f;
-  const float radius = (PAD_SIZE - KNOB_SIZE) / 2.0f;
+  const float radius = (pad_size_ - KNOB_SIZE) / 2.0f;
   float dx = (point.x - center_x) / radius;
   float dy = (point.y - center_y) / radius;
   const float magnitude = std::sqrt(dx * dx + dy * dy);
@@ -326,19 +414,25 @@ void Gui::on_value_changed(lv_event_t *e) {
     if (max_rotation_callback_) {
       max_rotation_callback_(lv_slider_get_value(max_rotation_slider_) * kRotationSliderScale);
     }
+  } else if (target == twist_scale_slider_) {
+    const float scale = lv_slider_get_value(twist_scale_slider_) * kTwistScaleSliderScale;
+    lv_label_set_text_fmt(twist_scale_label_, "Twist scale: %.1fx", static_cast<double>(scale));
+    if (twist_scale_callback_) {
+      twist_scale_callback_(scale);
+    }
   }
 }
 
 void Gui::set_knob_position(float forward, float left) {
-  const float radius = (PAD_SIZE - KNOB_SIZE) / 2.0f;
+  const float radius = (pad_size_ - KNOB_SIZE) / 2.0f;
   const int x = static_cast<int>(-left * radius);
   const int y = static_cast<int>(-forward * radius);
   lv_obj_align(pad_knob_, LV_ALIGN_CENTER, x, y);
 }
 
 void Gui::set_vector_line(float forward_norm, float left_norm) {
-  const float radius = (VIZ_SIZE - 40) / 2.0f;
-  const float center = VIZ_SIZE / 2.0f - 15.0f; // inside the padded circle
+  const float radius = (viz_size_ - 40) / 2.0f;
+  const float center = viz_size_ / 2.0f - 15.0f; // inside the padded circle
   // lv_value_precise_t may be integral (LV_USE_FLOAT=0), so round explicitly
   const auto precise = [](float value) {
     return static_cast<lv_value_precise_t>(std::lround(value));
@@ -378,10 +472,17 @@ void Gui::update_state(const HoloDeckController::State &state) {
   gui_source_active_ = gui_active;
   last_enabled_ = state.enabled;
 
-  show_source(state.source);
+  // Source / mode banner. DISABLED (control-level motor halt) is distinct from
+  // STOPPED (e-stop holding zero velocity).
+  if (state.mode == HoloDeckController::Mode::DISABLED) {
+    lv_label_set_text(source_label_, "MOTORS DISABLED");
+    lv_obj_set_style_bg_color(source_label_, lv_palette_darken(LV_PALETTE_GREY, 2), 0);
+  } else {
+    show_source(state.source);
+  }
 
-  // ENABLE / STOP button: pressing it e-stops when enabled, enables when
-  // stopped
+  // ENABLE / STOP button: pressing it e-stops when enabled (DRIVE), enables
+  // otherwise (STOPPED or DISABLED both return to DRIVE).
   if (state.enabled) {
     lv_label_set_text(enable_button_label_, LV_SYMBOL_STOP " STOP");
     lv_obj_set_style_bg_color(enable_button_, lv_palette_main(LV_PALETTE_RED), 0);
@@ -389,27 +490,38 @@ void Gui::update_state(const HoloDeckController::State &state) {
     lv_label_set_text(enable_button_label_, LV_SYMBOL_PLAY " ENABLE");
     lv_obj_set_style_bg_color(enable_button_, lv_palette_main(LV_PALETTE_GREEN), 0);
   }
+  // DISABLE button: highlighted while the motors are disabled.
+  lv_obj_set_style_bg_color(disable_button_,
+                            state.mode == HoloDeckController::Mode::DISABLED
+                                ? lv_palette_main(LV_PALETTE_ORANGE)
+                                : lv_palette_main(LV_PALETTE_GREY),
+                            0);
 
   // numeric velocity readout
   const float speed = std::sqrt(state.vx_mps * state.vx_mps + state.vy_mps * state.vy_mps);
   const float heading_degrees =
       speed > 0.0f ? std::atan2(state.vy_mps, state.vx_mps) * kRadiansToDegrees : 0.0f;
+  // Rotation is shown in deg/s (more intuitive than chassis RPM).
+  const float w_dps = state.w_rpm * hw_config::kRpmToDegPerSec;
   auto velocity_text = fmt::format("vx (fwd):  {:+.3f} m/s\n"
-                                   "vy (left): {:+.3f} m/s\n"
+                                   "vy (right):{:+.3f} m/s\n"
                                    "|v|:       {:.3f} m/s\n"
                                    "heading:   {:+.0f} deg\n"
-                                   "rotation:  {:+.2f} RPM (CCW)",
-                                   state.vx_mps, state.vy_mps, speed, heading_degrees, state.w_rpm);
+                                   "rotation:  {:+.0f} deg/s (CCW)",
+                                   state.vx_mps, state.vy_mps, speed, heading_degrees, w_dps);
   lv_label_set_text(velocity_label_, velocity_text.c_str());
 
-  auto limits_text = fmt::format("Limits: {:.2f} m/s | {:.1f} RPM | wheel {:.0f} RPM",
-                                 state.max_speed_mps, state.max_rotation_rpm, state.max_wheel_rpm);
+  auto limits_text =
+      fmt::format("Limits: {:.2f} m/s | {:.0f} deg/s | wheel {:.0f} RPM", state.max_speed_mps,
+                  state.max_rotation_rpm * hw_config::kRpmToDegPerSec, state.max_wheel_rpm);
   lv_label_set_text(limits_label_, limits_text.c_str());
 
   // vector visualization (full deflection = the max-speed limit)
   const float max_speed = std::max(state.max_speed_mps, 1e-3f);
+  // the state's vy is right-positive (platform frame); the display helpers
+  // take left-positive
   set_vector_line(std::clamp(state.vx_mps / max_speed, -1.0f, 1.0f),
-                  std::clamp(state.vy_mps / max_speed, -1.0f, 1.0f));
+                  std::clamp(-state.vy_mps / max_speed, -1.0f, 1.0f));
 
   // motor tiles
   for (size_t i = 0; i < motor_tiles_.size(); ++i) {
@@ -432,7 +544,7 @@ void Gui::update_state(const HoloDeckController::State &state) {
   // read-only indicators of the live command otherwise
   if (!gui_active) {
     set_knob_position(std::clamp(state.vx_mps / max_speed, -1.0f, 1.0f),
-                      std::clamp(state.vy_mps / max_speed, -1.0f, 1.0f));
+                      std::clamp(-state.vy_mps / max_speed, -1.0f, 1.0f));
     const float max_rotation = std::max(state.max_rotation_rpm, 1e-3f);
     const int rotation_value = static_cast<int>(
         std::clamp(-state.w_rpm / max_rotation, -1.0f, 1.0f) * kRotationCommandRange);
@@ -458,6 +570,15 @@ void Gui::update_state(const HoloDeckController::State &state) {
                         static_cast<int>(state.max_rotation_rpm / kRotationSliderScale),
                         LV_ANIM_OFF);
   }
+  if (state.twist_rotation_scale != last_twist_scale_ &&
+      !lv_obj_has_state(twist_scale_slider_, LV_STATE_PRESSED)) {
+    lv_slider_set_value(twist_scale_slider_,
+                        static_cast<int>(state.twist_rotation_scale / kTwistScaleSliderScale),
+                        LV_ANIM_OFF);
+    lv_label_set_text_fmt(twist_scale_label_, "Twist scale: %.1fx",
+                          static_cast<double>(state.twist_rotation_scale));
+  }
   last_max_speed_ = state.max_speed_mps;
   last_max_rotation_ = state.max_rotation_rpm;
+  last_twist_scale_ = state.twist_rotation_scale;
 }

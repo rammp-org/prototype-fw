@@ -1,0 +1,21 @@
+## IDF Component Manager Manifest File
+dependencies:
+  idf:
+    version: '>=5.3'
+  # Waveshare ESP32-P4-ETH board support (Ethernet)
+  espp/esp32-p4-eth: '>=1.3.4'
+  # CAN (TWAI) transport for the RMD wheel motors
+  espp/twai: '>=1.3.4'
+  # RTPS/DDS link to the joystick HMI + what the rtps component needs
+  espp/rtps: '>=1.3.4'
+  espp/cdr: '>=1.3.4'
+  espp/reflect_cpp: '>=1.3.4'
+  espp/socket: '>=1.3.4'
+  espp/thread_pool: '>=1.3.4'
+  # control / publish loops, console
+  espp/timer: '>=1.3.4'
+  espp/task: '>=1.3.4'
+  espp/cli: '>=1.3.4'
+  espp/logger: '>=1.3.4'
+  espp/format: '>=1.3.4'
+  espp/base_component: '>=1.3.4'

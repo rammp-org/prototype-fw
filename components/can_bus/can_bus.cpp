@@ -65,7 +65,7 @@ bool CanBus::start(uint32_t bitrate) {
   config.io_cfg.quanta_clk_out = GPIO_NUM_NC;
   config.io_cfg.bus_off_indicator = GPIO_NUM_NC;
   config.bit_timing.bitrate = bitrate;
-  config.tx_queue_depth = 8;
+  config.tx_queue_depth = kTxQueueDepth;
 
   esp_err_t error = twai_new_node_onchip(&config, &node_);
   if (error == ESP_OK) {
@@ -90,20 +90,64 @@ bool CanBus::start(uint32_t bitrate) {
   return true;
 }
 
-bool CanBus::send(const CanFrame &message) const {
+bool CanBus::send(const CanFrame &message, bool wait_for_queue_space) {
   std::lock_guard<std::mutex> lock(transmit_mutex_);
   if (node_ == nullptr || message.dlc > message.data.size()) {
     return false;
   }
 
-  twai_frame_t frame{};
-  frame.header.id = message.id;
-  frame.header.ide = message.extended;
-  frame.header.rtr = message.rtr;
-  frame.header.fdf = 0;
-  frame.header.dlc = message.dlc;
-  frame.buffer = const_cast<uint8_t *>(message.data.data());
-  frame.buffer_len = message.dlc;
-  const esp_err_t error = twai_node_transmit(node_, &frame, 3);
-  return error == ESP_OK && twai_node_transmit_wait_all_done(node_, 10) == ESP_OK;
+  // Copy into a persistent ring slot: the on-chip TWAI TX queue is zero-copy and
+  // reads this frame/buffer asynchronously from the ISR, so it must not live on
+  // the stack. Only advance the ring after a successful enqueue, so a slot is
+  // never reused while the driver may still reference it.
+  TxSlot &slot = tx_ring_[tx_ring_index_];
+  slot.payload = message.data;
+  slot.frame = twai_frame_t{};
+  slot.frame.header.id = message.id;
+  slot.frame.header.ide = message.extended;
+  slot.frame.header.rtr = message.rtr;
+  slot.frame.header.fdf = 0;
+  slot.frame.header.dlc = message.dlc;
+  slot.frame.buffer = slot.payload.data();
+  slot.frame.buffer_len = message.dlc;
+
+  // Never wait on wire completion (twai_node_transmit_wait_all_done): with no
+  // bus ACK that would stall for the full timeout on every send. The request /
+  // response protocols get their reply through the RX queue instead.
+  const uint32_t enqueue_timeout_ms = wait_for_queue_space ? 3 : 0;
+  const esp_err_t error = twai_node_transmit(node_, &slot.frame, enqueue_timeout_ms);
+  if (error == ESP_OK) {
+    tx_ring_index_ = (tx_ring_index_ + 1) % kTxRingSize;
+    return true;
+  }
+  if (wait_for_queue_space) {
+    logger_.warn("CAN transmit failed: {}", esp_err_to_name(error));
+  } else {
+    // Expected and self-correcting when nothing is draining the bus; keep it off
+    // the error path so it does not spam a real-time control loop.
+    logger_.debug("CAN frame dropped (non-blocking): {}", esp_err_to_name(error));
+  }
+  return false;
+}
+
+bool CanBus::flush_pending() {
+  std::lock_guard<std::mutex> lock(transmit_mutex_);
+  if (node_ == nullptr) {
+    return false;
+  }
+  // The driver has no way to drop queued frames (and a disable/enable cycle
+  // RESUMES the pending transaction on IDF 6.x, it does not abort it), but the
+  // backlog is bounded: the node transmits single-shot (no hardware retry), so
+  // once a frame reaches the controller it completes or fails within about one
+  // frame time, and the whole backlog (kTxQueueDepth queued + 1 in flight) is
+  // gone within a couple of ms at 1 Mbit/s. Wait that out: the caller's stop
+  // frames then find an empty queue, go out next, and nothing older follows.
+  static constexpr int kDrainTimeoutMs = 5;
+  const esp_err_t error = twai_node_transmit_wait_all_done(node_, kDrainTimeoutMs);
+  if (error != ESP_OK) {
+    logger_.warn("CAN TX queue did not drain within {} ms: {}", kDrainTimeoutMs,
+                 esp_err_to_name(error));
+    return false;
+  }
+  return true;
 }

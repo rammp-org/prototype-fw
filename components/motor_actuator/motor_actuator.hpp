@@ -35,10 +35,23 @@ public:
   bool start(uint32_t bitrate = 1'000'000);
   bool send(const MotorPacket &command);
   bool request(const MotorPacket &command, MotorPacket &response, uint32_t timeout_ms = 100);
+  // Drain every frame still queued in the driver (bounded: single-shot
+  // transmit empties the 4-frame backlog within ~1 ms), for a mode transition
+  // that must not let an older set-point execute after the stop frames that
+  // follow: those then go out on an empty queue. Returns false if the queue
+  // did not drain in time (a wedged controller).
+  bool flush_pending();
 
 private:
   bool register_receivers();
-  bool send_unlocked(const MotorPacket &command);
+  // Enqueue one frame with transaction_mutex_ already held. Never waits on wire
+  // completion: CanBus::send() copies the frame into its persistent TX ring
+  // (the on-chip TWAI TX queue is zero-copy) and never blocks a real-time
+  // control loop on an ACK that may never arrive. wait_for_queue_space=true
+  // (request path) briefly waits for queue space so a poll is not dropped;
+  // false (fire-and-forget set-points) enqueues non-blocking and drops the
+  // stale frame if the queue is full - the next control tick supersedes it.
+  bool send_unlocked(const MotorPacket &command, bool wait_for_queue_space = true);
 
   std::unique_ptr<CanBus> owned_bus_;
   CanBus *bus_{nullptr};
@@ -87,6 +100,12 @@ public:
   bool set_position(float position_degrees, float max_speed_rpm);
   bool send_incremental_position(float delta_degrees, float max_speed_rpm);
   bool stop();
+  /// Stop the motor (0x81) and wait for the motor's own acknowledgement: the
+  /// RMD echoes the command frame from its reply id. Unlike stop(), which only
+  /// reports that the frame left (queued, or completed on the bus, depending on
+  /// the transport), this returns true only when THIS motor answered, so a
+  /// control-level disable can retry until every motor has really stopped.
+  bool stop_acknowledged(uint32_t timeout_ms = 20);
   bool disable();
   bool hold();
   bool reset_system();

@@ -63,10 +63,24 @@ bool MotorCanBus::start(uint32_t bitrate) {
 
 bool MotorCanBus::send(const MotorPacket &command) {
   std::lock_guard<std::mutex> lock(transaction_mutex_);
-  return send_unlocked(command);
+  // Fire-and-forget: enqueue non-blocking, drop if the TX queue is full. A
+  // set-point that is dropped or still queued is superseded by the next tick;
+  // a mode transition that must not let a queued set-point run after its stop
+  // calls flush_pending() first.
+  return send_unlocked(command, /*wait_for_queue_space=*/false);
 }
 
-bool MotorCanBus::send_unlocked(const MotorPacket &command) {
+bool MotorCanBus::flush_pending() {
+  std::lock_guard<std::mutex> lock(transaction_mutex_);
+  if (bus_ == nullptr) {
+    return false;
+  }
+  // The shared bus drains its (bounded) TX backlog; the caller's stop frames
+  // then go out on an empty queue with nothing older behind them.
+  return bus_->flush_pending();
+}
+
+bool MotorCanBus::send_unlocked(const MotorPacket &command, bool wait_for_queue_space) {
   if (bus_ == nullptr) {
     logger_.error("Motor CAN is not started");
     return false;
@@ -80,11 +94,16 @@ bool MotorCanBus::send_unlocked(const MotorPacket &command) {
       .dlc = static_cast<uint8_t>(command.length),
       .data = command.data,
   };
-  if (!bus_->send(frame)) {
-    logger_.error("Motor CAN transmit failed");
+  // CanBus::send() never waits on wire completion (see its TX ring); a dropped
+  // fire-and-forget set-point is expected when nothing drains the bus and is
+  // superseded by the next tick, so only the request path reports failures.
+  if (!bus_->send(frame, wait_for_queue_space)) {
+    if (wait_for_queue_space) {
+      logger_.error("Motor CAN transmit failed");
+    }
     return false;
   }
-  return true;
+  return false;
 }
 
 bool MotorCanBus::request(const MotorPacket &command, MotorPacket &response,
@@ -113,7 +132,7 @@ bool MotorCanBus::request(const MotorPacket &command, MotorPacket &response,
         .length = frame.dlc,
         .data = frame.data,
     };
-    logger_.info("CAN RX id=0x{:x} cmd=0x{:02x} length={}", response.id, response.data[0],
+    logger_.debug("CAN RX id=0x{:x} cmd=0x{:02x} length={}", response.id, response.data[0],
            response.length);
     const uint32_t expected_reply_id_value = command.data[0] == 0x79
                            ? 0x300u
@@ -351,6 +370,15 @@ bool MotorActuator::stop() {
   std::array<uint8_t, packet_length_> command{};
   command[0] = 0x81;
   return send_command(command);
+}
+
+bool MotorActuator::stop_acknowledged(uint32_t timeout_ms) {
+  MotorPacket response{};
+  if (!request(0x81, response, timeout_ms)) {
+    logger_.warn("Motor {} did not acknowledge stop within {} ms", motor_id_, timeout_ms);
+    return false;
+  }
+  return response.data[0] == 0x81;
 }
 
 bool MotorActuator::disable() { return send_torque(0); }

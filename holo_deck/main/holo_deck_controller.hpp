@@ -2,6 +2,7 @@
 
 #include <array>
 #include <chrono>
+#include <functional>
 #include <mutex>
 
 #include "base_component.hpp"
@@ -28,14 +29,29 @@
 /// Source arbitration: any joystick deflection beyond the deadzone makes the
 /// joystick the active source. Once the joystick has been centered for longer
 /// than the release timeout, control falls back to the GUI setpoint, which is
-/// zeroed on the handover so the platform never jumps. E-stop always wins.
+/// zeroed on the handover so the platform never jumps. STOP always wins.
+///
+/// IMPORTANT: every motor command is issued from the single control loop, so a
+/// STOP can never be overtaken by an in-flight drive command from another
+/// thread (the bug where hitting STOP with the joystick deflected left the
+/// motors driving). The setters only change the mode; the next control tick
+/// (<= one control period) enacts it.
 ///
 /// All public setters and state() are thread-safe.
 class HoloDeckController : public espp::BaseComponent {
 public:
-  /// The currently-active control source.
+  /// The controller's operating mode.
+  enum class Mode {
+    DRIVE,    ///< The active source drives the platform (normal operation).
+    STOPPED,  ///< E-stop: the loop actively commands zero velocity (motors
+              ///< hold at 0 in closed-loop). Overrides all sources.
+    DISABLED, ///< Motors stopped at the CONTROL level (MotorActuator::stop()),
+              ///< NOT held at zero by the velocity loop. Re-enable to drive.
+  };
+
+  /// The currently-active control source (meaningful only in DRIVE mode).
   enum class Source {
-    STOPPED,  ///< E-stopped / disabled; motors are not being commanded.
+    STOPPED,  ///< E-stopped / disabled; motors are not being driven.
     GUI,      ///< The touch GUI / CLI setpoint drives the platform.
     JOYSTICK, ///< The physical joystick drives the platform.
   };
@@ -52,18 +68,23 @@ public:
 
   /// Snapshot of the full controller state, for the GUI / CLI.
   struct State {
-    bool enabled{false};
+    Mode mode{Mode::STOPPED}; ///< Operating mode.
+    bool enabled{false};      ///< Convenience: mode == DRIVE.
     Source source{Source::STOPPED};
     float vx_mps{0.0f};                ///< Active commanded forward velocity.
-    float vy_mps{0.0f};                ///< Active commanded leftward velocity.
+    float vy_mps{0.0f};                ///< Active commanded velocity, + = RIGHT (platform frame).
     float w_rpm{0.0f};                 ///< Active commanded CCW rotation rate.
     float gui_vx_mps{0.0f};            ///< GUI/CLI setpoint (pre-arbitration).
-    float gui_vy_mps{0.0f};            ///< GUI/CLI setpoint (pre-arbitration).
+    float gui_vy_mps{0.0f};            ///< GUI/CLI setpoint (pre-arbitration), + = right.
     float gui_w_rpm{0.0f};             ///< GUI/CLI setpoint (pre-arbitration).
     float max_speed_mps{0.0f};         ///< Current translation limit.
     float max_rotation_rpm{0.0f};      ///< Current rotation-rate limit.
+    float twist_rotation_scale{1.0f};  ///< Joystick-twist rotation scale.
     float max_wheel_rpm{0.0f};         ///< Per-wheel scaling limit.
     std::array<MotorStatus, 4> motors; ///< Indexed by motor id - 1.
+    /// True while the last control tick failed to deliver a velocity (or stop)
+    /// command to at least one motor: a CAN / motor fault the operator must see.
+    bool send_failing{false};
   };
 
   /// Configuration for the controller.
@@ -76,6 +97,7 @@ public:
     float max_wheel_rpm;                                ///< Per-wheel scaling limit.
     float max_speed_mps;                                ///< Initial translation limit.
     float max_rotation_rpm;                             ///< Initial rotation-rate limit.
+    float twist_rotation_scale{1.0f};                   ///< Initial joystick-twist scale.
     std::chrono::milliseconds control_period;           ///< Control loop period.
     std::chrono::milliseconds status_poll_period;       ///< Status poll period.
     std::chrono::milliseconds joystick_release_timeout; ///< Centered time
@@ -83,6 +105,17 @@ public:
                                                         ///< control.
     std::chrono::milliseconds status_stale_timeout;     ///< Age before a motor
                                                         ///< status is stale.
+    uint32_t status_read_timeout_ms;                    ///< Per-status-read reply
+                                                        ///< timeout; bounds how long
+                                                        ///< the shared CAN mutex is
+                                                        ///< held by a status poll.
+    /// Optional transport hook: make sure no set-point the transport still has
+    /// queued can execute after the stop frames that follow (drop them, or
+    /// drain them within a bound so the stop frames go out on an empty queue).
+    /// Called on each transition into STOPPED / DISABLED, right before the
+    /// stop frames. Leave unset for a transport that sends synchronously
+    /// (nothing is ever left queued).
+    std::function<void()> flush_pending_commands{nullptr};
     espp::Logger::Verbosity log_level{espp::Logger::Verbosity::WARN};
   };
 
@@ -92,8 +125,10 @@ public:
   HoloDeckController(const HoloDeckController &) = delete;
   HoloDeckController &operator=(const HoloDeckController &) = delete;
 
-  /// Set the GUI/CLI velocity setpoint in real units. The translation vector
-  /// is clamped to the max-speed limit and w to the max-rotation limit.
+  /// Set the GUI/CLI velocity setpoint in real units, in the PLATFORM frame:
+  /// vx forward, vy RIGHT, w counter-clockwise (the normalized setters below
+  /// take a left-positive input and convert). The translation vector is
+  /// clamped to the max-speed limit and w to the max-rotation limit.
   void set_gui_velocity(float vx_mps, float vy_mps, float w_rpm);
 
   /// Set only the translation part of the GUI setpoint from normalized
@@ -111,16 +146,36 @@ public:
   /// joystick the active source.
   void set_joystick_input(float forward, float left, float ccw);
 
-  /// Enable the platform, or e-stop it (false). Enabling zeroes the GUI
-  /// setpoint so the platform never jumps on re-enable. Disabling sends a
-  /// single zero-velocity command to every motor.
+  /// Enter DRIVE mode. Zeroes the GUI setpoint and requires the physical
+  /// joystick to be re-centered before it can take over, so the platform never
+  /// jumps or lurches on (re-)enable - even if a source was deflected.
+  void enable();
+  /// E-STOP: enter STOPPED mode. The control loop actively commands zero
+  /// velocity to every motor (they decelerate and hold at 0), overriding all
+  /// sources. Always wins.
+  void stop();
+  /// Disable the motors at the CONTROL level (MotorActuator::stop()): the
+  /// velocity loop stops commanding them entirely and the motors are halted by
+  /// the motor controllers themselves, not held at zero by the loop. Call
+  /// enable() to resume driving.
+  void disable_motors();
+  /// Compatibility shim: true -> enable(), false -> stop() (e-stop).
   void set_enabled(bool enabled);
+  /// True in DRIVE mode.
   bool is_enabled() const;
+  /// The current operating mode.
+  Mode mode() const;
 
   /// Set the maximum translation speed, m/s (clamped to be positive).
   void set_max_speed(float max_speed_mps);
   /// Set the maximum chassis rotation rate, RPM (clamped to be positive).
   void set_max_rotation(float max_rotation_rpm);
+  /// Set the scale factor applied to the rotation rate commanded from the
+  /// JOYSTICK TWIST axis (twist * scale * max-rotation). Values > 1 let the
+  /// twist command exceed the nominal rotation limit to compensate the
+  /// platform's weak rotation authority; wheel commands remain bounded by
+  /// max_wheel_rpm regardless (clamped to be positive).
+  void set_twist_rotation_scale(float scale);
 
   /// Get a snapshot of the current controller state. Thread-safe.
   State state() const;
@@ -128,7 +183,19 @@ public:
 protected:
   bool control_step();
   bool status_step();
-  void send_zeros_unlocked();
+  /// Send zero velocity to every motor (STOPPED). Safe to call without holding
+  /// mutex_ - the CAN transport has its own locking.
+  void send_zeros();
+  /// Halt every motor at the control level (DISABLED) via
+  /// MotorActuator::stop_acknowledged(), waiting up to kStopAckTimeoutMs per
+  /// motor for its echo. \return true only if every motor acknowledged its stop.
+  bool send_disable();
+  /// How long a motor gets to acknowledge its stop. Only paid in DISABLED (and
+  /// once on the transition into it), where the loop has nothing else to do.
+  static constexpr uint32_t kStopAckTimeoutMs = 10;
+  /// Run Config::flush_pending_commands once if a stop() / disable_motors()
+  /// asked for it (before that transition's stop frames go out).
+  void flush_transport_if_requested();
   static float clamp_positive(float value);
 
   HoloDeckPlatform &platform_;
@@ -137,10 +204,16 @@ protected:
   float max_wheel_rpm_;
   std::chrono::milliseconds joystick_release_timeout_;
   std::chrono::milliseconds status_stale_timeout_;
+  uint32_t status_read_timeout_ms_;
+  std::function<void()> flush_pending_commands_; ///< Config::flush_pending_commands
 
   mutable std::mutex mutex_;
-  bool enabled_{false};
-  bool stop_sent_{false};
+  Mode mode_{Mode::STOPPED};
+  bool disable_sent_{false};              ///< the one-shot motor stop for DISABLED was sent
+  bool flush_pending_{false}; ///< a STOP / DISABLE landed: flush the transport before enacting it
+  bool require_joystick_recenter_{false}; ///< ignore the joystick until it re-centers
+  uint32_t joystick_sample_seq_{0};       ///< +1 per set_joystick_input()
+  uint32_t recenter_after_seq_{0};        ///< the guard clears only on a LATER sample
   Source source_{Source::STOPPED};
   float gui_vx_mps_{0.0f};
   float gui_vy_mps_{0.0f};
@@ -151,6 +224,7 @@ protected:
   std::chrono::steady_clock::time_point last_joystick_activity_{};
   float max_speed_mps_;
   float max_rotation_rpm_;
+  float twist_rotation_scale_{1.0f};
   // active (post-arbitration) command, written by the control loop
   float vx_mps_{0.0f};
   float vy_mps_{0.0f};
