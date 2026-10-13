@@ -1,0 +1,19 @@
+menu "PEAR MIB Configuration"
+
+    choice PEAR_DHCP_MODE
+        prompt "Ethernet DHCP mode"
+        default PEAR_DHCP_SERVER
+        help
+            The joystick HMI (pace-hmi-fw) is a DHCP client. On a direct cable
+            between the HMI and this board (the chair topology, no router) this
+            board must hand out the address: DHCP server, 192.168.4.1/24. On a
+            bench LAN with a router, use DHCP client so the PC tools
+            (rtps_mcb_gui.py etc.) share one subnet with both boards.
+
+        config PEAR_DHCP_SERVER
+            bool "DHCP server (192.168.4.1/24) - direct cable to the HMI"
+        config PEAR_DHCP_CLIENT
+            bool "DHCP client - bench LAN with a router"
+    endchoice
+
+endmenu
