@@ -2,6 +2,7 @@
 
 #include <algorithm>
 #include <cmath>
+#include <optional>
 
 namespace {
 constexpr uint16_t kDs402StateMask = 0x006F;
@@ -293,51 +294,59 @@ LinkageController::State LinkageController::state() const {
 bool LinkageController::status_step() {
   // 1. enact the queued moves (all corners of a pose in one tick), outside the
   //    lock: move_absolute is a confirmed transaction with retries
-  std::array<bool, pear::kCornerCount> to_move{};
-  Corners targets{};
-  std::lock_guard<std::mutex> moves(move_mutex_); // excludes zero() / load_zero()
-  // Mark the batch BEFORE looking at the drive (DriveController::enable does
-  // the mirror image), so base and linkage motion can never overlap; cleared
-  // when this scope ends, batch or no batch.
-  struct EnactingGuard {
-    std::atomic<bool> &flag;
-    ~EnactingGuard() { flag.store(false); }
-  };
-  enacting_.store(true);
-  const EnactingGuard enacting_guard{enacting_};
   {
-    std::lock_guard<std::mutex> lock(mutex_);
-    to_move = pending_;
-    targets = pending_target_deg_;
-    pending_.fill(false);
-    // a DRIVE that landed after the request was accepted: drop the move
-    if (drive_enabled_ && drive_enabled_() &&
-        std::any_of(to_move.begin(), to_move.end(), [](bool b) { return b; })) {
-      logger_.warn("Queued linkage move dropped: the base started driving");
-      to_move.fill(false);
-    }
-  }
-  for (const Corner corner : pear::kCorners) {
-    if (!to_move[pear::index(corner)])
-      continue;
-    // re-validated per corner: a refusal (driving, fault, stale) between two
-    // confirmed moves stops the rest of the batch
+    std::array<bool, pear::kCornerCount> to_move{};
+    Corners targets{};
+    std::lock_guard<std::mutex> moves(move_mutex_); // excludes zero() / load_zero()
     {
       std::lock_guard<std::mutex> lock(mutex_);
-      if (const char *reason = refusal_reason_locked()) {
-        logger_.warn("Linkage batch stopped before {}: {}", pear::corner_name(corner), reason);
-        break;
+      to_move = pending_;
+      targets = pending_target_deg_;
+      pending_.fill(false);
+    }
+    const bool have_work = std::any_of(to_move.begin(), to_move.end(), [](bool b) { return b; });
+    // Only a batch with work marks itself moving (an idle tick must not make
+    // DriveController::enable() refuse), and it does so BEFORE looking at the
+    // drive (enable() does the mirror image), so base and linkage motion can
+    // never overlap. The mark is cleared when this block ends.
+    struct EnactingGuard {
+      std::atomic<bool> &flag;
+      ~EnactingGuard() { flag.store(false); }
+    };
+    std::optional<EnactingGuard> enacting_guard;
+    if (have_work) {
+      enacting_.store(true);
+      enacting_guard.emplace(enacting_);
+      // a DRIVE that landed after the request was accepted: drop the batch
+      if (drive_enabled_ && drive_enabled_()) {
+        logger_.warn("Queued linkage move dropped: the base started driving");
+        to_move.fill(false);
       }
     }
-    auto &motor = motors_[pear::index(corner)];
-    const bool moved = motor.move_absolute(targets[corner]);
-    std::lock_guard<std::mutex> lock(mutex_);
-    if (moved) {
+    for (const Corner corner : pear::kCorners) {
+      if (!to_move[pear::index(corner)])
+        continue;
+      // re-validated per corner: a refusal (driving, fault, stale) between two
+      // confirmed moves stops the rest of the batch
+      {
+        std::lock_guard<std::mutex> lock(mutex_);
+        if (const char *reason = refusal_reason_locked()) {
+          logger_.warn("Linkage batch stopped before {}: {}", pear::corner_name(corner), reason);
+          break;
+        }
+      }
+      auto &motor = motors_[pear::index(corner)];
+      const bool moved = motor.move_absolute(targets[corner]);
+      std::lock_guard<std::mutex> lock(mutex_);
+      if (!moved) {
+        // the platform must not be twisted against a corner that did not take
+        // its move: the rest of the batch is abandoned (and re-requested whole)
+        logger_.error("Linkage {}: move to {:.1f} deg failed; batch abandoned",
+                      pear::corner_name(corner), targets[corner]);
+        break;
+      }
       motor_status_[pear::index(corner)].target_degrees = targets[corner];
       note_command_sent_locked();
-    } else {
-      logger_.error("Linkage {}: move to {:.1f} deg failed", pear::corner_name(corner),
-                    targets[corner]);
     }
   }
 
