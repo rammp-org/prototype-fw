@@ -390,21 +390,33 @@ bool DriveController::control_step() {
   // after its communication-loss timeout while the other three keep driving.
   // STOP the platform (zeros from now on), drop the armed state and latch the
   // node id for MibStatus / MotorState until it reports again.
-  bool wheel_lost = false;
+  bool wheel_fault = false;
   {
     std::lock_guard<std::mutex> lock(mutex_);
     const size_t stale = stale_wheel_locked(std::chrono::steady_clock::now());
+    // a drive reporting an alarm (status_step() records it) has stopped
+    // contributing just like a silent one: the other three must not keep driving
+    const auto faulted = std::find_if(motor_status_.begin(), motor_status_.end(),
+                                      [](const MotorStatus &m) { return m.valid && m.faulted; });
     if (stale != std::string::npos) {
       lost_wheel_id_ = motor_status_[stale].id;
+      logger_.error("Wheel drive {} stopped reporting; platform STOPPED", lost_wheel_id_);
+    } else if (faulted != motor_status_.end()) {
+      logger_.error("Wheel drive {} reports an alarm (error 0x{:04X}); platform STOPPED "
+                    "(`reset_fault`, then enable again)",
+                    faulted->id, faulted->error_code);
+    }
+    if (stale != std::string::npos || faulted != motor_status_.end()) {
       mode_ = Mode::STOPPED;
       armed_ = false;
       flush_pending_ = true;
       send_failing_ = true;
-      logger_.error("Wheel drive {} stopped reporting; platform STOPPED", lost_wheel_id_);
+      wheel_fault = true;
     }
-    wheel_lost = lost_wheel_id_ != 0; // read under the lock: status_step() clears it
+    wheel_fault =
+        wheel_fault || lost_wheel_id_ != 0; // read under the lock: status_step() clears it
   }
-  if (wheel_lost) {
+  if (wheel_fault) {
     flush_transport_if_requested();
     send_zeros();
     return false; // STOPPED from the next tick on
