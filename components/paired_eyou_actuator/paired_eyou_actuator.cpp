@@ -23,15 +23,17 @@ bool PairedEyouActuator::enable_drive(uint32_t timeout_ms) {
   if (primary_ok && secondary_ok) {
     return true;
   }
-  // a mechanically coupled pair is never left half energized: whichever side
-  // did enable is disabled again, so a failed result means both are off
+  // a mechanically coupled pair is never left half energized: BOTH sides are
+  // disabled again (a side whose enable "failed" may only have lost the
+  // acknowledgement and be energized all the same), so false means both off
   logger_.error("Enable failed ({}); disabling both motors of the pair",
                 !primary_ok && !secondary_ok ? "both" : (primary_ok ? "secondary" : "primary"));
-  if (primary_ok) {
-    primary_.disable_drive(timeout_ms);
-  }
-  if (secondary_ok) {
-    secondary_.disable_drive(timeout_ms);
+  const bool primary_off = primary_.disable_drive(timeout_ms);
+  const bool secondary_off = secondary_.disable_drive(timeout_ms);
+  if (!primary_off || !secondary_off) {
+    logger_.error("Disable after the failed enable not confirmed ({}); check the pair",
+                  !primary_off && !secondary_off ? "both"
+                                                 : (primary_off ? "secondary" : "primary"));
   }
   return false;
 }

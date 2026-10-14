@@ -288,6 +288,10 @@ bool MotorActuator::send_torque(int16_t torque_raw) {
 }
 
 bool MotorActuator::send_velocity(float velocity_rpm) {
+  if (!std::isfinite(velocity_rpm)) { // same hole as send_incremental_position
+    logger_.error("Rejecting a non-finite velocity");
+    return false;
+  }
   const float motor_velocity_raw = velocity_rpm * gear_ratio_ * 6.0f * 100.0f;
   if (motor_velocity_raw < static_cast<float>(INT32_MIN) ||
       motor_velocity_raw > static_cast<float>(INT32_MAX)) {
@@ -364,6 +368,11 @@ bool MotorActuator::set_position(float position_degrees, float max_speed_rpm) {
 }
 
 bool MotorActuator::send_incremental_position(float delta_degrees, float max_speed_rpm) {
+  if (!std::isfinite(delta_degrees) || !std::isfinite(max_speed_rpm)) {
+    // a NaN passes every range comparison below and lround() of it is undefined
+    logger_.error("Rejecting a non-finite incremental position / speed");
+    return false;
+  }
   const float motor_delta_centidegrees = delta_degrees * gear_ratio_ * 100.0f;
   const float motor_speed_dps = max_speed_rpm * gear_ratio_ * 6.0f;
   if (motor_delta_centidegrees < static_cast<float>(INT32_MIN) ||
