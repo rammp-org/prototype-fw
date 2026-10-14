@@ -498,7 +498,7 @@ def _write(out: bytearray, kind: Kind, value: Any) -> None:
             for element in value:
                 _write(out, kind[1], element)
     elif kind == "str":
-        data = str(value).encode("ascii", "ignore")
+        data = str(value).encode("utf-8")  # XCDR1 std::string carries UTF-8 as-is
         _write(out, "I", len(data) + 1)
         out.extend(data + b"\0")
     else:
@@ -531,7 +531,7 @@ def _read(buf: bytes, pos: int, kind: Kind) -> Tuple[Any, int]:
         length, pos = _read(buf, pos, "I")
         if pos + length > len(buf):
             raise ValueError("string runs past the end")
-        text = buf[pos:pos + length].split(b"\0", 1)[0].decode("ascii", "replace")
+        text = buf[pos:pos + length].split(b"\0", 1)[0].decode("utf-8", "replace")
         return text, pos + length
     size = struct.calcsize(kind)
     pos += -pos % size

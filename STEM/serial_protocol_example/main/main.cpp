@@ -234,6 +234,7 @@ void serial_task(void *context) {
   auto &protocol = *static_cast<ProtocolContext *>(context);
   char line[128]{};
   size_t length = 0;
+  bool overflowed = false; // the rest of an oversized frame is ignored up to its newline
   uint8_t byte = 0;
 
   while (true) {
@@ -244,13 +245,22 @@ void serial_task(void *context) {
     if (byte == '\r')
       continue;
     if (byte == '\n') {
+      if (overflowed) {
+        // the tail of a rejected frame must never run as a command of its own
+        overflowed = false;
+        length = 0;
+        continue;
+      }
       line[length] = '\0';
       send_response("RX frame length=%u text=\\\"%s\\\"\n", static_cast<unsigned>(length), line);
       process_command(line, protocol);
       length = 0;
       continue;
     }
+    if (overflowed)
+      continue;
     if (length + 1 >= sizeof(line)) {
+      overflowed = true;
       length = 0;
       send_response("ERROR command_too_long\n");
       continue;
