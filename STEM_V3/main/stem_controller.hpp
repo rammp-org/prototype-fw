@@ -72,8 +72,8 @@ public:
     PairedEyouActuator &right;
     PairedEyouActuator &seat;
     std::span<EyouMotor> motors; ///< every motor, for telemetry (ids reported as-is)
-    bool can_ok{true};               ///< whether the CAN bus came up (reported in State)
-    float min_deg{-60.0f};           ///< pair position limits (applied to every pair)
+    bool can_ok{true};           ///< whether the CAN bus came up (reported in State)
+    float min_deg{-60.0f};       ///< pair position limits (applied to every pair)
     float max_deg{60.0f};
     float mirror_tolerance_deg{1.0f}; ///< max |primary + secondary| for a pair to be usable
     // NOTE: EyouMotor moves at a pre-configured profile velocity (see
@@ -142,6 +142,8 @@ public:
   State snapshot(bool read_motors);
 
 private:
+  // stop() with mutex_ already held (command_pose's halt on a partial pose).
+  bool stop_unlocked();
   PairedEyouActuator &actuator(Pair pair);
   const PairedEyouActuator &actuator(Pair pair) const;
   float effective_rpm(float rpm, float fallback) const;

@@ -161,13 +161,16 @@ StemController::Result StemController::command_pose(const PoseCommand &pose, flo
       logger_.error("{} pair rejected position {:.2f} deg", stem::to_string(pair),
                     pose.pair_deg[i]);
       all_ok = false;
+      break; // no further pair: a partial pose would twist the linkage
     }
   }
   logger_.info("move x={:.1f} y={:.1f} -> left={:.2f} right={:.2f} seat={:.2f} deg{}", pose.x_rel,
                pose.y_rel, pose.pair_deg[0], pose.pair_deg[1], pose.pair_deg[2],
                all_ok ? "" : " (PARTIAL FAILURE)");
   if (!all_ok) {
-    // The pairs no longer agree with any single target.
+    // The pairs no longer agree with any single target: halt the pairs that
+    // were already commanded (the safe policy for a broken pose).
+    stop_unlocked();
     target_valid_ = false;
     return Result::ActuatorFailed;
   }
@@ -230,6 +233,10 @@ StemController::Result StemController::set_pair(Pair pair, float degrees, float 
 
 bool StemController::stop() {
   std::lock_guard<std::mutex> lock(mutex_);
+  return stop_unlocked();
+}
+
+bool StemController::stop_unlocked() {
   // NOTE: stopping does not update the tracked positions (they record what was
   // commanded, and the motors have no absolute output-shaft feedback), so a
   // pair stopped mid-move must be re-zeroed before its tracked position can be

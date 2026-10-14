@@ -120,6 +120,8 @@ public:
   State snapshot(bool read_motors);
 
 private:
+  // stop() with mutex_ already held (command_pose's halt on a partial pose).
+  bool stop_unlocked();
   PairedActuator &actuator(Pair pair);
   const PairedActuator &actuator(Pair pair) const;
   float effective_rpm(float rpm, float fallback) const;
