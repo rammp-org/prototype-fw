@@ -175,7 +175,12 @@ protected:
   /// Serializes move execution (status_step's enact phase) with a change of
   /// the software zero (zero / load_zero): a target copied before the zero
   /// moved must not execute in the new coordinate system. Locked BEFORE mutex_.
+  /// A rebase additionally holds mutex_ for its whole duration (no request is
+  /// accepted against old-frame positions), bumps frame_generation_ (a poll
+  /// that sampled the motor in the old frame discards its sample) and marks
+  /// the cached positions invalid until the next successful poll.
   std::mutex move_mutex_;
+  std::atomic<uint32_t> frame_generation_{0};
   std::atomic<bool> enacting_{false}; ///< moving(): a batch is being sent
   /// Corners commanded and not yet reporting DS402 target reached (bit =
   /// corner index): the physical-motion half of moving(). Set under mutex_
@@ -185,7 +190,9 @@ protected:
   /// Corners whose halt did not confirm yet (subset of moving_mask_); the
   /// failure is logged once per corner, retries are quiet.
   std::atomic<uint8_t> halt_unconfirmed_mask_{0};
-  std::chrono::steady_clock::time_point motion_started_{};
+  /// Per corner: when its current move was accepted (each moving bit times
+  /// out on its own; a later command to another corner must not postpone it).
+  std::array<std::chrono::steady_clock::time_point, pear::kCornerCount> motion_started_{};
   static constexpr std::chrono::seconds kMoveTimeout{15};
   std::array<MotorStatus, pear::kCornerCount> motor_status_{};
   std::array<std::chrono::steady_clock::time_point, pear::kCornerCount> motor_status_time_{};

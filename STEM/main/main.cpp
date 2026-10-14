@@ -623,13 +623,18 @@ extern "C" void app_main(void) {
   }
 
   // With CONFIG_BOOTLOADER_APP_ROLLBACK_ENABLE an image booted right after an
-  // OTA update is PENDING_VERIFY: getting this far (CAN + USB brought up) is
-  // this firmware's health check, so mark it valid or the bootloader rolls
-  // back on the next reset.
+  // OTA update is PENDING_VERIFY: CAN + USB brought up is this firmware's
+  // health check, so mark it valid then, or the bootloader rolls back on the
+  // next reset. An image that broke either subsystem is left PENDING (the
+  // console still works for a look) and is rolled back by that next reset.
   if (ota.is_pending_verify()) {
     logger.warn("This image is PENDING VERIFY (first boot after an OTA update)");
     std::error_code ota_ec;
-    if (ota.mark_app_valid(ota_ec)) {
+    if (!can_ok || !usb_ok) {
+      logger.error("Self-check FAILED (CAN {}, USB {}): image left PENDING; the next reset "
+                   "rolls back to the previous image",
+                   can_ok ? "ok" : "FAILED", usb_ok ? "ok" : "FAILED");
+    } else if (ota.mark_app_valid(ota_ec)) {
       logger.info("Self-check passed -> image marked VALID; rollback cancelled");
     } else {
       logger.error("Marking app valid failed ({}) -> rolling back", ota_ec.message());

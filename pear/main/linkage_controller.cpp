@@ -233,10 +233,11 @@ bool LinkageController::zero(std::optional<Corner> corner) {
     logger_.error("Zero refused: a linkage is still moving (wait for target reached)");
     return false;
   }
-  {
-    std::lock_guard<std::mutex> lock(mutex_);
-    invalidate_targets_locked();
-  }
+  // mutex_ is held for the whole rebase: no request is accepted (or pose
+  // measured) against positions of the old frame, and the cached positions are
+  // invalidated so requests stay refused until the next poll reads the new one
+  std::lock_guard<std::mutex> lock(mutex_);
+  invalidate_targets_locked();
   bool ok = true;
   for (const Corner c : pear::kCorners) {
     if (corner.has_value() && *corner != c)
@@ -244,11 +245,13 @@ bool LinkageController::zero(std::optional<Corner> corner) {
     const bool zeroed = motors_[pear::index(c)].zero();
     if (!zeroed)
       logger_.error("Linkage {}: zero failed", pear::corner_name(c));
-    std::lock_guard<std::mutex> lock(mutex_);
-    if (zeroed)
+    if (zeroed) {
       motor_status_[pear::index(c)].zero_loaded = true;
+      motor_status_[pear::index(c)].valid = false;
+    }
     ok = zeroed && ok;
   }
+  frame_generation_.fetch_add(1);
   return ok;
 }
 
@@ -269,18 +272,18 @@ bool LinkageController::load_zero() {
     logger_.error("load_zero refused: a linkage is still moving (wait for target reached)");
     return false;
   }
-  {
-    std::lock_guard<std::mutex> lock(mutex_);
-    invalidate_targets_locked();
-  }
+  std::lock_guard<std::mutex> lock(mutex_); // see zero()
+  invalidate_targets_locked();
   bool ok = true;
   for (const Corner c : pear::kCorners) {
     const bool loaded = motors_[pear::index(c)].load_zero();
-    std::lock_guard<std::mutex> lock(mutex_);
-    if (loaded)
+    if (loaded) {
       motor_status_[pear::index(c)].zero_loaded = true;
+      motor_status_[pear::index(c)].valid = false;
+    }
     ok = loaded && ok;
   }
+  frame_generation_.fetch_add(1);
   return ok;
 }
 
@@ -345,14 +348,19 @@ bool LinkageController::status_step() {
     //    (the Eyou's halt), then on again so the motor is ready for the next
     //    request (re-enabling does not restart the consumed set-point).
     if (const uint8_t mask = moving_mask_.load(); mask != 0) {
-      bool timed_out = false;
+      // each corner times out on its own deadline; a corner whose halt did not
+      // confirm keeps its bit (and the drive interlock) and is retried on
+      // every step, not only after the timeout
+      uint8_t to_halt = mask & halt_unconfirmed_mask_.load();
       {
         std::lock_guard<std::mutex> lock(mutex_);
-        timed_out = std::chrono::steady_clock::now() - motion_started_ > kMoveTimeout;
+        const auto now = std::chrono::steady_clock::now();
+        for (const Corner corner : pear::kCorners) {
+          const uint8_t bit = static_cast<uint8_t>(1u << pear::index(corner));
+          if ((mask & bit) != 0 && now - motion_started_[pear::index(corner)] > kMoveTimeout)
+            to_halt = static_cast<uint8_t>(to_halt | bit);
+        }
       }
-      // a corner whose halt did not confirm keeps its bit (and the drive
-      // interlock) and is retried on every step, not only after the timeout
-      const uint8_t to_halt = timed_out ? mask : (mask & halt_unconfirmed_mask_.load());
       for (const Corner corner : pear::kCorners) {
         if ((to_halt & (1u << pear::index(corner))) == 0)
           continue;
@@ -435,7 +443,7 @@ bool LinkageController::status_step() {
       // physical motion starts now; the poll clears the bit on target reached
       moving_mask_.fetch_or(bit);
       accepted = static_cast<uint8_t>(accepted | bit);
-      motion_started_ = std::chrono::steady_clock::now();
+      motion_started_[pear::index(corner)] = std::chrono::steady_clock::now();
     }
   }
 
@@ -445,11 +453,14 @@ bool LinkageController::status_step() {
   auto &motor = motors_[index];
   uint16_t statusword = 0;
   float position = 0.0f;
+  const uint32_t frame = frame_generation_.load();
   const bool status_ok = motor.get_statusword(statusword, status_read_timeout_ms_);
   const bool position_ok = status_ok && motor.get_position(position, status_read_timeout_ms_);
   const auto now = std::chrono::steady_clock::now();
 
   std::lock_guard<std::mutex> lock(mutex_);
+  if (frame != frame_generation_.load())
+    return false; // sampled in a coordinate frame a zero / load_zero just replaced
   auto &motor_status = motor_status_[index];
   if (status_ok) {
     const bool faulted = (statusword & kDs402FaultBit) != 0;
@@ -460,8 +471,6 @@ bool LinkageController::status_step() {
     motor_status.statusword = statusword;
     motor_status.faulted = faulted;
     motor_status.operation_enabled = (statusword & kDs402StateMask) == kDs402OperationEnabled;
-    motor_status.valid = true;
-    motor_status_time_[index] = now;
     // a commanded corner is in motion until the drive reports target reached
     // (or the motion cannot continue: fault / power stage off)
     const uint8_t bit = static_cast<uint8_t>(1u << index);
@@ -472,8 +481,13 @@ bool LinkageController::status_step() {
         logger_.info("Linkage move complete");
     }
   }
-  if (position_ok)
+  // fresh only after a COMPLETE sample: a statusword that reads while the
+  // position object keeps failing must not keep an old position looking current
+  if (position_ok) {
     motor_status.position_degrees = position;
+    motor_status.valid = true;
+    motor_status_time_[index] = now;
+  }
   // stale until the first successful read, and again whenever the last
   // successful read is too old
   motor_status.stale =

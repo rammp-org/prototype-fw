@@ -353,18 +353,22 @@ State StemController::snapshot(bool read_motors) {
   state.target_valid = target_valid_;
   state.target_x = target_x_;
   state.target_y = target_y_;
+  bool all_pairs_read = true;
   for (uint8_t i = 0; i < kPairCount; ++i) {
     std::array<float, 2> position{};
     if (actuator(static_cast<Pair>(i)).get_position(position, 100)) {
       state.pair_deg[i] = position[0];
+    } else {
+      all_pairs_read = false; // the entry stays 0: no pose may be derived from it
     }
   }
   state.seat_tilt_deg = seat_tilt_deg_.load();
-  // Tracked pair positions -> crank angles (inverse of pose_to_pair_deg) -> pose
+  // Measured pair positions -> crank angles (inverse of pose_to_pair_deg) -> pose;
+  // only when every read succeeded (a zeroed entry would draw a false pose)
   IkSolution fk{};
-  if (solve_fk_reference(-state.pair_deg[static_cast<uint8_t>(Pair::Left)],
-                         -state.pair_deg[static_cast<uint8_t>(Pair::Right)], config_.reference, fk,
-                         config_.geometry)) {
+  if (all_pairs_read && solve_fk_reference(-state.pair_deg[static_cast<uint8_t>(Pair::Left)],
+                                           -state.pair_deg[static_cast<uint8_t>(Pair::Right)],
+                                           config_.reference, fk, config_.geometry)) {
     state.pose_valid = true;
     state.pose_x = fk.m3[0] - config_.reference.x;
     state.pose_y = fk.m3[1] - config_.reference.y;
