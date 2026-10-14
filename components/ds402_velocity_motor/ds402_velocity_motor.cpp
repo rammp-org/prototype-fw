@@ -100,8 +100,26 @@ bool Ds402VelocityMotor::send_raw(uint32_t can_id, std::span<const uint8_t> data
   return bus_.send(frame, wait_for_queue_space);
 }
 
+void Ds402VelocityMotor::note_reply(const CanFrame &frame) {
+  if (sdo_matches(frame, 0x580 + node_id_, kTargetVelocityIndex, 0) &&
+      (frame.data[0] == kSdoDownloadOk || frame.data[0] == kSdoAbort) &&
+      owed_set_point_replies_ > 0) {
+    --owed_set_point_replies_;
+  }
+}
+
+void Ds402VelocityMotor::drain_replies() {
+  CanFrame frame{};
+  while (receive_queue_ != nullptr && xQueueReceive(receive_queue_, &frame, 0) == pdTRUE) {
+    note_reply(frame);
+  }
+}
+
 bool Ds402VelocityMotor::send_sdo_download_unconfirmed(uint16_t index, uint8_t subindex,
                                                        uint8_t command, uint32_t value) {
+  // keep the reply accounting current (and the queue from overflowing) at the
+  // set-point rate: the drive owes one reply per download it received
+  drain_replies();
   const std::array<uint8_t, 8> data{command,
                                     static_cast<uint8_t>(index),
                                     static_cast<uint8_t>(index >> 8),
@@ -113,7 +131,13 @@ bool Ds402VelocityMotor::send_sdo_download_unconfirmed(uint16_t index, uint8_t s
   // A brief enqueue wait (no wire wait): a set-point must not be silently
   // dropped under transient queue pressure, but the loop must never block on
   // the drive's reply.
-  return send_raw(0x600 + node_id_, data, /*wait_for_queue_space=*/true);
+  if (!send_raw(0x600 + node_id_, data, /*wait_for_queue_space=*/true)) {
+    return false;
+  }
+  if (index == kTargetVelocityIndex && subindex == 0) {
+    ++owed_set_point_replies_;
+  }
+  return true;
 }
 
 bool Ds402VelocityMotor::send_sdo_download(uint16_t index, uint8_t subindex, uint8_t command,
@@ -123,11 +147,12 @@ bool Ds402VelocityMotor::send_sdo_download(uint16_t index, uint8_t subindex, uin
     return false;
   }
   CanFrame response{};
-  while (xQueueReceive(receive_queue_, &response, 0) == pdTRUE) {
-  }
+  // (drains and accounts the replies already received, and counts this write
+  // among the owed set-point replies when it is one)
   if (!send_sdo_download_unconfirmed(index, subindex, command, value)) {
     return false;
   }
+  const bool set_point = index == kTargetVelocityIndex && subindex == 0;
   const TickType_t timeout_ticks = pdMS_TO_TICKS(timeout_ms);
   const TickType_t start_tick = xTaskGetTickCount();
   while (xTaskGetTickCount() - start_tick < timeout_ticks) {
@@ -135,8 +160,12 @@ bool Ds402VelocityMotor::send_sdo_download(uint16_t index, uint8_t subindex, uin
     if (xQueueReceive(receive_queue_, &response, timeout_ticks - elapsed) != pdTRUE) {
       break;
     }
+    note_reply(response);
     if (!sdo_matches(response, 0x580 + node_id_, index, subindex)) {
       continue; // a late confirmation of an earlier unconfirmed write, or a boot-up
+    }
+    if (set_point && owed_set_point_replies_ > 0) {
+      continue; // the reply to an EARLIER fire-and-forget set-point: ours follows
     }
     if (response.data[0] == kSdoAbort) {
       logger_.error("SDO write 0x{:04X}:{:02X} aborted: 0x{:02X}{:02X}{:02X}{:02X}", index,
@@ -152,6 +181,13 @@ bool Ds402VelocityMotor::send_sdo_download(uint16_t index, uint8_t subindex, uin
     return true;
   }
   logger_.error("Timed out writing SDO 0x{:04X}:{:02X}", index, subindex);
+  if (set_point) {
+    // Every earlier reply was due long before this timeout (replies come in
+    // order, well within a millisecond): what is still owed was lost (queue
+    // overflow, bus error), so forget it rather than let the count wedge every
+    // later confirmed stop.
+    owed_set_point_replies_ = 0;
+  }
   return false;
 }
 
@@ -162,8 +198,7 @@ bool Ds402VelocityMotor::request_sdo_u32(uint16_t index, uint8_t subindex, uint3
     return false;
   }
   CanFrame response{};
-  while (xQueueReceive(receive_queue_, &response, 0) == pdTRUE) {
-  }
+  drain_replies();
   const std::array<uint8_t, 8> request{kSdoUpload,
                                        static_cast<uint8_t>(index),
                                        static_cast<uint8_t>(index >> 8),
@@ -182,6 +217,7 @@ bool Ds402VelocityMotor::request_sdo_u32(uint16_t index, uint8_t subindex, uint3
     if (xQueueReceive(receive_queue_, &response, timeout_ticks - elapsed) != pdTRUE) {
       break;
     }
+    note_reply(response);
     if (!sdo_matches(response, 0x580 + node_id_, index, subindex)) {
       continue;
     }
@@ -223,12 +259,12 @@ bool Ds402VelocityMotor::read_signed(const ObjectSpec &object, float &value, uin
 
 bool Ds402VelocityMotor::reset_communication_and_wait_for_bootup(uint32_t timeout_ms) {
   CanFrame frame{};
-  while (xQueueReceive(receive_queue_, &frame, 0) == pdTRUE) {
-  }
+  drain_replies();
   const std::array<uint8_t, 2> nmt_reset_communication{0x82, node_id_};
   if (!send_raw(0x000, nmt_reset_communication, true)) {
     return false;
   }
+  owed_set_point_replies_ = 0; // the node restarts its SDO server: nothing older is answered
   const TickType_t timeout_ticks = pdMS_TO_TICKS(timeout_ms);
   const TickType_t start_tick = xTaskGetTickCount();
   while (xTaskGetTickCount() - start_tick < timeout_ticks) {

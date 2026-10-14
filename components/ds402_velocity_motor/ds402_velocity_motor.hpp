@@ -26,7 +26,12 @@
 /// SDO download and return without waiting for the drive's confirmation, so a
 /// real-time control loop never stalls on a missing reply (the confirmation is
 /// drained at the next transaction). Enable / disable / fault reset / status
-/// reads are confirmed transactions.
+/// reads are confirmed transactions. SDO download replies carry no transaction
+/// id and every set-point writes the same object, so the driver counts the
+/// set-point replies still owed by the drive: a confirmed set-point write
+/// (stop_acknowledged) is acknowledged only by the reply that follows every
+/// earlier one (SDO replies arrive in request order), never by a late reply
+/// to an earlier fire-and-forget write.
 ///
 /// Construct every instance BEFORE CanBus::start(): the receivers (SDO reply
 /// 0x580 + id, boot-up 0x700 + id) are registered here.
@@ -123,6 +128,11 @@ private:
   bool wait_for_alarm_clear(uint32_t timeout_ms, uint16_t &statusword);
   bool reset_communication_and_wait_for_bootup(uint32_t timeout_ms);
   bool write_target_velocity(int32_t counts, bool confirmed, uint32_t timeout_ms);
+  /// Account a received frame: a reply to a set-point download retires one
+  /// owed set-point confirmation. transaction_mutex_ held.
+  void note_reply(const CanFrame &frame);
+  /// Consume every reply already received (accounting each). Non-blocking.
+  void drain_replies();
   int32_t rpm_to_counts(float rpm) const;
 
   CanBus &bus_;
@@ -130,4 +140,7 @@ private:
   Config config_;
   QueueHandle_t receive_queue_{nullptr};
   std::mutex transaction_mutex_;
+  /// Set-point (0x60FF) downloads sent whose reply has not been seen yet;
+  /// guarded by transaction_mutex_.
+  uint32_t owed_set_point_replies_{0};
 };
