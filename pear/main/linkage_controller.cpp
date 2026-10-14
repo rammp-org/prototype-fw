@@ -216,7 +216,19 @@ bool LinkageController::commit_pose_locked(const Pose &pose) {
   return true;
 }
 
+void LinkageController::invalidate_targets_locked() {
+  pending_.fill(false);
+  desired_pose_.reset();
+}
+
 bool LinkageController::zero(std::optional<Corner> corner) {
+  // no move may execute while the coordinate system changes, and whatever was
+  // queued was expressed in the old one
+  std::lock_guard<std::mutex> moves(move_mutex_);
+  {
+    std::lock_guard<std::mutex> lock(mutex_);
+    invalidate_targets_locked();
+  }
   bool ok = true;
   for (const Corner c : pear::kCorners) {
     if (corner.has_value() && *corner != c)
@@ -241,6 +253,11 @@ bool LinkageController::save_zero() {
 }
 
 bool LinkageController::load_zero() {
+  std::lock_guard<std::mutex> moves(move_mutex_);
+  {
+    std::lock_guard<std::mutex> lock(mutex_);
+    invalidate_targets_locked();
+  }
   bool ok = true;
   for (const Corner c : pear::kCorners) {
     const bool loaded = motors_[pear::index(c)].load_zero();
@@ -278,6 +295,7 @@ bool LinkageController::status_step() {
   //    lock: move_absolute is a confirmed transaction with retries
   std::array<bool, pear::kCornerCount> to_move{};
   Corners targets{};
+  std::lock_guard<std::mutex> moves(move_mutex_); // excludes zero() / load_zero()
   {
     std::lock_guard<std::mutex> lock(mutex_);
     to_move = pending_;

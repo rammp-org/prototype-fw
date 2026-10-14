@@ -137,6 +137,8 @@ protected:
   const char *refusal_reason_locked() const;
   /// Clamp a requested angle to the corner's range (non-finite -> refused).
   bool clamp_target(Corner corner, float &angle_deg);
+  /// Drop queued corner targets and the desired pose (mutex_ held).
+  void invalidate_targets_locked();
   /// Clamp, check the interlocks and queue every corner of `pose` (mutex_ held).
   bool commit_pose_locked(const Pose &pose);
   /// The pose the measured corner angles describe (mutex_ held).
@@ -153,6 +155,10 @@ protected:
   uint32_t status_read_timeout_ms_;
 
   mutable std::mutex mutex_;
+  /// Serializes move execution (status_step's enact phase) with a change of
+  /// the software zero (zero / load_zero): a target copied before the zero
+  /// moved must not execute in the new coordinate system. Locked BEFORE mutex_.
+  std::mutex move_mutex_;
   std::array<MotorStatus, pear::kCornerCount> motor_status_{};
   std::array<std::chrono::steady_clock::time_point, pear::kCornerCount> motor_status_time_{};
   Corners pending_target_deg_{};

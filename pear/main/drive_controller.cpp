@@ -375,6 +375,7 @@ bool DriveController::control_step() {
   // after its communication-loss timeout while the other three keep driving.
   // STOP the platform (zeros from now on), drop the armed state and latch the
   // node id for MibStatus / MotorState until it reports again.
+  bool wheel_lost = false;
   {
     std::lock_guard<std::mutex> lock(mutex_);
     const size_t stale = stale_wheel_locked(std::chrono::steady_clock::now());
@@ -386,8 +387,9 @@ bool DriveController::control_step() {
       send_failing_ = true;
       logger_.error("Wheel drive {} stopped reporting; platform STOPPED", lost_wheel_id_);
     }
+    wheel_lost = lost_wheel_id_ != 0; // read under the lock: status_step() clears it
   }
-  if (lost_wheel_id_ != 0) {
+  if (wheel_lost) {
     flush_transport_if_requested();
     send_zeros();
     return false; // STOPPED from the next tick on
