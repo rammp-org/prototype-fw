@@ -237,16 +237,16 @@ bool StemController::stop() {
 }
 
 bool StemController::stop_unlocked() {
-  // NOTE: stopping does not update the tracked positions (they record what was
-  // commanded, and the motors have no absolute output-shaft feedback), so a
-  // pair stopped mid-move must be re-zeroed before its tracked position can be
-  // trusted again.
   // EyouMotor has no separate "halt in place" command: disabling the drive is
   // the closest DS402 primitive (cuts torque, so the pair coasts to a stop).
   const bool right_ok = config_.right.disable_drive();
   const bool left_ok = config_.left.disable_drive();
   const bool seat_ok = config_.seat.disable_drive();
   logger_.warn("STOP: right={} left={} seat={}", right_ok, left_ok, seat_ok);
+  // the move this interrupted never reached its target: a later seat tilt must
+  // offset the MEASURED seat angle (the Eyou branch of set_seat_tilt), not the
+  // stale final pose of that move
+  target_valid_ = false;
   return right_ok && left_ok && seat_ok;
 }
 

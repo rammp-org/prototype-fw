@@ -68,6 +68,12 @@ bool LinkageController::initialize() {
     motor.set_position_limits(geometry_.min_angle_deg, geometry_.max_angle_deg);
     std::lock_guard<std::mutex> lock(mutex_);
     motor_status_[pear::index(corner)].zero_loaded = zero_loaded;
+    if (zero_loaded) {
+      // the status timer already runs: a position it cached (or is sampling)
+      // in the pre-zero frame is dropped, like after zero() / load_zero()
+      motor_status_[pear::index(corner)].valid = false;
+      frame_generation_.fetch_add(1);
+    }
   }
   std::lock_guard<std::mutex> lock(mutex_);
   initialized_ = ok;
