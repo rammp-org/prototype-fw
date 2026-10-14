@@ -416,7 +416,9 @@ float EyouMotor::pulses_to_degrees(int32_t pulses) {
 }
 
 float EyouMotor::profile_units_to_degrees(uint32_t pulses) {
-  return pulses_to_degrees(static_cast<int32_t>(pulses));
+  // 0x6081 / 0x6083 / 0x6084 are unsigned: converted as such, so a readback in
+  // the upper half of the range is not reported negative
+  return static_cast<float>(pulses) * kDegreesPerOutputTurn / kPulsesPerOutputTurn;
 }
 
 bool EyouMotor::zero(uint32_t timeout_ms) {

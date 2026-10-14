@@ -253,6 +253,9 @@ bool LinkageController::zero(std::optional<Corner> corner) {
 }
 
 bool LinkageController::save_zero() {
+  // serialized with zero() / load_zero() so the persisted set of offsets is
+  // never a mix of before and after one of those
+  std::lock_guard<std::mutex> moves(move_mutex_);
   bool ok = true;
   for (const Corner c : pear::kCorners) {
     ok = motors_[pear::index(c)].save_zero() && ok;

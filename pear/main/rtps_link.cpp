@@ -212,7 +212,13 @@ void RtpsLink::apply_profile(MIB::DriveProfile profile) {
   case MIB::DriveProfile::HIGH:
     limits = &hw_config::kProfileHigh;
     break;
+  case MIB::DriveProfile::NORMAL:
+    break;
   default:
+    // an unknown wire value gets the NORMAL limits, and is REPORTED as NORMAL
+    // so MibStatus.activeProfile matches what is applied
+    logger_.warn("Unknown drive profile {}; using NORMAL", static_cast<int>(profile));
+    profile = MIB::DriveProfile::NORMAL;
     break;
   }
   drive_.set_max_speed(limits->max_speed_mps);
