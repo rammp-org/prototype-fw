@@ -685,9 +685,10 @@
     els.periodInput.addEventListener("change", () => { if (transport && els.stream.checked) startStream(); });
 
     async function connect(kind) {
+      let t = null; // outside the try: a failure after open() must release it
       try {
         setStatus("busy", "connecting…");
-        const t = kind === "usb" ? new UsbTransport() : new SerialTransport();
+        t = kind === "usb" ? new UsbTransport() : new SerialTransport();
         await t.open(els.anyDevice.checked);
         transport = t; parser.reset(); lastTelemetry = 0;
         setStatus("ok", "connected"); logLine("ok", "connected: " + t.describe());
@@ -706,7 +707,11 @@
         if (els.stream.checked) startStream();
       } catch (e) {
         logLine("err", "connect failed: " + (e && e.message ? e.message : e));
-        setStatus("err", "error"); transport = null; setConnected(false);
+        // a serial port opened / USB interface claimed before the failure stays
+        // locked otherwise, and the next connection attempt fails
+        if (t) { try { await t.close(); } catch (_) {} }
+        if (transport === t) transport = null;
+        setStatus("err", "error"); setConnected(false);
       }
     }
     async function disconnect() {
