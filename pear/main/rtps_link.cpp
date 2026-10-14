@@ -267,6 +267,11 @@ void RtpsLink::on_drive_command(const rammp::DriveCommand &msg) {
     status_text_.clear();
   }
   if (!enable) {
+    // DriveRequest::DISABLE means "stop driving on the stick" (the spec's
+    // words), not "power the drives off": like holo_deck_mib, it e-stops into
+    // STOPPED, where the drives hold at zero in closed loop. Cutting the power
+    // stages (DS402 disable, the CLI's `disable`) would let the shafts go and
+    // a base on a slope roll; that remains a deliberate console action.
     drive_.stop();
     return;
   }
