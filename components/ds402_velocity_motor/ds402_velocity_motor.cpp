@@ -63,6 +63,7 @@ Ds402VelocityMotor::Ds402VelocityMotor(CanBus &bus, uint8_t node_id, const Confi
 
 Ds402VelocityMotor::~Ds402VelocityMotor() {
   if (receive_queue_ != nullptr) {
+    bus_.unregister_receiver(receive_queue_); // the RX ISR must not see a deleted queue
     vQueueDelete(receive_queue_);
   }
 }

@@ -19,18 +19,26 @@ bool CanBus::register_receiver(uint32_t can_id, QueueHandle_t queue) {
   if (node_ != nullptr || queue == nullptr) {
     return false;
   }
-  for (auto &receiver : receivers_) {
-    if (receiver.queue == nullptr) {
-      receiver = {.can_id = can_id, .queue = queue};
-      return true;
-    }
+  const auto free_slot = std::find_if(receivers_.begin(), receivers_.end(),
+                                      [](const Receiver &r) { return r.queue == nullptr; });
+  if (free_slot == receivers_.end()) {
+    return false;
   }
-  return false;
+  *free_slot = {.can_id = can_id, .queue = queue};
+  return true;
 }
 
-bool CanBus::on_receive(twai_node_handle_t handle, const twai_rx_done_event_data_t *,
+void CanBus::unregister_receiver(QueueHandle_t queue) {
+  std::lock_guard<std::mutex> lock(lifecycle_mutex_);
+  std::replace_if(
+      receivers_.begin(), receivers_.end(), [queue](const Receiver &r) { return r.queue == queue; },
+      Receiver{});
+}
+
+bool CanBus::on_receive(twai_node_handle_t handle, const twai_rx_done_event_data_t *event,
                          void *context) {
-  auto *bus = static_cast<CanBus *>(context);
+  (void)event;
+  const auto *bus = static_cast<const CanBus *>(context);
   CanFrame frame{};
   twai_frame_t twai_frame{};
   twai_frame.buffer = frame.data.data();
@@ -90,9 +98,9 @@ bool CanBus::start(uint32_t bitrate) {
   return true;
 }
 
-bool CanBus::send(const CanFrame &message, bool wait_for_queue_space) {
+bool CanBus::send(const CanFrame &frame, bool wait_for_queue_space) {
   std::lock_guard<std::mutex> lock(transmit_mutex_);
-  if (node_ == nullptr || message.dlc > message.data.size()) {
+  if (node_ == nullptr || frame.dlc > frame.data.size()) {
     return false;
   }
 
@@ -101,15 +109,15 @@ bool CanBus::send(const CanFrame &message, bool wait_for_queue_space) {
   // the stack. Only advance the ring after a successful enqueue, so a slot is
   // never reused while the driver may still reference it.
   TxSlot &slot = tx_ring_[tx_ring_index_];
-  slot.payload = message.data;
+  slot.payload = frame.data;
   slot.frame = twai_frame_t{};
-  slot.frame.header.id = message.id;
-  slot.frame.header.ide = message.extended;
-  slot.frame.header.rtr = message.rtr;
+  slot.frame.header.id = frame.id;
+  slot.frame.header.ide = frame.extended;
+  slot.frame.header.rtr = frame.rtr;
   slot.frame.header.fdf = 0;
-  slot.frame.header.dlc = message.dlc;
+  slot.frame.header.dlc = frame.dlc;
   slot.frame.buffer = slot.payload.data();
-  slot.frame.buffer_len = message.dlc;
+  slot.frame.buffer_len = frame.dlc;
 
   // Never wait on wire completion (twai_node_transmit_wait_all_done): with no
   // bus ACK that would stall for the full timeout on every send. The request /

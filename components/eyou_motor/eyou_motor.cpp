@@ -44,6 +44,7 @@ EyouMotor::EyouMotor(CanBus &bus, uint8_t node_id)
 
 EyouMotor::~EyouMotor() {
 	if (receive_queue_ != nullptr) {
+		bus_.unregister_receiver(receive_queue_); // the RX ISR must not see a deleted queue
 		vQueueDelete(receive_queue_);
 	}
 }
@@ -77,14 +78,26 @@ bool EyouMotor::send_sdo_download(uint16_t index, uint8_t subindex, uint8_t comm
 	if (!send_raw(0x600 + node_id_, data)) {
 		return false;
 	}
-	if (xQueueReceive(receive_queue_, &response, pdMS_TO_TICKS(timeout_ms)) != pdTRUE) {
-		logger_.error("Timed out writing SDO 0x{:04X}:{:02X}", index, subindex);
-		return false;
+	// The queue also carries the node's boot-up / heartbeat frames (0x700 + id)
+	// and a late reply of an earlier transaction: wait for THIS write's reply
+	// within one overall deadline, skipping anything else (as the upload path does).
+	const TickType_t timeout_ticks = pdMS_TO_TICKS(timeout_ms);
+	const TickType_t start_tick = xTaskGetTickCount();
+	bool matched = false;
+	while (xTaskGetTickCount() - start_tick < timeout_ticks) {
+		const TickType_t elapsed = xTaskGetTickCount() - start_tick;
+		if (xQueueReceive(receive_queue_, &response, timeout_ticks - elapsed) != pdTRUE) {
+			break;
+		}
+		if (response.id == 0x580 + node_id_ && response.dlc == 8 &&
+				response.data[1] == static_cast<uint8_t>(index) &&
+				response.data[2] == static_cast<uint8_t>(index >> 8) && response.data[3] == subindex) {
+			matched = true;
+			break;
+		}
 	}
-	if (response.id != 0x580 + node_id_ || response.dlc != 8 ||
-				response.data[1] != static_cast<uint8_t>(index) ||
-				response.data[2] != static_cast<uint8_t>(index >> 8) || response.data[3] != subindex) {
-		logger_.error("Unexpected SDO response while writing 0x{:04X}:{:02X}", index, subindex);
+	if (!matched) {
+		logger_.error("Timed out writing SDO 0x{:04X}:{:02X}", index, subindex);
 		return false;
 	}
 	if (response.data[0] == 0x80) {

@@ -80,9 +80,14 @@ const char *LinkageController::refusal_reason_locked() const {
     return "the base is driving (disable driving first)";
   if (!initialized_)
     return "the linkage motors are not initialized";
-  const auto unhealthy =
-      std::find_if(motor_status_.begin(), motor_status_.end(), [](const MotorStatus &m) {
-        return !m.valid || m.faulted || !m.operation_enabled;
+  // a motor whose status has not been read recently may have disappeared:
+  // its last operation_enabled is no evidence, so treat it as unhealthy
+  const auto now = std::chrono::steady_clock::now();
+  size_t index = 0;
+  const auto unhealthy = std::find_if(
+      motor_status_.begin(), motor_status_.end(), [&](const MotorStatus &m) {
+        const bool stale = !m.valid || (now - motor_status_time_[index++]) > status_stale_timeout_;
+        return stale || m.faulted || !m.operation_enabled;
       });
   if (unhealthy == motor_status_.end())
     return nullptr;
@@ -96,9 +101,14 @@ const char *LinkageController::refusal_reason_locked() const {
   static constexpr std::array<const char *, pear::kCornerCount> kNotEnabled = {
       "linkage FR is not enabled", "linkage FL is not enabled", "linkage BR is not enabled",
       "linkage BL is not enabled"};
-  const auto index = static_cast<size_t>(unhealthy - motor_status_.begin());
+  static constexpr std::array<const char *, pear::kCornerCount> kStale = {
+      "linkage FR status is stale (no reply)", "linkage FL status is stale (no reply)",
+      "linkage BR status is stale (no reply)", "linkage BL status is stale (no reply)"};
+  index = static_cast<size_t>(unhealthy - motor_status_.begin());
   if (!unhealthy->valid)
     return kNotReported[index];
+  if ((now - motor_status_time_[index]) > status_stale_timeout_)
+    return kStale[index];
   if (unhealthy->faulted)
     return kFaulted[index];
   return kNotEnabled[index];

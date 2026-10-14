@@ -353,6 +353,10 @@ bool DriveController::control_step() {
     send_failing_ = !armed;
     if (!armed)
       return false;
+    // arming took several acknowledged SDOs outside the lock: a STOP / DISABLE
+    // that landed meanwhile wins, the next tick enacts it (no set-point now)
+    if (mode_ != Mode::DRIVE)
+      return false;
   } else {
     std::lock_guard<std::mutex> lock(mutex_);
     if (!armed_)

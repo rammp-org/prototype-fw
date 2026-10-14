@@ -18,6 +18,9 @@ MotorCanBus::MotorCanBus(CanBus &bus)
 
 MotorCanBus::~MotorCanBus() {
   if (receive_queue_ != nullptr) {
+    if (bus_ != nullptr) {
+      bus_->unregister_receiver(receive_queue_); // the RX ISR must not see a deleted queue
+    }
     vQueueDelete(receive_queue_);
   }
 }
@@ -103,7 +106,7 @@ bool MotorCanBus::send_unlocked(const MotorPacket &command, bool wait_for_queue_
     }
     return false;
   }
-  return false;
+  return true;
 }
 
 bool MotorCanBus::request(const MotorPacket &command, MotorPacket &response,

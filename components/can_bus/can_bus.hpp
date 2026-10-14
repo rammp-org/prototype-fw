@@ -49,6 +49,11 @@ public:
   /// controller).
   bool flush_pending();
   bool register_receiver(uint32_t can_id, QueueHandle_t queue);
+  /// Drop every registration of `queue`, so the RX ISR stops writing to it.
+  /// Call it BEFORE deleting the queue; the slot's pointer is cleared with a
+  /// single store, so a frame the ISR is fanning out at that instant still
+  /// lands on the live queue and nothing later touches the deleted one.
+  void unregister_receiver(QueueHandle_t queue);
 
 private:
   struct Receiver {
