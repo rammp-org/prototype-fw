@@ -66,6 +66,11 @@ public:
     bool enabled{false}; ///< Every motor enabled, un-faulted and read at least once.
     bool any_faulted{false};
     bool initialized{false}; ///< initialize() succeeded for every motor.
+    /// Corners whose halt (power stage off after a timed-out or abandoned
+    /// move) has not been confirmed by the motor (bit = corner index): the
+    /// move may still be running, the drive interlock stays asserted and the
+    /// halt is retried every status step until it confirms.
+    uint8_t halt_unconfirmed_mask{0};
     /// Age of the last move command (65535 = none yet).
     uint16_t command_age_ms{65535};
   };
@@ -150,6 +155,12 @@ protected:
   /// The pose the measured corner angles describe (mutex_ held).
   Pose measured_pose_locked() const;
   void note_command_sent_locked();
+  /// Halt a commanded move: power stage off (the Eyou's halt), then on again so
+  /// the motor is ready for the next request. The corner's moving_mask_ bit is
+  /// cleared ONLY when the disable was confirmed; otherwise it stays latched
+  /// (the interlock holds) and the halt is retried on the next status step.
+  /// Returns true when the halt was confirmed.
+  bool halt_corner(Corner corner, const char *why);
 
   std::array<EyouMotor, pear::kCornerCount> &motors_;
   pear::geometry::Geometry geometry_;
@@ -171,6 +182,9 @@ protected:
   /// when a move is sent, cleared by the poll on target reached / fault /
   /// not enabled, or by kMoveTimeout.
   std::atomic<uint8_t> moving_mask_{0};
+  /// Corners whose halt did not confirm yet (subset of moving_mask_); the
+  /// failure is logged once per corner, retries are quiet.
+  std::atomic<uint8_t> halt_unconfirmed_mask_{0};
   std::chrono::steady_clock::time_point motion_started_{};
   static constexpr std::chrono::seconds kMoveTimeout{15};
   std::array<MotorStatus, pear::kCornerCount> motor_status_{};

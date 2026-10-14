@@ -434,6 +434,11 @@ MIB::MibStatus RtpsLink::build_status() {
         footer = fmt::format("Motor {} stopped reporting on CAN; check it", link.id);
         break;
       }
+      if (linkage.halt_unconfirmed_mask & (1u << pear::index(corner))) {
+        error = fmt::format("Linkage {} halt unconfirmed", pear::corner_name(corner));
+        footer = fmt::format("Motor {} did not confirm its stop; drive locked out", link.id);
+        break;
+      }
     }
   }
   if (!error.empty()) {

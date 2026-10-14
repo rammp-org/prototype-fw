@@ -276,6 +276,7 @@ LinkageController::State LinkageController::state() const {
   State state;
   state.motors = motor_status_;
   state.initialized = initialized_;
+  state.halt_unconfirmed_mask = halt_unconfirmed_mask_.load();
   for (const Corner corner : pear::kCorners) {
     const auto &m = motor_status_[pear::index(corner)];
     state.angles_deg[corner] = m.position_degrees;
@@ -290,6 +291,32 @@ LinkageController::State LinkageController::state() const {
     state.command_age_ms = static_cast<uint16_t>(std::min<int64_t>(age.count(), 65535));
   }
   return state;
+}
+
+bool LinkageController::halt_corner(Corner corner, const char *why) {
+  const uint8_t bit = static_cast<uint8_t>(1u << pear::index(corner));
+  auto &motor = motors_[pear::index(corner)];
+  const bool first_attempt = (halt_unconfirmed_mask_.load() & bit) == 0;
+  if (first_attempt)
+    logger_.warn("Linkage {}: halting its move ({})", pear::corner_name(corner), why);
+  if (!motor.disable_drive()) {
+    // the move may still be running: keep the interlock and retry; shouted
+    // once, then quiet until it confirms
+    if (first_attempt) {
+      logger_.error("Linkage {}: halt NOT confirmed; drive stays locked out until it is",
+                    pear::corner_name(corner));
+      halt_unconfirmed_mask_.fetch_or(bit);
+    }
+    return false;
+  }
+  if (halt_unconfirmed_mask_.fetch_and(static_cast<uint8_t>(~bit)) & bit)
+    logger_.info("Linkage {}: halt confirmed", pear::corner_name(corner));
+  // the power stage is off, so the motion is over whatever the re-enable
+  // does; a motor left disabled is refused by the interlock (not enabled)
+  if (!motor.enable_drive())
+    logger_.error("Linkage {}: re-enable after the halt failed", pear::corner_name(corner));
+  moving_mask_.fetch_and(static_cast<uint8_t>(~bit));
+  return true;
 }
 
 bool LinkageController::status_step() {
@@ -310,17 +337,13 @@ bool LinkageController::status_step() {
         std::lock_guard<std::mutex> lock(mutex_);
         timed_out = std::chrono::steady_clock::now() - motion_started_ > kMoveTimeout;
       }
-      if (timed_out) {
-        for (const Corner corner : pear::kCorners) {
-          if ((mask & (1u << pear::index(corner))) == 0)
-            continue;
-          auto &motor = motors_[pear::index(corner)];
-          logger_.warn("Linkage {} did not report target reached within {} s; halting it",
-                       pear::corner_name(corner), kMoveTimeout.count());
-          if (!motor.disable_drive() || !motor.enable_drive())
-            logger_.error("Linkage {}: halt / re-enable failed", pear::corner_name(corner));
-        }
-        moving_mask_.store(0);
+      // a corner whose halt did not confirm keeps its bit (and the drive
+      // interlock) and is retried on every step, not only after the timeout
+      const uint8_t to_halt = timed_out ? mask : (mask & halt_unconfirmed_mask_.load());
+      for (const Corner corner : pear::kCorners) {
+        if ((to_halt & (1u << pear::index(corner))) == 0)
+          continue;
+        halt_corner(corner, "no target reached in time");
       }
     }
     {
@@ -356,15 +379,10 @@ bool LinkageController::status_step() {
     uint8_t accepted = 0;
     const auto halt_accepted = [&](const char *why) {
       for (const Corner done : pear::kCorners) {
-        const uint8_t bit = static_cast<uint8_t>(1u << pear::index(done));
-        if ((accepted & bit) == 0)
+        if ((accepted & (1u << pear::index(done))) == 0)
           continue;
-        auto &m = motors_[pear::index(done)];
-        logger_.warn("Linkage {}: halting the move accepted earlier ({})", pear::corner_name(done),
-                     why);
-        if (!m.disable_drive() || !m.enable_drive())
-          logger_.error("Linkage {}: halt / re-enable failed", pear::corner_name(done));
-        moving_mask_.fetch_and(static_cast<uint8_t>(~bit));
+        // an unconfirmed halt keeps the bit; the timeout path retries it
+        halt_corner(done, why);
       }
       accepted = 0;
     };

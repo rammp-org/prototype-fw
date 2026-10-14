@@ -131,6 +131,12 @@ only DISABLED (CLI `disable`) powers the stage off deliberately, and the next
   follows the same rule), and while any linkage motor is not initialized / not
   enabled / faulted. Moves are queued and enacted by the linkage task, never from
   the RTPS callback; a queued move is dropped if driving started meanwhile.
+  The interlock holds in the other direction too: the drive cannot be enabled
+  while a batch is being sent or a corner has not reported target reached. A
+  move that does not finish in time, or a batch a later corner refused, is
+  halted (power stage off, confirmed, then on again); a halt the motor does
+  not confirm keeps the drive locked out (`ERROR`, "halt unconfirmed") and is
+  retried until it does.
 - A wheel or linkage DS402 fault is shown in MibStatus (`ERROR`, motor named) and
   in that motor's MotorState (`FAULT`); `reset_fault` on the console clears it.
 
