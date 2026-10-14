@@ -8,6 +8,7 @@ namespace {
 constexpr uint16_t kDs402StateMask = 0x006F;
 constexpr uint16_t kDs402OperationEnabled = 0x0027;
 constexpr uint16_t kDs402FaultBit = 0x0008;
+constexpr uint16_t kDs402TargetReached = 0x0400; // profile position: target reached
 } // namespace
 
 LinkageController::LinkageController(const Config &config)
@@ -347,6 +348,9 @@ bool LinkageController::status_step() {
       }
       motor_status_[pear::index(corner)].target_degrees = targets[corner];
       note_command_sent_locked();
+      // physical motion starts now; the poll clears the bit on target reached
+      moving_mask_.fetch_or(static_cast<uint8_t>(1u << pear::index(corner)));
+      motion_started_ = std::chrono::steady_clock::now();
     }
   }
 
@@ -373,6 +377,21 @@ bool LinkageController::status_step() {
     motor_status.operation_enabled = (statusword & kDs402StateMask) == kDs402OperationEnabled;
     motor_status.valid = true;
     motor_status_time_[index] = now;
+    // a commanded corner is in motion until the drive reports target reached
+    // (or the motion cannot continue: fault / power stage off)
+    const uint8_t bit = static_cast<uint8_t>(1u << index);
+    const bool settled =
+        (statusword & kDs402TargetReached) != 0 || faulted || !motor_status.operation_enabled;
+    if ((moving_mask_.load() & bit) != 0 && settled) {
+      if (moving_mask_.fetch_and(static_cast<uint8_t>(~bit)) == bit)
+        logger_.info("Linkage move complete");
+    }
+  }
+  if (moving_mask_.load() != 0 && now - motion_started_ > kMoveTimeout) {
+    logger_.warn("Linkage move did not report target reached within {} s; releasing the "
+                 "drive interlock",
+                 kMoveTimeout.count());
+    moving_mask_.store(0);
   }
   if (position_ok)
     motor_status.position_degrees = position;

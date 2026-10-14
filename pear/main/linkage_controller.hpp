@@ -131,9 +131,11 @@ public:
 
   /// Snapshot of the current state. Thread-safe.
   State state() const;
-  /// True while a batch of queued moves is being sent to the motors: the
-  /// drive side of the interlock (DriveController::enable refuses then).
-  bool moving() const { return enacting_.load(); }
+  /// True while a batch of queued moves is being sent to the motors OR a
+  /// commanded corner has not yet reported DS402 target reached (profile
+  /// position bit 10): the drive side of the interlock (DriveController::enable
+  /// refuses then). Lock-free: enable() calls it with its own mutex held.
+  bool moving() const { return enacting_.load() || moving_mask_.load() != 0; }
 
 protected:
   bool status_step();
@@ -164,6 +166,13 @@ protected:
   /// moved must not execute in the new coordinate system. Locked BEFORE mutex_.
   std::mutex move_mutex_;
   std::atomic<bool> enacting_{false}; ///< moving(): a batch is being sent
+  /// Corners commanded and not yet reporting DS402 target reached (bit =
+  /// corner index): the physical-motion half of moving(). Set under mutex_
+  /// when a move is sent, cleared by the poll on target reached / fault /
+  /// not enabled, or by kMoveTimeout.
+  std::atomic<uint8_t> moving_mask_{0};
+  std::chrono::steady_clock::time_point motion_started_{};
+  static constexpr std::chrono::seconds kMoveTimeout{15};
   std::array<MotorStatus, pear::kCornerCount> motor_status_{};
   std::array<std::chrono::steady_clock::time_point, pear::kCornerCount> motor_status_time_{};
   Corners pending_target_deg_{};
