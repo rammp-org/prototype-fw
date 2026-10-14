@@ -1,6 +1,7 @@
 #pragma once
 
 #include <array>
+#include <atomic>
 #include <chrono>
 #include <functional>
 #include <mutex>
@@ -130,6 +131,9 @@ public:
 
   /// Snapshot of the current state. Thread-safe.
   State state() const;
+  /// True while a batch of queued moves is being sent to the motors: the
+  /// drive side of the interlock (DriveController::enable refuses then).
+  bool moving() const { return enacting_.load(); }
 
 protected:
   bool status_step();
@@ -159,6 +163,7 @@ protected:
   /// the software zero (zero / load_zero): a target copied before the zero
   /// moved must not execute in the new coordinate system. Locked BEFORE mutex_.
   std::mutex move_mutex_;
+  std::atomic<bool> enacting_{false}; ///< moving(): a batch is being sent
   std::array<MotorStatus, pear::kCornerCount> motor_status_{};
   std::array<std::chrono::steady_clock::time_point, pear::kCornerCount> motor_status_time_{};
   Corners pending_target_deg_{};

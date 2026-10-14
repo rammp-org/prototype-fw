@@ -254,6 +254,7 @@ extern "C" void app_main(void) {
       .status_read_timeout_ms = hw_config::kLinkageStatusReadTimeoutMs,
       .log_level = espp::Logger::Verbosity::INFO,
   });
+  drive.set_linkage_moving([&linkage]() { return linkage.moving(); });
   bool linkage_ok = false;
   if (can_ok) {
     // configure_profile_position -> enable_drive -> load_zero -> limits, per motor
@@ -310,7 +311,10 @@ extern "C" void app_main(void) {
   root_menu->Insert(
       "enable",
       [&drive](std::ostream &out) {
-        drive.enable();
+        if (!drive.enable()) {
+          out << "ENABLE refused: a linkage move is executing; try again\n";
+          return;
+        }
         out << "DRIVE (setpoint zeroed; linkage moves are refused while driving).\n";
       },
       "Enable driving (clears e-stop; setpoint starts at zero)");

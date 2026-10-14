@@ -100,12 +100,26 @@ void DriveController::hold_joystick() {
   joystick_ccw_ = 0.0f;
 }
 
-void DriveController::enable() {
+void DriveController::set_linkage_moving(std::function<bool()> fn) {
+  std::lock_guard<std::mutex> lock(mutex_);
+  linkage_moving_ = std::move(fn);
+}
+
+bool DriveController::enable() {
   std::lock_guard<std::mutex> lock(mutex_);
   if (mode_ == Mode::DRIVE) {
-    return;
+    return true;
   }
+  const Mode previous = mode_;
+  // Commit the intent FIRST, then look at the other side: the linkage batch
+  // does the mirror image (marks itself moving, then checks us), so whichever
+  // interleaving happens at least one side yields and motion never overlaps.
   mode_ = Mode::DRIVE;
+  if (linkage_moving_ && linkage_moving_()) {
+    mode_ = previous;
+    logger_.warn("DRIVE enable refused: a linkage move is executing");
+    return false;
+  }
   // Zero the setpoint and require the joystick to re-center before it can take
   // over, so nothing jumps or lurches on (re-)enable.
   gui_vx_mps_ = 0.0f;
@@ -120,6 +134,7 @@ void DriveController::enable() {
   // The control loop resumes commanding velocities from here (no motor sends
   // are done from this setter - see the class docs).
   logger_.info("DRIVE enabled (joystick must re-center before it takes over)");
+  return true;
 }
 
 void DriveController::stop() {

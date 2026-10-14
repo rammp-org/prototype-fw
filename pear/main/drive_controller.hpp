@@ -169,7 +169,12 @@ public:
   /// Enter DRIVE mode. Zeroes the GUI setpoint and requires the physical
   /// joystick to be re-centered before it can take over, so the platform never
   /// jumps or lurches on (re-)enable - even if a source was deflected.
-  void enable();
+  /// Enter DRIVE. Refused (false) while a linkage batch is executing: the
+  /// interlock is two-sided (see set_linkage_moving), so base and linkage
+  /// motion never overlap. The joystick must re-center before it takes over.
+  bool enable();
+  /// Install the linkage side of the interlock (LinkageController::moving).
+  void set_linkage_moving(std::function<bool()> fn);
   /// E-STOP: enter STOPPED mode. The control loop streams zero velocity to
   /// every drive (they decelerate and hold at 0), overriding all sources.
   /// Always wins.
@@ -223,8 +228,9 @@ protected:
 
   mutable std::mutex mutex_;
   Mode mode_{Mode::STOPPED};
-  bool armed_{false};        ///< the drives' power stages are on
-  uint8_t lost_wheel_id_{0}; ///< State::lost_wheel_id
+  bool armed_{false};                             ///< the drives' power stages are on
+  uint8_t lost_wheel_id_{0};                      ///< State::lost_wheel_id
+  std::function<bool()> linkage_moving_{nullptr}; ///< the linkage batch guard
   /// Index of a wheel whose last successful status read is older than the
   /// stale timeout (a never-polled wheel counts from boot), or npos.
   size_t stale_wheel_locked(std::chrono::steady_clock::time_point now) const;

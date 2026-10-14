@@ -286,7 +286,8 @@ void RtpsLink::on_drive_command(const rammp::DriveCommand &msg) {
     watch_joystick_ = true;
     ++watch_generation_;
   }
-  drive_.enable(); // requires the joystick to re-center before it takes over
+  if (!drive_.enable()) // requires the joystick to re-center before it takes over
+    logger_.warn("ENABLE refused: a linkage move is executing (the HMI sees no ENABLED)");
 }
 
 void RtpsLink::on_seat_command(const rammp::SeatCommand &msg) {

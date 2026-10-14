@@ -296,12 +296,21 @@ bool LinkageController::status_step() {
   std::array<bool, pear::kCornerCount> to_move{};
   Corners targets{};
   std::lock_guard<std::mutex> moves(move_mutex_); // excludes zero() / load_zero()
+  // Mark the batch BEFORE looking at the drive (DriveController::enable does
+  // the mirror image), so base and linkage motion can never overlap; cleared
+  // when this scope ends, batch or no batch.
+  struct EnactingGuard {
+    std::atomic<bool> &flag;
+    ~EnactingGuard() { flag.store(false); }
+  };
+  enacting_.store(true);
+  const EnactingGuard enacting_guard{enacting_};
   {
     std::lock_guard<std::mutex> lock(mutex_);
     to_move = pending_;
     targets = pending_target_deg_;
     pending_.fill(false);
-    // a STOP / DRIVE that landed after the request was accepted: drop the move
+    // a DRIVE that landed after the request was accepted: drop the move
     if (drive_enabled_ && drive_enabled_() &&
         std::any_of(to_move.begin(), to_move.end(), [](bool b) { return b; })) {
       logger_.warn("Queued linkage move dropped: the base started driving");
@@ -311,6 +320,15 @@ bool LinkageController::status_step() {
   for (const Corner corner : pear::kCorners) {
     if (!to_move[pear::index(corner)])
       continue;
+    // re-validated per corner: a refusal (driving, fault, stale) between two
+    // confirmed moves stops the rest of the batch
+    {
+      std::lock_guard<std::mutex> lock(mutex_);
+      if (const char *reason = refusal_reason_locked()) {
+        logger_.warn("Linkage batch stopped before {}: {}", pear::corner_name(corner), reason);
+        break;
+      }
+    }
     auto &motor = motors_[pear::index(corner)];
     const bool moved = motor.move_absolute(targets[corner]);
     std::lock_guard<std::mutex> lock(mutex_);
