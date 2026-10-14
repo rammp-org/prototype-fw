@@ -52,7 +52,8 @@ const char *StemController::to_string(Result result) {
 }
 
 StemController::StemController(const Config &config)
-    : espp::BaseComponent("StemController", config.log_level), config_(config) {
+    : espp::BaseComponent("StemController", config.log_level)
+    , config_(config) {
   for (uint8_t i = 0; i < kPairCount; ++i) {
     actuator(static_cast<Pair>(i)).set_position_limits(config_.min_deg, config_.max_deg);
   }
@@ -157,8 +158,8 @@ StemController::Result StemController::command_pose(const PoseCommand &pose, flo
       all_ok = false;
     }
   }
-  logger_.info("move x={:.1f} y={:.1f} -> left={:.2f} right={:.2f} seat={:.2f} deg{}",
-               pose.x_rel, pose.y_rel, pose.pair_deg[0], pose.pair_deg[1], pose.pair_deg[2],
+  logger_.info("move x={:.1f} y={:.1f} -> left={:.2f} right={:.2f} seat={:.2f} deg{}", pose.x_rel,
+               pose.y_rel, pose.pair_deg[0], pose.pair_deg[1], pose.pair_deg[2],
                all_ok ? "" : " (PARTIAL FAILURE)");
   if (!all_ok) {
     // The pairs no longer agree with any single target.
@@ -176,6 +177,10 @@ StemController::Result StemController::move_to(float x_rel, float y_rel, float r
   if (!std::isfinite(x_rel) || !std::isfinite(y_rel)) {
     return Result::InvalidArgument;
   }
+  // Solve, limit-check and command under ONE lock: solve() folds in the seat
+  // tilt, and set_seat_tilt() (which takes this mutex) must not change it
+  // between the solve and the command.
+  std::lock_guard<std::mutex> lock(mutex_);
   PoseCommand pose{};
   if (!solve(x_rel, y_rel, pose)) {
     logger_.warn("move x={:.1f} y={:.1f}: unreachable", x_rel, y_rel);
@@ -190,7 +195,6 @@ StemController::Result StemController::move_to(float x_rel, float y_rel, float r
                  config_.min_deg, config_.max_deg);
     return Result::OutOfLimits;
   }
-  std::lock_guard<std::mutex> lock(mutex_);
   if (any_zero_mismatch_unlocked()) {
     logger_.error("move x={:.1f} y={:.1f} rejected: pair zero mismatch", x_rel, y_rel);
     return Result::ZeroMismatch;
@@ -278,8 +282,7 @@ bool StemController::save_zero() {
   return ok;
 }
 
-bool StemController::read_zero(
-    std::array<std::array<int32_t, 2>, kPairCount> &zero_offset_pulses) {
+bool StemController::read_zero(std::array<std::array<int32_t, 2>, kPairCount> &zero_offset_pulses) {
   std::lock_guard<std::mutex> lock(mutex_);
   bool ok = true;
   for (uint8_t i = 0; i < kPairCount; ++i) {
@@ -330,7 +333,6 @@ bool StemController::check_pair_unlocked(Pair pair) {
 bool StemController::any_zero_mismatch_unlocked() const {
   return std::any_of(zero_mismatch_.begin(), zero_mismatch_.end(), [](bool m) { return m; });
 }
-
 
 State StemController::snapshot(bool read_motors) {
   std::lock_guard<std::mutex> lock(mutex_);

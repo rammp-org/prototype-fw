@@ -115,8 +115,8 @@ std::unique_ptr<cli::Menu> make_cli_menu(stem::StemController &controller,
         }
         print_solution(out, pose.solution);
         out << "pairs: left=" << pose.pair_deg[0] << " right=" << pose.pair_deg[1]
-            << " seat=" << pose.pair_deg[2] << " deg" << (pose.within_limits ? "" : " (OUTSIDE LIMITS)")
-            << "\n";
+            << " seat=" << pose.pair_deg[2] << " deg"
+            << (pose.within_limits ? "" : " (OUTSIDE LIMITS)") << "\n";
       },
       "Solve the IK relative to the calibration reference (no motion): ik_ref <x_rel> <y_rel>");
   menu->Insert(
@@ -142,8 +142,9 @@ std::unique_ptr<cli::Menu> make_cli_menu(stem::StemController &controller,
   menu->Insert(
       "tilt",
       [&controller](std::ostream &out, float tilt_deg) {
-        out << "seat tilt " << tilt_deg << " deg: "
-            << stem::StemController::to_string(controller.set_seat_tilt(tilt_deg, 0.0f)) << "\n";
+        out << "seat tilt " << tilt_deg
+            << " deg: " << stem::StemController::to_string(controller.set_seat_tilt(tilt_deg, 0.0f))
+            << "\n";
       },
       "Set the seat tilt offset (deg on top of the IK level angle), kept across moves: tilt <deg>");
   menu->Insert(
@@ -182,8 +183,8 @@ std::unique_ptr<cli::Menu> make_cli_menu(stem::StemController &controller,
           if (actuator.read_status(status)) {
             out << "Motor " << static_cast<int>(actuator.get_motor_id())
                 << ": temperature=" << status.temperature_c << " C, torque=" << status.torque_raw
-                << ", velocity=" << status.velocity_rpm << " RPM, tracked=" << actuator.get_position()
-                << " deg\n";
+                << ", velocity=" << status.velocity_rpm
+                << " RPM, tracked=" << actuator.get_position() << " deg\n";
           } else {
             out << "Motor " << static_cast<int>(actuator.get_motor_id())
                 << ": status read failed\n";
@@ -209,7 +210,8 @@ std::unique_ptr<cli::Menu> make_cli_menu(stem::StemController &controller,
         controller.zero(pair, false);
         out << pair_name << " zeroed without alignment.\n";
       },
-      "Set a pair's (or all pairs') current position as zero without alignment: zero <right|left|seat|all>");
+      "Set a pair's (or all pairs') current position as zero without alignment: zero "
+      "<right|left|seat|all>");
   menu->Insert(
       "zero_align",
       [&controller](std::ostream &out, const std::string &pair_name) {
@@ -221,7 +223,8 @@ std::unique_ptr<cli::Menu> make_cli_menu(stem::StemController &controller,
         controller.zero(pair, true);
         out << pair_name << " zeroed after alignment.\n";
       },
-      "Set a pair's (or all pairs') current position as zero after alignment: zero_align <right|left|seat|all>");
+      "Set a pair's (or all pairs') current position as zero after alignment: zero_align "
+      "<right|left|seat|all>");
   return menu;
 }
 
@@ -280,7 +283,8 @@ extern "C" void app_main(void) {
   PairedActuator right_pair(actuators[3], actuators[2]);
   PairedActuator left_pair(actuators[1], actuators[0]);
   PairedActuator seat_pair(actuators[5], actuators[4]);
-  logger.info("Six motor actuators (IDs 1-6) in three reversed pairs: left 2-1, right 4-3, seat 6-5");
+  logger.info(
+      "Six motor actuators (IDs 1-6) in three reversed pairs: left 2-1, right 4-3, seat 6-5");
 
   stem::StemController controller({
       .left = left_pair,
@@ -395,9 +399,9 @@ extern "C" void app_main(void) {
   espp::CoreDumpService vendor_coredump(
       core_dump, {.send = [&](std::span<const uint8_t> f) { send_vendor(f); },
                   .log_level = espp::Logger::Verbosity::INFO});
-  espp::CoreDumpService cdc_coredump(
-      core_dump, {.send = [&](std::span<const uint8_t> f) { send_cdc(f); },
-                  .log_level = espp::Logger::Verbosity::INFO});
+  espp::CoreDumpService cdc_coredump(core_dump,
+                                     {.send = [&](std::span<const uint8_t> f) { send_cdc(f); },
+                                      .log_level = espp::Logger::Verbosity::INFO});
   stem::StemModule stem_module({
       .controller = controller,
       .app = {.project = running.project_name,
@@ -478,22 +482,26 @@ extern "C" void app_main(void) {
   auto register_modules = [&](espp::Dispatcher &dispatcher, Transport transport,
                               espp::CoreDumpService &coredump_service) {
     const send_fn send = sender(transport);
-    dispatcher.register_module(
-        otap::kModule,
-        [&, send](const Frame &frame) {
-          if (!frame.is_reply())
-            handle_ota_frame(frame, send);
-        },
-        {.name = "OTA", .app = "ota_console.html", .description = "Firmware update over USB"});
-    dispatcher.register_module(
-        espp::CoreDumpService::kModule,
-        [&coredump_service](const Frame &frame) {
-          if (!frame.is_reply())
-            coredump_service.handle_frame(frame.type, frame.payload);
-        },
-        {.name = "Core Dump",
-         .app = "coredump_console.html",
-         .description = "Inspect the last crash core dump"});
+    dispatcher.register_module(otap::kModule,
+                               [&, send](const Frame &frame) {
+                                 if (!frame.is_reply())
+                                   handle_ota_frame(frame, send);
+                               },
+                               {.name = "OTA",
+                                .app = "ota_console.html",
+                                .description = "Firmware update over USB",
+                                .protocol = "espp.ota",
+                                .protocol_version = 1});
+    dispatcher.register_module(espp::CoreDumpService::kModule,
+                               [&coredump_service](const Frame &frame) {
+                                 if (!frame.is_reply())
+                                   coredump_service.handle_frame(frame.type, frame.payload);
+                               },
+                               {.name = "Core Dump",
+                                .app = "coredump_console.html",
+                                .description = "Inspect the last crash core dump",
+                                .protocol = "espp.coredump",
+                                .protocol_version = 1});
     dispatcher.register_module(
         stem_proto::kModule,
         [&, send, transport](const Frame &frame) {

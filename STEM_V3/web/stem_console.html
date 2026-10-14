@@ -140,7 +140,7 @@
       </div>
 
       <div class="panel">
-        <h2>Actuator pairs <span class="muted" style="text-transform:none;letter-spacing:0">— tracked position, deg</span></h2>
+        <h2>Actuator pairs <span class="muted" style="text-transform:none;letter-spacing:0">— measured position, deg</span></h2>
         <div class="pairs" id="pairs"></div>
         <div class="row" style="margin-top:10px">
           <button id="zeroAllBtn" disabled>Zero all (no align)</button>
@@ -152,7 +152,7 @@
           <button id="tiltBtn" disabled>Apply tilt</button>
           <span id="tiltNow" class="muted">device: –</span>
         </div>
-        <p class="hint">Positions are the firmware's tracked (commanded) values: the RMD status frame only carries the motor-side encoder, so there is no measured output-shaft angle. Re-zero after a STOP mid-move.
+        <p class="hint">Positions are read live from each Eyou motor's CANopen encoder (object 0x6064, relative to the saved zero); the pose above is the FK of the live pair positions. "moving" follows the DS402 target-reached bit.
           <b>Zero</b> marks the current position as 0 without moving (CLI <code>zero</code>); <b>Zero-align</b> first drives each motor to its encoder zero (the motors move), then zeros (CLI <code>zero_align</code>) — do this once per power-up after reaching the calibration pose.
           <b>Seat tilt</b> is an offset the firmware adds to the IK's level seat angle on every move, so it persists as the linkage moves (positive = positive seat-pair rotation).</p>
       </div>
@@ -160,7 +160,7 @@
       <div class="panel">
         <h2>Motor telemetry</h2>
         <table>
-          <thead><tr><th>motor</th><th>pair</th><th>ok</th><th>temp °C</th><th>torque</th><th>rpm</th><th>tracked °</th></tr></thead>
+          <thead><tr><th>motor</th><th>pair</th><th>ok</th><th>DS402 state</th><th>statusword</th><th>error</th><th>position °</th></tr></thead>
           <tbody id="motors"></tbody>
         </table>
         <div class="row" style="margin-top:8px">
@@ -564,7 +564,8 @@
     function decodeState(p) {
       const r = new Reader(p), s = { uptime: r.u32(), flags: r.u8(), targetX: r.f32(), targetY: r.f32(), poseX: r.f32(), poseY: r.f32(), pairs: [r.f32(), r.f32(), r.f32()], seatTilt: r.f32(), motors: [] };
       const n = r.u8();
-      for (let i = 0; i < n; i++) s.motors.push({ id: r.u8(), ok: r.u8() !== 0, temp: r.i8(), torque: r.i16(), rpm: r.f32(), tracked: r.f32() });
+      // V3 motor record (stem_protocol.hpp): u8 id, u8 ok, u16 statusword, u16 error_code, f32 position deg (live, 0x6064)
+      for (let i = 0; i < n; i++) s.motors.push({ id: r.u8(), ok: r.u8() !== 0, statusword: r.u16(), errorCode: r.u16(), tracked: r.f32() });
       return s;
     }
 
@@ -621,7 +622,8 @@
       if (s.seatTilt !== seatTilt) { seatTilt = s.seatTilt; if (!dragging) refreshTarget(target.x, target.y); }
       els.tiltNow.textContent = "device: " + s.seatTilt.toFixed(1) + "°";
       if (s.flags & FLAG.TARGET_VALID) { /* keep the user's target; show the device's in the log only on change */ }
-      const moving = s.motors.some(m => m.ok && Math.abs(m.rpm) > 0.05);
+      // DS402 statusword bit 10 = target reached (profile position): clear while a move is in progress
+      const moving = s.motors.some(m => m.ok && (m.statusword & 0x0400) === 0 && (m.statusword & 0x0004) !== 0);
       els.motion.className = moving ? "good" : ""; els.motion.textContent = (moving ? "moving" : "idle") + (s.flags & FLAG.CAN_OK ? "" : " · CAN DOWN") + (s.flags & FLAG.MOTORS_OK ? "" : " · motor status missing");
       renderPairs(); renderMotors(s.motors);
       if (!isTelemetry) logLine("sys", "state: pairs " + s.pairs.map(v => v.toFixed(2)).join(" / ") + "° · uptime " + (s.uptime / 1000).toFixed(0) + " s");
@@ -643,13 +645,30 @@
         els.pairs.appendChild(alignBtn);
       });
     }
+    // DS402 state from the statusword's low bits (same table as EyouMotor::ds402_state_name)
+    function ds402StateName(sw) {
+      switch (sw & 0x006F) {
+        case 0x0000: return "Not ready";
+        case 0x0040: return "Switch on disabled";
+        case 0x0021: return "Ready to switch on";
+        case 0x0023: return "Switched on";
+        case 0x0027: return "Operation enabled";
+        case 0x0007: return "Quick stop";
+        case 0x000F: return "Fault reaction";
+        case 0x0008: return "Fault";
+        default: return "?";
+      }
+    }
     function renderMotors(motors) {
       els.motors.innerHTML = "";
       for (const m of motors) {
         const tr = document.createElement("tr");
         const pair = motorsMeta.find(p => p.primary === m.id || p.secondary === m.id);
-        const cells = [m.id, pair ? pair.name : "–", m.ok ? "✓" : "✗", m.ok ? m.temp : "–", m.ok ? m.torque : "–", m.ok ? m.rpm.toFixed(2) : "–", m.tracked.toFixed(2)];
-        cells.forEach((c, i) => { const td = document.createElement("td"); td.textContent = c; if (i === 2 && !m.ok) td.className = "bad"; tr.appendChild(td); });
+        const faulted = m.ok && (m.statusword & 0x0008) !== 0;
+        const cells = [m.id, pair ? pair.name : "–", m.ok ? "✓" : "✗", m.ok ? ds402StateName(m.statusword) : "–",
+                       m.ok ? "0x" + m.statusword.toString(16).padStart(4, "0") : "–",
+                       m.ok ? (m.errorCode ? "0x" + m.errorCode.toString(16).padStart(4, "0") : "none") : "–", m.tracked.toFixed(2)];
+        cells.forEach((c, i) => { const td = document.createElement("td"); td.textContent = c; if ((i === 2 && !m.ok) || (i === 3 && faulted)) td.className = "bad"; tr.appendChild(td); });
         els.motors.appendChild(tr);
       }
     }

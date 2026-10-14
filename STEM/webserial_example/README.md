@@ -24,9 +24,8 @@ The page uses commands already registered by `STEM/main/main.cpp`:
 - `move <x_rel> <y_rel>`
 - `home`
 - `set <right|left|seat> <degrees>`
+- `stop` (the Stop button; stops every actuator pair)
 - `release`
 - `status`
 
-There is currently no firmware `stop` command, so this example does not expose
-a stop button. The browser UI does not replace firmware-side IK or actuator
-limit checks.
+The browser UI does not replace firmware-side IK or actuator limit checks.

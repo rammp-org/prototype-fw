@@ -1,8 +1,9 @@
 #include "paired_actuator.hpp"
 
 PairedActuator::PairedActuator(MotorActuator &primary, MotorActuator &secondary)
-    : espp::BaseComponent("PairedActuator", espp::Logger::Verbosity::INFO), primary_(primary),
-      secondary_(secondary) {
+    : espp::BaseComponent("PairedActuator", espp::Logger::Verbosity::INFO)
+    , primary_(primary)
+    , secondary_(secondary) {
   set_log_tag("PairedActuator-" + std::to_string(primary_.get_motor_id()) + "-" +
               std::to_string(secondary_.get_motor_id()));
   set_position_limits();
@@ -36,6 +37,16 @@ bool PairedActuator::set_position_limits(float minimum_degrees, float maximum_de
 bool PairedActuator::set_position(float position_degrees, float max_speed_rpm) {
   const bool primary_ok = primary_.set_position(position_degrees, max_speed_rpm);
   const bool secondary_ok = secondary_.set_position(-position_degrees, max_speed_rpm);
+  if (primary_ok != secondary_ok) {
+    // The two commands are not one transaction: one side moving the pair alone
+    // twists the mechanism, so stop both at once and report the failure.
+    logger_.error("set_position partial failure (primary={}, secondary={}); stopping both",
+                  primary_ok, secondary_ok);
+    if (!stop()) {
+      logger_.error("Stop after a partial set_position failed for at least one motor");
+    }
+    return false;
+  }
   return primary_ok && secondary_ok;
 }
 

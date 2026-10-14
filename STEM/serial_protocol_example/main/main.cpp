@@ -46,7 +46,9 @@ void send_response(const char *format, ...) {
 class StemController {
 public:
   StemController(PairedActuator &right, PairedActuator &left, PairedActuator &seat)
-      : right_(right), left_(left), seat_(seat) {}
+      : right_(right)
+      , left_(left)
+      , seat_(seat) {}
 
   bool move(float x, float y) {
     stem::GeometryConfig config{};
@@ -112,9 +114,12 @@ public:
 
 private:
   PairedActuator *pair_for_name(const char *name) {
-    if (std::strcmp(name, "right") == 0) return &right_;
-    if (std::strcmp(name, "left") == 0) return &left_;
-    if (std::strcmp(name, "seat") == 0) return &seat_;
+    if (std::strcmp(name, "right") == 0)
+      return &right_;
+    if (std::strcmp(name, "left") == 0)
+      return &left_;
+    if (std::strcmp(name, "seat") == 0)
+      return &seat_;
     return nullptr;
   }
 
@@ -129,7 +134,8 @@ struct ProtocolContext {
 
 void process_command(char *line, ProtocolContext &context) {
   char command[16]{};
-  if (std::sscanf(line, "%15s", command) != 1) return;
+  if (std::sscanf(line, "%15s", command) != 1)
+    return;
 
   if (std::strcmp(command, "PING") == 0) {
     send_response("OK PONG protocol=1\n");
@@ -170,8 +176,8 @@ void process_command(char *line, ProtocolContext &context) {
 
   float x = 0.0f;
   float y = 0.0f;
-  if (std::strcmp(command, "MOVE") == 0 &&
-      std::sscanf(line, "%*s %f %f", &x, &y) == 2 && std::isfinite(x) && std::isfinite(y)) {
+  if (std::strcmp(command, "MOVE") == 0 && std::sscanf(line, "%*s %f %f", &x, &y) == 2 &&
+      std::isfinite(x) && std::isfinite(y)) {
     auto *controller = context.controller.load();
     if (controller == nullptr) {
       send_response("ERROR controller_not_ready\n");
@@ -183,8 +189,8 @@ void process_command(char *line, ProtocolContext &context) {
 
   char pair[8]{};
   float degrees = 0.0f;
-  if (std::strcmp(command, "SET") == 0 &&
-      std::sscanf(line, "%*s %7s %f", pair, &degrees) == 2 && std::isfinite(degrees)) {
+  if (std::strcmp(command, "SET") == 0 && std::sscanf(line, "%*s %7s %f", pair, &degrees) == 2 &&
+      std::isfinite(degrees)) {
     auto *controller = context.controller.load();
     if (controller == nullptr) {
       send_response("ERROR controller_not_ready\n");
@@ -205,13 +211,14 @@ void serial_task(void *context) {
 
   while (true) {
     const int count = uart_read_bytes(kUartPort, &byte, 1, kReadTimeoutTicks);
-    if (count != 1) continue;
+    if (count != 1)
+      continue;
     send_response("RX byte=0x%02X (%u)\n", byte, byte);
-    if (byte == '\r') continue;
+    if (byte == '\r')
+      continue;
     if (byte == '\n') {
       line[length] = '\0';
-      send_response("RX frame length=%u text=\\\"%s\\\"\n",
-                    static_cast<unsigned>(length), line);
+      send_response("RX frame length=%u text=\\\"%s\\\"\n", static_cast<unsigned>(length), line);
       process_command(line, protocol);
       length = 0;
       continue;
@@ -242,6 +249,7 @@ extern "C" void app_main(void) {
       .stop_bits = UART_STOP_BITS_1,
       .flow_ctrl = UART_HW_FLOWCTRL_DISABLE,
       .rx_flow_ctrl_thresh = 0,
+      .rx_glitch_filt_thresh = 0, // IDF 6.x: no RX glitch filter
       .source_clk = UART_SCLK_DEFAULT,
       .flags = {},
   };
@@ -251,11 +259,10 @@ extern "C" void app_main(void) {
     return;
   }
   if (!uart_is_driver_installed(kUartPort)) {
-    const esp_err_t install_result = uart_driver_install(
-        kUartPort, kUartBufferSize, kUartBufferSize, 0, nullptr, 0);
+    const esp_err_t install_result =
+        uart_driver_install(kUartPort, kUartBufferSize, kUartBufferSize, 0, nullptr, 0);
     if (install_result != ESP_OK) {
-      esp_rom_printf("ERROR UART0 driver install failed: %s\n",
-                     esp_err_to_name(install_result));
+      esp_rom_printf("ERROR UART0 driver install failed: %s\n", esp_err_to_name(install_result));
       return;
     }
   }
@@ -279,13 +286,13 @@ extern "C" void app_main(void) {
 
   MotorActuator::CommunicationFunction communicate =
       [&can_bus](const MotorPacket &command, MotorPacket &response, uint32_t timeout_ms) {
-        if (timeout_ms == 0) return can_bus.send(command);
+        if (timeout_ms == 0)
+          return can_bus.send(command);
         return can_bus.request(command, response, timeout_ms);
       };
   MotorActuator actuators[] = {
-      MotorActuator(communicate, 1), MotorActuator(communicate, 2),
-      MotorActuator(communicate, 3), MotorActuator(communicate, 4),
-      MotorActuator(communicate, 5), MotorActuator(communicate, 6),
+      MotorActuator(communicate, 1), MotorActuator(communicate, 2), MotorActuator(communicate, 3),
+      MotorActuator(communicate, 4), MotorActuator(communicate, 5), MotorActuator(communicate, 6),
   };
 
   PairedActuator right(actuators[3], actuators[2]);
@@ -301,4 +308,10 @@ extern "C" void app_main(void) {
   StemController controller(right, left, seat);
   protocol.controller.store(&controller);
   send_response("READY controller=ready\n");
+  // serial_task dereferences the controller (and through it the pairs,
+  // motors and CAN bus) for as long as it runs; they live on this stack, so
+  // app_main must never return.
+  while (true) {
+    vTaskDelay(pdMS_TO_TICKS(1000));
+  }
 }

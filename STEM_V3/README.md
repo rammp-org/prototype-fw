@@ -50,10 +50,11 @@ swaps the actuator layer for `EyouMotor`/`PairedEyouActuator`.
   firmware's tracked pose, lets you drag the end effector to move it, sends
   direct pose / pair commands and streams motor telemetry. See `web/README.md`.
 
-Note on "current pose": the RMD status frame only carries the motor-side
-(pre-gearbox) encoder, so there is no measured output-shaft angle. The pose the
-firmware reports is the FK of the pair positions it has commanded since the
-last zero; motor velocity is the "still moving" indicator.
+Note on "current pose": each Eyou motor reports its actual output position
+over CANopen (object 0x6064, relative to the saved software zero), and the
+firmware reads the pairs live; the pose it reports is the FK of those measured
+positions. The DS402 statusword (target-reached bit) is the "still moving"
+indicator.
 
 ## Build, flash, test
 

@@ -37,7 +37,8 @@ public:
   // read also returns false. `mismatch_degrees` receives primary + secondary.
   bool check_mirrored(float tolerance_degrees, float &mismatch_degrees, uint32_t timeout_ms = 100);
   // Restrict set_position/move_incremental targets to [minimum_degrees, maximum_degrees] on the
-  // primary; the secondary is limited to the negated range.
+  // primary; the secondary is limited to the negated range (move_incremental reads the pair and
+  // commands limit-checked absolute targets).
   bool set_position_limits(float minimum_degrees, float maximum_degrees);
   // Index 0 is the primary actuator; index 1 is the secondary actuator (negated command).
   bool get_position(std::array<float, 2> &position_degrees, uint32_t timeout_ms = 100);

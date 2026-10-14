@@ -3,13 +3,15 @@
 #include <cmath>
 
 PairedEyouActuator::PairedEyouActuator(EyouMotor &primary, EyouMotor &secondary)
-    : espp::BaseComponent("PairedEyouActuator", espp::Logger::Verbosity::INFO), primary_(primary),
-      secondary_(secondary) {
+    : espp::BaseComponent("PairedEyouActuator", espp::Logger::Verbosity::INFO)
+    , primary_(primary)
+    , secondary_(secondary) {
   set_log_tag("PairedEyouActuator-" + std::to_string(primary_.node_id()) + "-" +
               std::to_string(secondary_.node_id()));
 }
 
-bool PairedEyouActuator::configure_profile_position(const EyouMotor::ProfilePositionConfig &config) {
+bool PairedEyouActuator::configure_profile_position(
+    const EyouMotor::ProfilePositionConfig &config) {
   const bool primary_ok = primary_.configure_profile_position(config);
   const bool secondary_ok = secondary_.configure_profile_position(config);
   return primary_ok && secondary_ok;
@@ -122,8 +124,15 @@ bool PairedEyouActuator::set_position(float position_degrees, bool immediate) {
 }
 
 bool PairedEyouActuator::move_incremental(float increment_degrees, bool immediate) {
-  const bool primary_ok = primary_.move_incremental(increment_degrees, immediate);
-  const bool secondary_ok = secondary_.move_incremental(-increment_degrees, immediate);
+  // Read the pair, then command absolute targets: EyouMotor::move_absolute
+  // clamps to the configured limits, EyouMotor::move_incremental does not.
+  std::array<float, 2> position{};
+  if (!get_position(position)) {
+    logger_.error("move_incremental: could not read the pair's position; no move");
+    return false;
+  }
+  const bool primary_ok = primary_.move_absolute(position[0] + increment_degrees, immediate);
+  const bool secondary_ok = secondary_.move_absolute(position[1] - increment_degrees, immediate);
   if (!primary_ok || !secondary_ok) {
     logger_.error("move_incremental failed (primary={}, secondary={}); disabling both drives",
                   primary_ok, secondary_ok);

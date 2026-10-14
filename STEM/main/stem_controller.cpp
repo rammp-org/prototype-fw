@@ -50,7 +50,8 @@ const char *StemController::to_string(Result result) {
 }
 
 StemController::StemController(const Config &config)
-    : espp::BaseComponent("StemController", config.log_level), config_(config) {
+    : espp::BaseComponent("StemController", config.log_level)
+    , config_(config) {
   for (uint8_t i = 0; i < kPairCount; ++i) {
     actuator(static_cast<Pair>(i)).set_position_limits(config_.min_deg, config_.max_deg);
   }
@@ -169,6 +170,10 @@ StemController::Result StemController::move_to(float x_rel, float y_rel, float r
   if (!std::isfinite(x_rel) || !std::isfinite(y_rel)) {
     return Result::InvalidArgument;
   }
+  // Solve, limit-check and command under ONE lock: solve() folds in the seat
+  // tilt, and set_seat_tilt() (which takes this mutex) must not change it
+  // between the solve and the command.
+  std::lock_guard<std::mutex> lock(mutex_);
   PoseCommand pose{};
   if (!solve(x_rel, y_rel, pose)) {
     logger_.warn("move x={:.1f} y={:.1f}: unreachable", x_rel, y_rel);
@@ -183,7 +188,6 @@ StemController::Result StemController::move_to(float x_rel, float y_rel, float r
                  config_.min_deg, config_.max_deg);
     return Result::OutOfLimits;
   }
-  std::lock_guard<std::mutex> lock(mutex_);
   return command_pose(pose, rpm);
 }
 

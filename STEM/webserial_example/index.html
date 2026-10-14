@@ -180,6 +180,7 @@
       </div>
       <pre id="output" aria-live="polite">Connect to the STEM USB serial device to begin.</pre>
       <div class="button-row" style="margin-top: 14px">
+        <button id="stopButton" class="danger" disabled>Stop</button>
         <button id="releaseButton" class="danger" disabled>Release brakes</button>
       </div>
     </section>
@@ -195,6 +196,7 @@
     const homeButton = document.querySelector('#homeButton');
     const setButton = document.querySelector('#setButton');
     const releaseButton = document.querySelector('#releaseButton');
+    const stopButton = document.querySelector('#stopButton');
     const xInput = document.querySelector('#xInput');
     const yInput = document.querySelector('#yInput');
     const pairSelect = document.querySelector('#pairSelect');
@@ -217,7 +219,7 @@
       connectionStatus.classList.toggle('connected', connected);
       connectButton.disabled = connected;
       disconnectButton.disabled = !connected;
-      for (const button of [statusButton, moveButton, homeButton, setButton, releaseButton]) {
+      for (const button of [statusButton, moveButton, homeButton, setButton, stopButton, releaseButton]) {
         button.disabled = !connected;
       }
     }
@@ -316,6 +318,7 @@
       const degrees = window.prompt(`Degrees for ${pairSelect.value}`, '0');
       if (degrees !== null && Number.isFinite(Number(degrees))) send(`set ${pairSelect.value} ${Number(degrees)}`);
     });
+    stopButton.addEventListener('click', () => send('stop'));
     releaseButton.addEventListener('click', () => {
       if (window.confirm('Release all motor brakes?')) send('release');
     });

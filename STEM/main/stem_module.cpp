@@ -14,9 +14,7 @@ using Result = StemController::Result;
 
 namespace {
 
-uint32_t uptime_ms() {
-  return static_cast<uint32_t>(esp_timer_get_time() / 1000);
-}
+uint32_t uptime_ms() { return static_cast<uint32_t>(esp_timer_get_time() / 1000); }
 
 void put_point(std::vector<uint8_t> &out, const std::array<float, 2> &point) {
   proto::put_f32(out, point[0]);
@@ -26,12 +24,15 @@ void put_point(std::vector<uint8_t> &out, const std::array<float, 2> &point) {
 } // namespace
 
 StemModule::StemModule(const Config &config)
-    : espp::BaseComponent("StemModule", config.log_level), config_(config) {}
+    : espp::BaseComponent("StemModule", config.log_level)
+    , config_(config) {}
 
 espp::Dispatcher::ModuleInfo StemModule::module_info() {
   return {.name = "STEM Linkage",
           .app = "stem_console.html",
-          .description = "5-bar seat linkage: live pose, drag-to-move, pair control, telemetry"};
+          .description = "5-bar seat linkage: live pose, drag-to-move, pair control, telemetry",
+          .protocol = "rammp.stem",
+          .protocol_version = 1};
 }
 
 bool StemModule::streaming(Transport transport) const {
@@ -50,8 +51,7 @@ bool StemModule::any_streaming() const {
   return false;
 }
 
-std::vector<uint8_t> StemModule::error_for(Msg request, Result result,
-                                           const std::string &context) {
+std::vector<uint8_t> StemModule::error_for(Msg request, Result result, const std::string &context) {
   std::errc errc = std::errc::invalid_argument;
   switch (result) {
   case Result::Unreachable:
@@ -183,10 +183,9 @@ void StemModule::handle_frame(const espp::stream_frame::Frame &frame, Transport 
   const auto request = static_cast<Msg>(frame.type);
   const std::span<const uint8_t> payload = frame.payload;
   auto bad_args = [&](const char *expected) {
-    send(proto::make_error(request,
-                           static_cast<uint32_t>(
-                               std::make_error_code(std::errc::invalid_argument).value()),
-                           expected));
+    send(proto::make_error(
+        request, static_cast<uint32_t>(std::make_error_code(std::errc::invalid_argument).value()),
+        expected));
   };
   auto reply_result = [&](Result result, const char *context) {
     if (result == Result::Ok)
