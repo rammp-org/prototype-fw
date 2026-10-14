@@ -77,7 +77,9 @@ RtpsLink::RtpsLink(const Config &config)
     , drive_(config.drive)
     , linkage_(config.linkage) {}
 
-RtpsLink::~RtpsLink() {
+RtpsLink::~RtpsLink() { teardown(); }
+
+void RtpsLink::teardown() {
   // stop the timers before the endpoints they use go away; the endpoints
   // before the participant they are registered on
   watchdog_timer_.reset();
@@ -153,6 +155,7 @@ bool RtpsLink::start(const std::string &interface_address) {
   if (!status_pub_->is_valid() || !diag_pub_->is_valid() || !motor_pubs_ok ||
       !xy_twist_sub_->is_valid() || !drive_sub_->is_valid() || !seat_sub_->is_valid()) {
     logger_.error("Failed to create the RTPS endpoints (raise CONFIG_RTPS_LIMIT_NUM_* ?)");
+    teardown(); // the endpoints that did come up must not keep acting on their own
     return false;
   }
 

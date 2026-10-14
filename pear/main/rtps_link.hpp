@@ -119,6 +119,11 @@ protected:
   LinkageController &linkage_;
   std::string interface_address_; ///< set by start()
 
+  /// Release timers, endpoints and participant in dependency order; after a
+  /// partial start() failure nothing may stay registered (a surviving seat
+  /// subscriber could still move linkages with no status being published).
+  void teardown();
+
   std::unique_ptr<espp::RtpsParticipant> participant_;
   std::unique_ptr<espp::Publisher<MIB::MibStatus>> status_pub_;
   std::unique_ptr<espp::Publisher<rammp::Diagnostics>> diag_pub_;

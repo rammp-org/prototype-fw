@@ -199,6 +199,14 @@ protected:
   Corners pending_target_deg_{};
   std::array<bool, pear::kCornerCount> pending_{};
   std::optional<Pose> desired_pose_{}; ///< last requested pose; reset by a corner move
+  /// Bumped (mutex_ held) whenever a request is queued. A batch remembers the
+  /// generation it was copied from, so when it is dropped or abandoned it can
+  /// clear the desired pose it was meant to reach WITHOUT erasing a newer
+  /// request queued meanwhile.
+  uint32_t request_generation_{0};
+  /// Drop the desired pose of the batch of `generation` (mutex_ held) unless
+  /// a newer request has been queued since.
+  void forget_batch_pose_locked(uint32_t generation, const char *why);
   bool initialized_{false};
   std::chrono::steady_clock::time_point last_command_{};
   bool have_command_{false};

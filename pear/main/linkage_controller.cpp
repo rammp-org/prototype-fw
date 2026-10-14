@@ -150,6 +150,7 @@ bool LinkageController::request_corner_angle(Corner corner, float angle_deg) {
   pending_target_deg_[corner] = angle_deg;
   pending_[pear::index(corner)] = true;
   desired_pose_.reset(); // the corners no longer describe one requested pose
+  ++request_generation_;
   logger_.info("Linkage {} -> {:.1f} deg", pear::corner_name(corner), angle_deg);
   return true;
 }
@@ -211,6 +212,7 @@ bool LinkageController::commit_pose_locked(const Pose &pose) {
     pending_[pear::index(corner)] = true;
   }
   desired_pose_ = pose;
+  ++request_generation_;
   logger_.info("Pose elev {:.3f} m fb {:.1f} deg lat {:.1f} deg -> FR {:.1f} FL {:.1f} BR {:.1f} "
                "BL {:.1f} deg",
                pose.elevation_m, pose.fb_tilt_deg, pose.lateral_tilt_deg, targets[Corner::FR],
@@ -220,6 +222,17 @@ bool LinkageController::commit_pose_locked(const Pose &pose) {
 
 void LinkageController::invalidate_targets_locked() {
   pending_.fill(false);
+  desired_pose_.reset();
+  ++request_generation_;
+}
+
+void LinkageController::forget_batch_pose_locked(uint32_t generation, const char *why) {
+  // the pose this batch was meant to reach was never reached: a later single
+  // component command must start from the MEASURED pose, not from it. A
+  // request queued since owns the current generation and keeps its pose.
+  if (request_generation_ != generation || !desired_pose_)
+    return;
+  logger_.info("Desired pose forgotten ({})", why);
   desired_pose_.reset();
 }
 
@@ -367,11 +380,13 @@ bool LinkageController::status_step() {
         halt_corner(corner, "no target reached in time");
       }
     }
+    uint32_t batch_generation = 0;
     {
       std::lock_guard<std::mutex> lock(mutex_);
       to_move = pending_;
       targets = pending_target_deg_;
       pending_.fill(false);
+      batch_generation = request_generation_;
     }
     const bool have_work = std::any_of(to_move.begin(), to_move.end(), [](bool b) { return b; });
     // Only a batch with work marks itself moving (an idle tick must not make
@@ -390,6 +405,8 @@ bool LinkageController::status_step() {
       if (drive_enabled_ && drive_enabled_()) {
         logger_.warn("Queued linkage move dropped: the base started driving");
         to_move.fill(false);
+        std::lock_guard<std::mutex> lock(mutex_);
+        forget_batch_pose_locked(batch_generation, "batch dropped");
       }
     }
     // A batch is all-or-nothing for the platform: when a later corner cannot
@@ -406,6 +423,8 @@ bool LinkageController::status_step() {
         halt_corner(done, why);
       }
       accepted = 0;
+      std::lock_guard<std::mutex> lock(mutex_);
+      forget_batch_pose_locked(batch_generation, "batch abandoned");
     };
     for (const Corner corner : pear::kCorners) {
       if (!to_move[pear::index(corner)])
