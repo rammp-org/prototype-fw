@@ -305,19 +305,19 @@ void RtpsLink::on_seat_command(const rammp::SeatCommand &msg) {
     linkage_.request_corner_angle(*corner, msg.target);
     return;
   }
-  // a pose row: replace that component of the measured pose (table units:
-  // deg, mm) and request the whole pose
-  LinkageController::Pose pose = linkage_.state().pose;
+  // a pose row: replace that component of the controller's DESIRED pose
+  // (table units: deg, mm) so successive single-axis requests accumulate
+  using PoseComponent = LinkageController::PoseComponent;
   switch (msg.axis) {
   case rammp::SeatAxis::FRONT_BACK_TILT:
-    pose.fb_tilt_deg = msg.target;
-    break;
+    linkage_.request_pose_component(PoseComponent::FB_TILT, msg.target);
+    return;
   case rammp::SeatAxis::LATERAL_TILT:
-    pose.lateral_tilt_deg = msg.target;
-    break;
+    linkage_.request_pose_component(PoseComponent::LATERAL_TILT, msg.target);
+    return;
   case rammp::SeatAxis::ELEVATION:
-    pose.elevation_m = msg.target * 0.001f;
-    break;
+    linkage_.request_pose_component(PoseComponent::ELEVATION, msg.target * 0.001f);
+    return;
   case rammp::SeatAxis::TRANSLATION: {
     std::lock_guard<std::mutex> lock(mutex_);
     if (!translation_warned_) {
@@ -332,7 +332,6 @@ void RtpsLink::on_seat_command(const rammp::SeatCommand &msg) {
                               static_cast<int>(msg.axis));
     return;
   }
-  linkage_.request_pose(pose);
 }
 
 bool RtpsLink::watchdog_step() {

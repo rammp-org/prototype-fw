@@ -283,10 +283,18 @@ bool Ds402VelocityMotor::enable_drive(uint32_t timeout_ms) {
     return false;
   }
   uint32_t raw = 0;
-  if (request_sdo_u32(kModesOfOperationDisplayIndex, 0, raw, kDefaultSdoTimeoutMs) &&
-      static_cast<int8_t>(raw) != mode) {
-    logger_.warn("Drive reports operation mode {} after requesting {}",
-                 static_cast<int>(static_cast<int8_t>(raw)), static_cast<int>(mode));
+  // the readback is part of the enable: a set-point written while the drive
+  // sits in another mode would be ignored or misinterpreted, so a failed or
+  // mismatched readback is an enable failure the controller retries
+  if (!request_sdo_u32(kModesOfOperationDisplayIndex, 0, raw, kDefaultSdoTimeoutMs)) {
+    logger_.error("Could not read the operation mode back after requesting {}",
+                  static_cast<int>(mode));
+    return false;
+  }
+  if (static_cast<int8_t>(raw) != mode) {
+    logger_.error("Drive reports operation mode {} after requesting {}",
+                  static_cast<int>(static_cast<int8_t>(raw)), static_cast<int>(mode));
+    return false;
   }
   if (config_.use_acc_dec) {
     const auto ramp = [&](float rps2) {

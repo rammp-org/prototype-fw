@@ -20,20 +20,26 @@ bool CanBus::register_receiver(uint32_t can_id, QueueHandle_t queue) {
   if (node_ != nullptr || queue == nullptr) {
     return false;
   }
+  portENTER_CRITICAL(&receivers_lock_);
   const auto free_slot = std::find_if(receivers_.begin(), receivers_.end(),
                                       [](const Receiver &r) { return r.queue == nullptr; });
-  if (free_slot == receivers_.end()) {
-    return false;
+  const bool found = free_slot != receivers_.end();
+  if (found) {
+    *free_slot = {.can_id = can_id, .queue = queue};
   }
-  *free_slot = {.can_id = can_id, .queue = queue};
-  return true;
+  portEXIT_CRITICAL(&receivers_lock_);
+  return found;
 }
 
 void CanBus::unregister_receiver(QueueHandle_t queue) {
   std::lock_guard<std::mutex> lock(lifecycle_mutex_);
+  // the critical section excludes the RX ISR on every core: when it is
+  // released, no ISR can still be fanning a frame out to this queue
+  portENTER_CRITICAL(&receivers_lock_);
   std::replace_if(
       receivers_.begin(), receivers_.end(), [queue](const Receiver &r) { return r.queue == queue; },
       Receiver{});
+  portEXIT_CRITICAL(&receivers_lock_);
 }
 
 bool CanBus::on_receive(twai_node_handle_t handle, const twai_rx_done_event_data_t *event,
@@ -54,11 +60,13 @@ bool CanBus::on_receive(twai_node_handle_t handle, const twai_rx_done_event_data
       std::min<size_t>(twaifd_dlc2len(twai_frame.header.dlc), frame.data.size()));
 
   BaseType_t task_woken = pdFALSE;
+  portENTER_CRITICAL_ISR(&bus->receivers_lock_);
   for (const auto &receiver : bus->receivers_) {
     if (receiver.queue != nullptr && receiver.can_id == frame.id) {
       xQueueSendFromISR(receiver.queue, &frame, &task_woken);
     }
   }
+  portEXIT_CRITICAL_ISR(&bus->receivers_lock_);
   return task_woken == pdTRUE;
 }
 

@@ -107,6 +107,14 @@ public:
   /// (elevation m, tilts deg). Each corner is clamped on its own, so a pose
   /// outside the reach is approximated. Same refusals as above.
   bool request_pose(const Pose &pose);
+  /// One component of the pose the HMI's seat rows adjust.
+  enum class PoseComponent { ELEVATION, FB_TILT, LATERAL_TILT };
+  /// Replace one component of the DESIRED pose (the last requested pose, or
+  /// the measured pose when none was requested since a corner moved on its
+  /// own) and request the result: successive single-axis requests therefore
+  /// accumulate instead of each one rebuilding the pose from stale
+  /// measurements and discarding the others.
+  bool request_pose_component(PoseComponent component, float value);
 
   /// Set the software zero of one corner (or all) to the motor's current
   /// position (confirmed; the active offset only - see save_zero()).
@@ -145,6 +153,7 @@ protected:
   std::array<std::chrono::steady_clock::time_point, pear::kCornerCount> motor_status_time_{};
   Corners pending_target_deg_{};
   std::array<bool, pear::kCornerCount> pending_{};
+  std::optional<Pose> desired_pose_{}; ///< last requested pose; reset by a corner move
   bool initialized_{false};
   std::chrono::steady_clock::time_point last_command_{};
   bool have_command_{false};

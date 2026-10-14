@@ -68,6 +68,10 @@ private:
   gpio_num_t tx_gpio_;
   twai_node_handle_t node_{nullptr};
   std::array<Receiver, 64> receivers_{};
+  /// Guards receivers_ against the RX ISR (on either core): registration and
+  /// deregistration take it, and the ISR fans a frame out while holding it, so
+  /// once unregister_receiver() returns no ISR can still hold the queue handle.
+  mutable portMUX_TYPE receivers_lock_ = portMUX_INITIALIZER_UNLOCKED;
   std::mutex transmit_mutex_;
   std::mutex lifecycle_mutex_;
 

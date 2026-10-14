@@ -147,8 +147,34 @@ bool LinkageController::request_corner_angle(Corner corner, float angle_deg) {
   }
   pending_target_deg_[corner] = angle_deg;
   pending_[pear::index(corner)] = true;
+  desired_pose_.reset(); // the corners no longer describe one requested pose
   logger_.info("Linkage {} -> {:.1f} deg", pear::corner_name(corner), angle_deg);
   return true;
+}
+
+bool LinkageController::request_pose_component(PoseComponent component, float value) {
+  if (!std::isfinite(value)) {
+    logger_.error_rate_limited("Rejecting a non-finite pose component");
+    return false;
+  }
+  Pose pose = state().pose; // the measured pose, used when nothing is pending
+  {
+    std::lock_guard<std::mutex> lock(mutex_);
+    if (desired_pose_)
+      pose = *desired_pose_;
+  }
+  switch (component) {
+  case PoseComponent::ELEVATION:
+    pose.elevation_m = value;
+    break;
+  case PoseComponent::FB_TILT:
+    pose.fb_tilt_deg = value;
+    break;
+  case PoseComponent::LATERAL_TILT:
+    pose.lateral_tilt_deg = value;
+    break;
+  }
+  return request_pose(pose);
 }
 
 bool LinkageController::request_pose(const Pose &pose) {
@@ -172,6 +198,7 @@ bool LinkageController::request_pose(const Pose &pose) {
     pending_target_deg_[corner] = targets[corner];
     pending_[pear::index(corner)] = true;
   }
+  desired_pose_ = pose;
   logger_.info("Pose elev {:.3f} m fb {:.1f} deg lat {:.1f} deg -> FR {:.1f} FL {:.1f} BR {:.1f} "
                "BL {:.1f} deg",
                pose.elevation_m, pose.fb_tilt_deg, pose.lateral_tilt_deg, targets[Corner::FR],

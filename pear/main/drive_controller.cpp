@@ -226,7 +226,9 @@ bool DriveController::send_disable() {
   }
   note_command_sent();
   std::lock_guard<std::mutex> lock(mutex_);
-  armed_ = !ok; // a drive that did not confirm may still be enabled: re-arm anyway
+  // whatever subset of drives took the disable, the next DRIVE must re-enable
+  // them all together (arm_motors()) before any set-point goes out
+  armed_ = false;
   return ok;
 }
 
