@@ -63,8 +63,7 @@ private:
 class MotorActuator : public espp::BaseComponent {
 public:
   using CommunicationFunction =
-      std::function<bool(const MotorPacket &command, MotorPacket &response,
-               uint32_t timeout_ms)>;
+      std::function<bool(const MotorPacket &command, MotorPacket &response, uint32_t timeout_ms)>;
 
   struct Status {
     std::array<uint8_t, 8> data{};

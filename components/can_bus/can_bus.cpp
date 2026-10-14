@@ -3,8 +3,9 @@
 #include <algorithm>
 
 CanBus::CanBus(gpio_num_t rx_gpio, gpio_num_t tx_gpio)
-    : espp::BaseComponent("CanBus", espp::Logger::Verbosity::INFO), rx_gpio_(rx_gpio),
-      tx_gpio_(tx_gpio) {}
+    : espp::BaseComponent("CanBus", espp::Logger::Verbosity::INFO)
+    , rx_gpio_(rx_gpio)
+    , tx_gpio_(tx_gpio) {}
 
 CanBus::~CanBus() {
   std::lock_guard<std::mutex> lock(lifecycle_mutex_);
@@ -36,7 +37,7 @@ void CanBus::unregister_receiver(QueueHandle_t queue) {
 }
 
 bool CanBus::on_receive(twai_node_handle_t handle, const twai_rx_done_event_data_t *event,
-                         void *context) {
+                        void *context) {
   (void)event;
   const auto *bus = static_cast<const CanBus *>(context);
   CanFrame frame{};

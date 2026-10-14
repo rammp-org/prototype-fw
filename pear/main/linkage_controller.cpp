@@ -84,8 +84,8 @@ const char *LinkageController::refusal_reason_locked() const {
   // its last operation_enabled is no evidence, so treat it as unhealthy
   const auto now = std::chrono::steady_clock::now();
   size_t index = 0;
-  const auto unhealthy = std::find_if(
-      motor_status_.begin(), motor_status_.end(), [&](const MotorStatus &m) {
+  const auto unhealthy =
+      std::find_if(motor_status_.begin(), motor_status_.end(), [&](const MotorStatus &m) {
         const bool stale = !m.valid || (now - motor_status_time_[index++]) > status_stale_timeout_;
         return stale || m.faulted || !m.operation_enabled;
       });

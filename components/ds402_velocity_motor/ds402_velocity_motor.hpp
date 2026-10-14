@@ -73,7 +73,7 @@ public:
 
   struct Status {
     uint16_t statusword{0};
-    uint16_t error_code{0};    ///< the drive's error bit mask (0 = none)
+    uint16_t error_code{0}; ///< the drive's error bit mask (0 = none)
     float velocity_rpm{0.0f};
     float position_degrees{0.0f};
     float temperature_c{0.0f}; ///< 0 when the drive has no temperature object

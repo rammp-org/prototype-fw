@@ -127,8 +127,8 @@ void drive_swivel(espp::Logger &logger, const char *name, MotorActuator &motor, 
   if (direction == current_direction) {
     return;
   }
-  const bool ok = direction == 0 ? motor.stop()
-                                 : motor.send_velocity(direction * kSwivelDefaultSpeedRpm);
+  const bool ok =
+      direction == 0 ? motor.stop() : motor.send_velocity(direction * kSwivelDefaultSpeedRpm);
   if (!ok) {
     logger.warn("{} swivel command failed", name);
     return; // retried on the next joystick sample
@@ -148,8 +148,8 @@ void handle_swivel_xy_twist(espp::Logger &logger, SwivelJoystick &swivel,
 // Console CLI: the same operations the USB module exposes, on top of the same
 // controller (so limits / rejections / tracked state agree).
 std::unique_ptr<cli::Menu> make_cli_menu(stem::StemController &controller,
-                                         std::span<EyouMotor> actuators,
-                                         MotorActuator &base_swivel, MotorActuator &seat_swivel) {
+                                         std::span<EyouMotor> actuators, MotorActuator &base_swivel,
+                                         MotorActuator &seat_swivel) {
   auto menu = std::make_unique<cli::Menu>("STEM");
   menu->Insert(
       "set",
@@ -185,8 +185,8 @@ std::unique_ptr<cli::Menu> make_cli_menu(stem::StemController &controller,
         }
         print_solution(out, pose.solution);
         out << "pairs: left=" << pose.pair_deg[0] << " right=" << pose.pair_deg[1]
-            << " seat=" << pose.pair_deg[2] << " deg" << (pose.within_limits ? "" : " (OUTSIDE LIMITS)")
-            << "\n";
+            << " seat=" << pose.pair_deg[2] << " deg"
+            << (pose.within_limits ? "" : " (OUTSIDE LIMITS)") << "\n";
       },
       "Solve the IK relative to the calibration reference (no motion): ik_ref <x_rel> <y_rel>");
   menu->Insert(
@@ -212,8 +212,9 @@ std::unique_ptr<cli::Menu> make_cli_menu(stem::StemController &controller,
   menu->Insert(
       "tilt",
       [&controller](std::ostream &out, float tilt_deg) {
-        out << "seat tilt " << tilt_deg << " deg: "
-            << stem::StemController::to_string(controller.set_seat_tilt(tilt_deg, 0.0f)) << "\n";
+        out << "seat tilt " << tilt_deg
+            << " deg: " << stem::StemController::to_string(controller.set_seat_tilt(tilt_deg, 0.0f))
+            << "\n";
       },
       "Set the seat tilt offset (deg on top of the IK level angle), kept across moves: tilt <deg>");
   menu->Insert(
@@ -252,11 +253,10 @@ std::unique_ptr<cli::Menu> make_cli_menu(stem::StemController &controller,
           float position_degrees = 0.0f;
           if (actuator.get_statusword(statusword) && actuator.get_position(position_degrees)) {
             out << "Motor " << static_cast<int>(actuator.node_id())
-                << ": state=" << EyouMotor::ds402_state_name(statusword) << ", position="
-                << position_degrees << " deg\n";
+                << ": state=" << EyouMotor::ds402_state_name(statusword)
+                << ", position=" << position_degrees << " deg\n";
           } else {
-            out << "Motor " << static_cast<int>(actuator.node_id())
-                << ": status read failed\n";
+            out << "Motor " << static_cast<int>(actuator.node_id()) << ": status read failed\n";
           }
         }
       },
@@ -279,7 +279,8 @@ std::unique_ptr<cli::Menu> make_cli_menu(stem::StemController &controller,
         controller.zero(pair, false);
         out << pair_name << " zeroed without alignment.\n";
       },
-      "Set a pair's (or all pairs') current position as zero without alignment: zero <right|left|seat|all>");
+      "Set a pair's (or all pairs') current position as zero without alignment: zero "
+      "<right|left|seat|all>");
   menu->Insert(
       "zero_align",
       [&controller](std::ostream &out, const std::string &pair_name) {
@@ -291,7 +292,8 @@ std::unique_ptr<cli::Menu> make_cli_menu(stem::StemController &controller,
         controller.zero(pair, true);
         out << pair_name << " zeroed after alignment.\n";
       },
-      "Set a pair's (or all pairs') current position as zero after alignment: zero_align <right|left|seat|all>");
+      "Set a pair's (or all pairs') current position as zero after alignment: zero_align "
+      "<right|left|seat|all>");
   menu->Insert(
       "save_zero",
       [&controller](std::ostream &out) {
@@ -312,8 +314,8 @@ std::unique_ptr<cli::Menu> make_cli_menu(stem::StemController &controller,
         for (uint8_t i = 0; i < stem::kPairCount; ++i) {
           out << stem::to_string(static_cast<stem::Pair>(i)) << " (nodes "
               << static_cast<int>(pairs[i]->primary_id()) << ", "
-              << static_cast<int>(pairs[i]->secondary_id()) << "): " << zero_pulses[i][0]
-              << ", " << zero_pulses[i][1] << " pulses\n";
+              << static_cast<int>(pairs[i]->secondary_id()) << "): " << zero_pulses[i][0] << ", "
+              << zero_pulses[i][1] << " pulses\n";
         }
       },
       "Read every motor's saved software zero without loading it: read_zero");
@@ -356,15 +358,13 @@ std::unique_ptr<cli::Menu> make_cli_menu(stem::StemController &controller,
   menu->Insert(
       "get_base",
       [&base_swivel](std::ostream &out) {
-        out << "Base swivel angle: " << base_swivel.get_position() / kSwivelGearRatio
-            << " deg\n";
+        out << "Base swivel angle: " << base_swivel.get_position() / kSwivelGearRatio << " deg\n";
       },
       "Read the tracked base swivel angle: get_base");
   menu->Insert(
       "get_seat_swivel",
       [&seat_swivel](std::ostream &out) {
-        out << "Seat swivel angle: " << seat_swivel.get_position() / kSwivelGearRatio
-            << " deg\n";
+        out << "Seat swivel angle: " << seat_swivel.get_position() / kSwivelGearRatio << " deg\n";
       },
       "Read the tracked seat swivel angle: get_seat_swivel");
   return menu;
@@ -398,10 +398,9 @@ extern "C" void app_main(void) {
   ethernet_config.mode = espp::Esp32P4Eth::DhcpMode::CLIENT;
   ethernet_config.on_got_ip = [&](esp_ip4_addr_t ip) {
     std::lock_guard<std::mutex> lock(ethernet_ip_mutex);
-    ethernet_ip = std::to_string(esp_ip4_addr1_16(&ip)) + "." +
-                  std::to_string(esp_ip4_addr2_16(&ip)) + "." +
-                  std::to_string(esp_ip4_addr3_16(&ip)) + "." +
-                  std::to_string(esp_ip4_addr4_16(&ip));
+    ethernet_ip =
+        std::to_string(esp_ip4_addr1_16(&ip)) + "." + std::to_string(esp_ip4_addr2_16(&ip)) + "." +
+        std::to_string(esp_ip4_addr3_16(&ip)) + "." + std::to_string(esp_ip4_addr4_16(&ip));
   };
   if (!board.initialize_ethernet(ethernet_config)) {
     logger.error("Failed to initialize Ethernet");
@@ -444,7 +443,8 @@ extern "C" void app_main(void) {
   PairedEyouActuator right_pair(actuators[3], actuators[2]);
   PairedEyouActuator left_pair(actuators[1], actuators[0]);
   PairedEyouActuator seat_pair(actuators[5], actuators[4]);
-  logger.info("Six motor actuators (IDs 101-106) in three reversed pairs: left 102-101, right 104-103, seat 106-105");
+  logger.info("Six motor actuators (IDs 101-106) in three reversed pairs: left 102-101, right "
+              "104-103, seat 106-105");
 
   const EyouMotor::ProfilePositionConfig profile{
       .velocity_degrees_per_second = 60.0f,
@@ -635,9 +635,9 @@ extern "C" void app_main(void) {
   espp::CoreDumpService vendor_coredump(
       core_dump, {.send = [&](std::span<const uint8_t> f) { send_vendor(f); },
                   .log_level = espp::Logger::Verbosity::INFO});
-  espp::CoreDumpService cdc_coredump(
-      core_dump, {.send = [&](std::span<const uint8_t> f) { send_cdc(f); },
-                  .log_level = espp::Logger::Verbosity::INFO});
+  espp::CoreDumpService cdc_coredump(core_dump,
+                                     {.send = [&](std::span<const uint8_t> f) { send_cdc(f); },
+                                      .log_level = espp::Logger::Verbosity::INFO});
   stem::StemModule stem_module({
       .controller = controller,
       .app = {.project = running.project_name,
@@ -718,22 +718,26 @@ extern "C" void app_main(void) {
   auto register_modules = [&](espp::Dispatcher &dispatcher, Transport transport,
                               espp::CoreDumpService &coredump_service) {
     const send_fn send = sender(transport);
-    dispatcher.register_module(
-        otap::kModule,
-        [&, send](const Frame &frame) {
-          if (!frame.is_reply())
-            handle_ota_frame(frame, send);
-        },
-        {.name = "OTA", .app = "ota_console.html", .description = "Firmware update over USB"});
-    dispatcher.register_module(
-        espp::CoreDumpService::kModule,
-        [&coredump_service](const Frame &frame) {
-          if (!frame.is_reply())
-            coredump_service.handle_frame(frame.type, frame.payload);
-        },
-        {.name = "Core Dump",
-         .app = "coredump_console.html",
-         .description = "Inspect the last crash core dump"});
+    dispatcher.register_module(otap::kModule,
+                               [&, send](const Frame &frame) {
+                                 if (!frame.is_reply())
+                                   handle_ota_frame(frame, send);
+                               },
+                               {.name = "OTA",
+                                .app = "ota_console.html",
+                                .description = "Firmware update over USB",
+                                .protocol = "espp.ota",
+                                .protocol_version = 1});
+    dispatcher.register_module(espp::CoreDumpService::kModule,
+                               [&coredump_service](const Frame &frame) {
+                                 if (!frame.is_reply())
+                                   coredump_service.handle_frame(frame.type, frame.payload);
+                               },
+                               {.name = "Core Dump",
+                                .app = "coredump_console.html",
+                                .description = "Inspect the last crash core dump",
+                                .protocol = "espp.coredump",
+                                .protocol_version = 1});
     dispatcher.register_module(
         stem_proto::kModule,
         [&, send, transport](const Frame &frame) {
@@ -870,8 +874,8 @@ extern "C" void app_main(void) {
   // --------------------------------------------------------------------------
   // Console CLI
   // --------------------------------------------------------------------------
-  static auto cli = std::make_unique<cli::Cli>(
-      make_cli_menu(controller, actuators, base_swivel, seat_swivel));
+  static auto cli =
+      std::make_unique<cli::Cli>(make_cli_menu(controller, actuators, base_swivel, seat_swivel));
   std::thread([cli_ptr = cli.get()] {
     espp::Cli input(*cli_ptr);
     input.Start();

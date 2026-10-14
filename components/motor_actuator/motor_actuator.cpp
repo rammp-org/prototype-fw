@@ -14,7 +14,8 @@ MotorCanBus::MotorCanBus(gpio_num_t rx_gpio, gpio_num_t tx_gpio)
     , bus_(owned_bus_.get()) {}
 
 MotorCanBus::MotorCanBus(CanBus &bus)
-    : espp::BaseComponent("MotorCanBus", espp::Logger::Verbosity::INFO), bus_(&bus) {}
+    : espp::BaseComponent("MotorCanBus", espp::Logger::Verbosity::INFO)
+    , bus_(&bus) {}
 
 MotorCanBus::~MotorCanBus() {
   if (receive_queue_ != nullptr) {
@@ -109,8 +110,7 @@ bool MotorCanBus::send_unlocked(const MotorPacket &command, bool wait_for_queue_
   return true;
 }
 
-bool MotorCanBus::request(const MotorPacket &command, MotorPacket &response,
-                          uint32_t timeout_ms) {
+bool MotorCanBus::request(const MotorPacket &command, MotorPacket &response, uint32_t timeout_ms) {
   std::lock_guard<std::mutex> lock(transaction_mutex_);
   if (receive_queue_ == nullptr) {
     logger_.error("Motor CAN is not started");
@@ -136,16 +136,13 @@ bool MotorCanBus::request(const MotorPacket &command, MotorPacket &response,
         .data = frame.data,
     };
     logger_.debug("CAN RX id=0x{:x} cmd=0x{:02x} length={}", response.id, response.data[0],
-           response.length);
-    const uint32_t expected_reply_id_value = command.data[0] == 0x79
-                           ? 0x300u
-                           : 0x240u + command.id;
-    const bool expected_reply_id = response.id == expected_reply_id_value ||
-                     response.id == (command.data[0] == 0x79
-                               ? 0x300u
-                               : 0x140u + command.id);
+                  response.length);
+    const uint32_t expected_reply_id_value = command.data[0] == 0x79 ? 0x300u : 0x240u + command.id;
+    const bool expected_reply_id =
+        response.id == expected_reply_id_value ||
+        response.id == (command.data[0] == 0x79 ? 0x300u : 0x140u + command.id);
     if (expected_reply_id && response.length == kPacketLength &&
-      response.data[0] == command.data[0]) {
+        response.data[0] == command.data[0]) {
       response.id = command.id;
       return true;
     }
@@ -154,8 +151,9 @@ bool MotorCanBus::request(const MotorPacket &command, MotorPacket &response,
 }
 
 MotorActuator::MotorActuator(CommunicationFunction communication, uint8_t motor_id)
-    : espp::BaseComponent("MotorActuator", espp::Logger::Verbosity::INFO),
-      communication_(std::move(communication)), motor_id_(motor_id) {
+    : espp::BaseComponent("MotorActuator", espp::Logger::Verbosity::INFO)
+    , communication_(std::move(communication))
+    , motor_id_(motor_id) {
   set_log_tag("MotorActuator-" + std::to_string(motor_id_));
 }
 
@@ -168,8 +166,7 @@ bool MotorActuator::send_command(const std::array<uint8_t, packet_length_> &comm
   return communication_ && communication_(packet, response, 0);
 }
 
-bool MotorActuator::request(uint8_t command_code, MotorPacket &response,
-                            uint32_t timeout_ms) {
+bool MotorActuator::request(uint8_t command_code, MotorPacket &response, uint32_t timeout_ms) {
   std::array<uint8_t, packet_length_> command{};
   command[0] = command_code;
   MotorPacket packet{};
@@ -212,8 +209,8 @@ bool MotorActuator::read_motor_id(uint8_t &motor_id, uint32_t timeout_ms) {
     logger_.warn("No motor ID response received");
     return false;
   }
-  const uint16_t can_id = static_cast<uint16_t>(response.data[6]) |
-                          (static_cast<uint16_t>(response.data[7]) << 8);
+  const uint16_t can_id =
+      static_cast<uint16_t>(response.data[6]) | (static_cast<uint16_t>(response.data[7]) << 8);
   if (can_id < 0x141 || can_id > 0x160) {
     logger_.warn("Invalid motor CAN ID in response: 0x{:x}", can_id);
     return false;
@@ -251,28 +248,32 @@ bool MotorActuator::is_connected(uint32_t timeout_ms) {
 
 bool MotorActuator::read_temperature(int &temperature_c, uint32_t timeout_ms) {
   Status status{};
-  if (!read_status(status, timeout_ms)) return false;
+  if (!read_status(status, timeout_ms))
+    return false;
   temperature_c = status.temperature_c;
   return true;
 }
 
 bool MotorActuator::read_angle(float &angle_degrees, uint32_t timeout_ms) {
   Status status{};
-  if (!read_status(status, timeout_ms)) return false;
+  if (!read_status(status, timeout_ms))
+    return false;
   angle_degrees = status.angle_degrees;
   return true;
 }
 
 bool MotorActuator::read_velocity(float &velocity_rpm, uint32_t timeout_ms) {
   Status status{};
-  if (!read_status(status, timeout_ms)) return false;
+  if (!read_status(status, timeout_ms))
+    return false;
   velocity_rpm = status.velocity_rpm;
   return true;
 }
 
 bool MotorActuator::read_torque(int16_t &torque_raw, uint32_t timeout_ms) {
   Status status{};
-  if (!read_status(status, timeout_ms)) return false;
+  if (!read_status(status, timeout_ms))
+    return false;
   torque_raw = status.torque_raw;
   return true;
 }
@@ -313,8 +314,7 @@ void MotorActuator::zero_position(bool need_align) {
       const float virtual_position_bias = status.angle_degrees / 32768.0f * 180.0f / gear_ratio_;
       logger_.info("Virtual position bias set to {}", virtual_position_bias);
       send_incremental_position(virtual_position_bias, 5.0f);
-    }
-    else {
+    } else {
       logger_.warn("Failed to read motor status after 5 attempts; virtual position bias set to 0");
     }
   }
@@ -357,8 +357,8 @@ bool MotorActuator::send_incremental_position(float delta_degrees, float max_spe
     logger_.error("Requested incremental position or speed is out of range");
     return false;
   }
-  logger_.info("Sending incremental position command: delta={} deg, speed={} RPM",
-               delta_degrees, max_speed_rpm);
+  logger_.info("Sending incremental position command: delta={} deg, speed={} RPM", delta_degrees,
+               max_speed_rpm);
   std::array<uint8_t, packet_length_> command{};
   command[0] = 0xA8;
   const uint16_t speed_limit_dps = static_cast<uint16_t>(std::lround(motor_speed_dps));
@@ -418,7 +418,9 @@ bool MotorActuator::write_default_pid_ram() {
 bool MotorActuator::write_global_pid_gain(float gain) {
   gain = std::clamp(gain, 0.0f, 1.0f);
   std::array<uint8_t, packet_length_> command{
-      0x31, 0, static_cast<uint8_t>(std::lround(gain * 100.0f)),
+      0x31,
+      0,
+      static_cast<uint8_t>(std::lround(gain * 100.0f)),
       static_cast<uint8_t>(std::lround(gain * 100.0f)),
       static_cast<uint8_t>(std::lround(gain * 50.0f)),
       static_cast<uint8_t>(std::lround(gain * 40.0f)),

@@ -186,9 +186,8 @@ bool Ds402VelocityMotor::request_sdo_u32(uint16_t index, uint8_t subindex, uint3
       continue;
     }
     if (response.data[0] == kSdoAbort) {
-      logger_.error("SDO read 0x{:04X}:{:02X} aborted: 0x{:02X}{:02X}{:02X}{:02X}", index,
-                    subindex, response.data[7], response.data[6], response.data[5],
-                    response.data[4]);
+      logger_.error("SDO read 0x{:04X}:{:02X} aborted: 0x{:02X}{:02X}{:02X}{:02X}", index, subindex,
+                    response.data[7], response.data[6], response.data[5], response.data[4]);
       return false;
     }
     // expedited upload responses: 0x4F (1 byte), 0x4B (2), 0x47 (3), 0x43 (4);
@@ -210,8 +209,7 @@ bool Ds402VelocityMotor::request_sdo_u32(uint16_t index, uint8_t subindex, uint3
   return false;
 }
 
-bool Ds402VelocityMotor::read_signed(const ObjectSpec &object, float &value,
-                                     uint32_t timeout_ms) {
+bool Ds402VelocityMotor::read_signed(const ObjectSpec &object, float &value, uint32_t timeout_ms) {
   if (object.index == 0) {
     return false;
   }
@@ -270,7 +268,8 @@ bool Ds402VelocityMotor::wait_for_alarm_clear(uint32_t timeout_ms, uint16_t &sta
 
 bool Ds402VelocityMotor::enable_drive(uint32_t timeout_ms) {
   std::lock_guard<std::mutex> lock(transaction_mutex_);
-  if (config_.reset_communication_on_enable && !reset_communication_and_wait_for_bootup(timeout_ms)) {
+  if (config_.reset_communication_on_enable &&
+      !reset_communication_and_wait_for_bootup(timeout_ms)) {
     return false;
   }
   // NMT start: harmless when the node is already operational, needed for PDOs
