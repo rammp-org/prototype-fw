@@ -19,6 +19,7 @@
 #include <functional>
 #include <memory>
 #include <mutex>
+#include <optional>
 #include <span>
 #include <string>
 #include <thread>
@@ -800,48 +801,80 @@ extern "C" void app_main(void) {
        .task_config = {.name = "stem_usb_rx", .stack_size_bytes = 8192}});
 
   // --------------------------------------------------------------------------
-  // Telemetry streaming (per stream, device-side period)
+  // Telemetry streaming (per stream: its own device-side period and deadline)
   // --------------------------------------------------------------------------
-  std::array<std::chrono::steady_clock::time_point, stem::StemModule::kTransportCount>
-      telemetry_stall_start{};
+  using TelemetryClock = std::chrono::steady_clock;
+  std::array<TelemetryClock::time_point, stem::StemModule::kTransportCount> telemetry_stall_start{};
+  std::array<TelemetryClock::time_point, stem::StemModule::kTransportCount> telemetry_next_send{};
+  constexpr auto kTelemetryIdlePoll = 100ms; // how soon a newly enabled stream is noticed
   espp::Task telemetry_task(
       {.callback = [&](std::mutex &m, std::condition_variable &cv) -> bool {
-         const auto start = std::chrono::steady_clock::now();
+         const auto now = TelemetryClock::now();
+         auto wake = now + kTelemetryIdlePoll;
+         // one snapshot per tick, and only when some stream is due: the status
+         // reads it costs are blocking CAN transactions
+         std::optional<decltype(controller.snapshot(true))> state;
          // Pause while an OTA transfer runs so the bulk pipes carry only the
          // flow-controlled OTA replies.
-         if (stem_module.any_streaming() && !ota.session_active()) {
-           const auto state = controller.snapshot(true);
-           for (size_t i = 0; i < stem::StemModule::kTransportCount; ++i) {
-             const auto transport = static_cast<Transport>(i);
-             const bool connected = transport == Transport::Vendor ? usb.is_vendor_connected()
-                                                                   : usb.is_cdc_connected();
-             if (!stem_module.streaming(transport) || !connected)
-               continue;
-             const auto frame =
-                 stem_module.build_state_frame(stem_proto::Msg::Telemetry, state, transport);
-             auto &stall_start = telemetry_stall_start[i];
-             if (sender(transport)(frame)) {
-               stall_start = {}; // queued OK -> the host is draining
-             } else if (stall_start == std::chrono::steady_clock::time_point{}) {
-               stall_start = start; // first drop -> start the stall clock
-             } else if (start - stall_start > kTelemetryStallTimeout) {
-               // The host abandoned the stream (a tab close does not unmount, so
-               // the FIFO is not cleared for us): stop, and drop the backlog so a
-               // reconnecting host reads a clean stream.
-               stem_module.set_streaming(transport, false);
-               stall_start = {};
-               if (transport == Transport::Vendor)
-                 usb.vendor_write_clear();
-               else
-                 usb.cdc_write_clear();
-               logger.warn("Telemetry auto-paused on {}: the host stopped draining the endpoint",
-                           transport == Transport::Vendor ? "WebUSB" : "CDC");
-             }
+         const bool paused = ota.session_active();
+         for (size_t i = 0; i < stem::StemModule::kTransportCount; ++i) {
+           const auto transport = static_cast<Transport>(i);
+           if (!stem_module.streaming(transport))
+             continue;
+           const char *name = transport == Transport::Vendor ? "WebUSB" : "CDC";
+           const bool connected =
+               transport == Transport::Vendor ? usb.is_vendor_connected() : usb.is_cdc_connected();
+           auto &stall_start = telemetry_stall_start[i];
+           if (!connected) {
+             // An abrupt disconnect ends the stream with its session: no more
+             // snapshots for nobody, and a reconnecting host starts clean
+             // (its own SET_STREAMING) instead of inheriting this one.
+             stem_module.set_streaming(transport, false);
+             stall_start = {};
+             if (transport == Transport::Vendor)
+               usb.vendor_write_clear();
+             else
+               usb.cdc_write_clear();
+             logger.info("Telemetry stopped on {}: the host disconnected", name);
+             continue;
+           }
+           const auto period = std::chrono::milliseconds(stem_module.stream_period_ms(transport));
+           auto &next_send = telemetry_next_send[i];
+           if (next_send == TelemetryClock::time_point{} || next_send > now + period)
+             next_send = now; // (re)started, or the period was shortened
+           if (now < next_send) {
+             wake = std::min(wake, next_send);
+             continue;
+           }
+           next_send = now + period;
+           wake = std::min(wake, next_send);
+           if (paused)
+             continue;
+           if (!state)
+             state = controller.snapshot(true);
+           const auto frame =
+               stem_module.build_state_frame(stem_proto::Msg::Telemetry, *state, transport);
+           if (sender(transport)(frame)) {
+             stall_start = {}; // queued OK -> the host is draining
+           } else if (stall_start == TelemetryClock::time_point{}) {
+             stall_start = now; // first drop -> start the stall clock
+           } else if (now - stall_start > kTelemetryStallTimeout) {
+             // The host abandoned the stream (a tab close does not unmount, so
+             // the FIFO is not cleared for us): stop, and drop the backlog so a
+             // reconnecting host reads a clean stream.
+             stem_module.set_streaming(transport, false);
+             stall_start = {};
+             if (transport == Transport::Vendor)
+               usb.vendor_write_clear();
+             else
+               usb.cdc_write_clear();
+             logger.warn("Telemetry auto-paused on {}: the host stopped draining the endpoint",
+                         name);
            }
          }
          {
            std::unique_lock<std::mutex> lock(m);
-           cv.wait_until(lock, start + std::chrono::milliseconds(stem_module.stream_period_ms()));
+           cv.wait_until(lock, wake);
          }
          return false; // don't stop the task
        },

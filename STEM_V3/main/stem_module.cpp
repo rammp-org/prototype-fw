@@ -109,7 +109,7 @@ std::vector<uint8_t> StemModule::build_info(Transport transport) const {
   proto::put_f32(payload, cfg.default_move_rpm);
   proto::put_f32(payload, cfg.default_set_rpm);
   proto::put_f32(payload, cfg.max_rpm);
-  proto::put_u16(payload, period_ms_.load());
+  proto::put_u16(payload, stream_period_ms(transport)); // this stream's period
   payload.push_back(streaming(transport) ? 1 : 0);
   return proto::build(Msg::Info, payload);
 }
@@ -286,7 +286,7 @@ void StemModule::handle_frame(const espp::stream_frame::Frame &frame, Transport 
     const uint16_t period_ms =
         std::clamp<uint16_t>(*period == 0 ? proto::kDefaultStreamPeriodMs : *period,
                              proto::kMinStreamPeriodMs, proto::kMaxStreamPeriodMs);
-    period_ms_.store(period_ms);
+    period_ms_[static_cast<size_t>(transport)].store(period_ms);
     set_streaming(transport, *enable != 0);
     logger_.info("telemetry streaming {} on {} (period {} ms)", *enable ? "on" : "off",
                  transport == Transport::Vendor ? "WebUSB" : "CDC", period_ms);

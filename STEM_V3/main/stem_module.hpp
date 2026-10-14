@@ -52,7 +52,13 @@ public:
   bool streaming(Transport transport) const;
   void set_streaming(Transport transport, bool enable);
   bool any_streaming() const;
-  uint16_t stream_period_ms() const { return period_ms_.load(); }
+  /// The period acknowledged to THIS transport's last SET_STREAMING: each
+  /// stream is scheduled on its own period, one client cannot change the
+  /// other's.
+  uint16_t stream_period_ms(Transport transport) const {
+    const uint16_t period = period_ms_[static_cast<size_t>(transport)].load();
+    return period == 0 ? stem_proto::kDefaultStreamPeriodMs : period;
+  }
 
   /// Encode a State (reply) or Telemetry (periodic) frame from a snapshot.
   std::vector<uint8_t> build_state_frame(stem_proto::Msg type, const State &state,
@@ -68,7 +74,7 @@ private:
 
   Config config_;
   std::array<std::atomic<bool>, kTransportCount> streaming_{};
-  std::atomic<uint16_t> period_ms_{stem_proto::kDefaultStreamPeriodMs};
+  std::array<std::atomic<uint16_t>, kTransportCount> period_ms_{}; ///< 0 = default
 };
 
 } // namespace stem
