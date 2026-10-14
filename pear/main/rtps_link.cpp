@@ -413,6 +413,11 @@ MIB::MibStatus RtpsLink::build_status() {
         footer = fmt::format("Motor {}: {}", link.id, EyouMotor::ds402_state_name(link.statusword));
         break;
       }
+      if (link.valid && link.stale) { // reported once, then went silent
+        error = fmt::format("Linkage {} lost", pear::corner_name(corner));
+        footer = fmt::format("Motor {} stopped reporting on CAN; check it", link.id);
+        break;
+      }
     }
   }
   if (!error.empty()) {
@@ -517,7 +522,12 @@ rammp::MotorState RtpsLink::build_linkage_state(size_t corner,
   state.api_version = RAMMP_MOTOR_API_VERSION;
   state.axis_id = kMotorAxes[pear::kCornerCount + corner];
   state.seq = motor_seq_[pear::kCornerCount + corner]++;
-  if (m.valid && m.faulted) {
+  if (m.stale) {
+    // no status within the stale timeout: the controller refuses to move it,
+    // and the cached DS402 state is no evidence of anything
+    state.state = rammp::BoardState::FAULT;
+    state.fault_code = rammp::FaultCode::WATCHDOG;
+  } else if (m.valid && m.faulted) {
     state.state = rammp::BoardState::FAULT;
     state.fault_code = rammp::FaultCode::DRV_FAULT;
     state.drv_status = m.statusword;
