@@ -31,8 +31,15 @@ void send_response(const char *format, ...) {
   char response[256];
   va_list args;
   va_start(args, format);
-  const int length = std::vsnprintf(response, sizeof(response), format, args);
+  int length = std::vsnprintf(response, sizeof(response), format, args);
   va_end(args);
+  // vsnprintf returns the length the FULL text would have had: a truncated
+  // response must only write the bytes actually stored (the buffer holds
+  // sizeof - 1 characters plus the terminator)
+  if (length > static_cast<int>(sizeof(response)) - 1) {
+    length = static_cast<int>(sizeof(response)) - 1;
+    response[length - 1] = '\n'; // keep the line terminator the host parses on
+  }
   if (length > 0) {
     if (response_mutex != nullptr) {
       xSemaphoreTake(response_mutex, portMAX_DELAY);
