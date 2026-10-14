@@ -115,6 +115,8 @@ public:
   bool stop();
   bool release_brakes();
   /// Re-zero one pair (or all when `pair` is empty). Clears the tracked target.
+  /// Returns false when an alignment (`align`) failed for any requested pair;
+  /// the virtual zeros are reset regardless.
   bool zero(std::optional<Pair> pair, bool align);
 
   State snapshot(bool read_motors);

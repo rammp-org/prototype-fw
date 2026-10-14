@@ -96,9 +96,12 @@ public:
   bool send_torque(int16_t torque_raw);
   bool send_velocity(float velocity_rpm);
   // Reset the software-only position reference; this does not write motor ROM.
-  // If need_align is true, also send an incremental move to align to the current
-  // physical angle before zeroing the virtual position.
-  void zero_position(bool need_align = false);
+  // If need_align is true, first move the motor to its encoder zero (an
+  // incremental move by MINUS the current single-turn encoder angle), so the
+  // virtual zero coincides with the physical one. Returns false when the
+  // alignment could not be done (status unreadable or the move refused); the
+  // virtual position is reset regardless.
+  bool zero_position(bool need_align = false);
   float get_position() const { return virtual_position_degrees_; }
   bool set_position_limits(float minimum_degrees, float maximum_degrees);
   bool set_position(float position_degrees, float max_speed_rpm);

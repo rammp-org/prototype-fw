@@ -300,10 +300,11 @@ bool MotorActuator::send_velocity(float velocity_rpm) {
   return send_command(command);
 }
 
-void MotorActuator::zero_position(bool need_align) {
+bool MotorActuator::zero_position(bool need_align) {
   virtual_position_degrees_ = 0.0f;
-  Status status{};
+  bool aligned = true;
   if (need_align) {
+    Status status{};
     bool status_ok = false;
     for (int attempt = 1; attempt <= 5; ++attempt) {
       status_ok = read_status(status, 100);
@@ -313,15 +314,22 @@ void MotorActuator::zero_position(bool need_align) {
       logger_.warn("Motor status read failed during zero alignment (attempt {}/5)", attempt);
     }
     if (status_ok) {
-      const float virtual_position_bias = status.angle_degrees; // already output-shaft degrees
-      logger_.info("Virtual position bias set to {}", virtual_position_bias);
-      send_incremental_position(virtual_position_bias, 5.0f);
+      // the encoder reads +a (output-shaft degrees): moving by -a brings it to
+      // its zero, so the virtual zero set below coincides with the encoder zero
+      const float encoder_offset_degrees = status.angle_degrees;
+      logger_.info("Aligning to the encoder zero: offset {} deg", encoder_offset_degrees);
+      aligned = send_incremental_position(-encoder_offset_degrees, 5.0f);
+      if (!aligned) {
+        logger_.error("Zero alignment move was refused");
+      }
     } else {
-      logger_.warn("Failed to read motor status after 5 attempts; virtual position bias set to 0");
+      logger_.error("Failed to read motor status after 5 attempts; not aligned");
+      aligned = false;
     }
   }
 
   logger_.info("Virtual motor position set to zero");
+  return aligned;
 }
 
 bool MotorActuator::set_position_limits(float minimum_degrees, float maximum_degrees) {

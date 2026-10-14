@@ -240,17 +240,27 @@ bool StemController::release_brakes() {
 
 bool StemController::zero(std::optional<Pair> pair, bool align) {
   std::lock_guard<std::mutex> lock(mutex_);
+  bool ok = true;
   if (pair.has_value()) {
-    actuator(*pair).zero_position(align);
-    logger_.info("{} pair zeroed{}", stem::to_string(*pair), align ? " (aligned)" : "");
+    ok = actuator(*pair).zero_position(align);
+    if (ok)
+      logger_.info("{} pair zeroed{}", stem::to_string(*pair), align ? " (aligned)" : "");
+    else
+      logger_.error("{} pair: zero alignment failed", stem::to_string(*pair));
   } else {
     for (uint8_t i = 0; i < kPairCount; ++i) {
-      actuator(static_cast<Pair>(i)).zero_position(align);
+      // every pair is attempted; the result is the AND
+      if (!actuator(static_cast<Pair>(i)).zero_position(align)) {
+        logger_.error("{} pair: zero alignment failed", stem::to_string(static_cast<Pair>(i)));
+        ok = false;
+      }
     }
-    logger_.info("all pairs zeroed{}", align ? " (aligned)" : "");
+    if (ok)
+      logger_.info("all pairs zeroed{}", align ? " (aligned)" : "");
   }
+  // the virtual positions were reset either way: the old target is meaningless
   target_valid_ = false;
-  return true;
+  return ok;
 }
 
 State StemController::snapshot(bool read_motors) {

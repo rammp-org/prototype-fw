@@ -15,9 +15,10 @@ bool PairedActuator::read_status(Status &status, uint32_t timeout_ms) {
   return primary_ok && secondary_ok;
 }
 
-void PairedActuator::zero_position(bool need_align) {
-  primary_.zero_position(need_align);
-  secondary_.zero_position(need_align);
+bool PairedActuator::zero_position(bool need_align) {
+  const bool primary_ok = primary_.zero_position(need_align);
+  const bool secondary_ok = secondary_.zero_position(need_align);
+  return primary_ok && secondary_ok;
 }
 
 std::array<float, 2> PairedActuator::get_position() const {

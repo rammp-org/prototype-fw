@@ -220,8 +220,10 @@ std::unique_ptr<cli::Menu> make_cli_menu(stem::StemController &controller,
           out << "Unknown pair '" << pair_name << "'. Use right, left, seat, or all.\n";
           return;
         }
-        controller.zero(pair, true);
-        out << pair_name << " zeroed after alignment.\n";
+        if (controller.zero(pair, true))
+          out << pair_name << " zeroed after alignment.\n";
+        else
+          out << pair_name << ": zero alignment FAILED (see the log); virtual zero reset anyway.\n";
       },
       "Set a pair's (or all pairs') current position as zero after alignment: zero_align "
       "<right|left|seat|all>");
