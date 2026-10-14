@@ -299,6 +299,30 @@ bool LinkageController::status_step() {
     std::array<bool, pear::kCornerCount> to_move{};
     Corners targets{};
     std::lock_guard<std::mutex> moves(move_mutex_); // excludes zero() / load_zero()
+    // 0. a move that did not report target reached in time is HALTED before the
+    //    drive interlock is released: the accepted profile move would otherwise
+    //    keep running under a base that may start driving. Power stage off
+    //    (the Eyou's halt), then on again so the motor is ready for the next
+    //    request (re-enabling does not restart the consumed set-point).
+    if (const uint8_t mask = moving_mask_.load(); mask != 0) {
+      bool timed_out = false;
+      {
+        std::lock_guard<std::mutex> lock(mutex_);
+        timed_out = std::chrono::steady_clock::now() - motion_started_ > kMoveTimeout;
+      }
+      if (timed_out) {
+        for (const Corner corner : pear::kCorners) {
+          if ((mask & (1u << pear::index(corner))) == 0)
+            continue;
+          auto &motor = motors_[pear::index(corner)];
+          logger_.warn("Linkage {} did not report target reached within {} s; halting it",
+                       pear::corner_name(corner), kMoveTimeout.count());
+          if (!motor.disable_drive() || !motor.enable_drive())
+            logger_.error("Linkage {}: halt / re-enable failed", pear::corner_name(corner));
+        }
+        moving_mask_.store(0);
+      }
+    }
     {
       std::lock_guard<std::mutex> lock(mutex_);
       to_move = pending_;
@@ -386,12 +410,6 @@ bool LinkageController::status_step() {
       if (moving_mask_.fetch_and(static_cast<uint8_t>(~bit)) == bit)
         logger_.info("Linkage move complete");
     }
-  }
-  if (moving_mask_.load() != 0 && now - motion_started_ > kMoveTimeout) {
-    logger_.warn("Linkage move did not report target reached within {} s; releasing the "
-                 "drive interlock",
-                 kMoveTimeout.count());
-    moving_mask_.store(0);
   }
   if (position_ok)
     motor_status.position_degrees = position;
