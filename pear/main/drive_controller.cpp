@@ -1,5 +1,7 @@
 #include "drive_controller.hpp"
 
+#include <string>
+
 #include <algorithm>
 #include <cmath>
 #include <numeric>
@@ -32,6 +34,8 @@ DriveController::DriveController(const Config &config)
                      .priority = 5}) {
   for (size_t i = 0; i < motor_status_.size(); ++i) {
     motor_status_[i].id = motors_[i].node_id();
+    // a drive that never answers becomes stale one timeout after boot
+    motor_status_time_[i] = std::chrono::steady_clock::now();
   }
   // resolve the platform wheel -> node id table to motors_ indices once
   for (size_t wheel = 0; wheel < motor_index_by_wheel_.size(); ++wheel) {
@@ -195,6 +199,7 @@ DriveController::State DriveController::state() const {
   state.twist_rotation_scale = twist_rotation_scale_;
   state.max_wheel_rpm = max_wheel_rpm_;
   state.send_failing = send_failing_;
+  state.lost_wheel_id = lost_wheel_id_;
   state.motors = motor_status_;
   if (have_command_) {
     const auto age = std::chrono::duration_cast<std::chrono::milliseconds>(
@@ -365,6 +370,29 @@ bool DriveController::control_step() {
       return false; // waiting for the next re-arm attempt
   }
 
+  // A wheel that stopped reporting is a drive fault: its set-points are
+  // unconfirmed (any node ACKs the frame), so it may already have released
+  // after its communication-loss timeout while the other three keep driving.
+  // STOP the platform (zeros from now on), drop the armed state and latch the
+  // node id for MibStatus / MotorState until it reports again.
+  {
+    std::lock_guard<std::mutex> lock(mutex_);
+    const size_t stale = stale_wheel_locked(std::chrono::steady_clock::now());
+    if (stale != std::string::npos) {
+      lost_wheel_id_ = motor_status_[stale].id;
+      mode_ = Mode::STOPPED;
+      armed_ = false;
+      flush_pending_ = true;
+      send_failing_ = true;
+      logger_.error("Wheel drive {} stopped reporting; platform STOPPED", lost_wheel_id_);
+    }
+  }
+  if (lost_wheel_id_ != 0) {
+    flush_transport_if_requested();
+    send_zeros();
+    return false; // STOPPED from the next tick on
+  }
+
   // DRIVE: compute + send outside the lock; the drives have their own locking
   const auto wheel_speeds = platform_.calculate_wheel_speeds(vx, vy, w);
   const std::array<float, 4> wheel_rpms = {
@@ -438,10 +466,22 @@ bool DriveController::status_step() {
     motor_status.error_code = status.error_code;
     motor_status.faulted = status.faulted;
     motor_status_time_[index] = now;
+    if (lost_wheel_id_ == motor_status.id) {
+      logger_.info("Wheel drive {} reports again; enable driving to resume", motor_status.id);
+      lost_wheel_id_ = 0;
+    }
   }
   // a motor is stale until its first successful read, and again whenever the
   // last successful read is too old
   motor_status.stale =
       !motor_status.valid || (now - motor_status_time_[index]) > status_stale_timeout_;
   return false; // keep the timer running
+}
+
+size_t DriveController::stale_wheel_locked(std::chrono::steady_clock::time_point now) const {
+  for (size_t i = 0; i < motor_status_time_.size(); ++i) {
+    if (now - motor_status_time_[i] > status_stale_timeout_)
+      return i;
+  }
+  return std::string::npos;
 }

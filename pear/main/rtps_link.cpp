@@ -389,6 +389,10 @@ MIB::MibStatus RtpsLink::build_status() {
   // as INITIALIZING
   std::string error = error_message_;
   std::string footer = error_footer_;
+  if (error.empty() && drive.lost_wheel_id != 0) {
+    error = fmt::format("Wheel drive {} lost", drive.lost_wheel_id);
+    footer = "It stopped reporting on CAN; check it, then enable driving again";
+  }
   if (error.empty() && drive.send_failing) {
     error = "Wheel command failed";
     footer = "A wheel drive is not taking CAN commands";
@@ -481,7 +485,10 @@ rammp::MotorState RtpsLink::build_wheel_state(size_t corner, const DriveControll
   state.api_version = RAMMP_MOTOR_API_VERSION;
   state.axis_id = kMotorAxes[corner];
   state.seq = motor_seq_[corner]++;
-  if (m.valid && m.faulted) {
+  if (m.stale) {
+    state.state = rammp::BoardState::FAULT; // no status within the stale timeout
+    state.fault_code = rammp::FaultCode::WATCHDOG;
+  } else if (m.valid && m.faulted) {
     state.state = rammp::BoardState::FAULT;
     state.fault_code = rammp::FaultCode::DRV_FAULT;
     state.drv_status = m.error_code;

@@ -98,6 +98,11 @@ public:
     /// True while the last control tick failed to deliver a velocity (or stop)
     /// command to at least one motor: a CAN / motor fault the operator must see.
     bool send_failing{false};
+    /// Node id of a wheel drive whose status went stale while driving (its
+    /// velocity downloads are unconfirmed, so a silent wheel can let go while
+    /// the others keep driving): the loop STOPPED the platform and keeps this
+    /// latched until that drive reports again. 0 = none.
+    uint8_t lost_wheel_id{0};
     /// Age of the last set-point / stop frame the loop sent (65535 = none yet).
     uint16_t command_age_ms{65535};
   };
@@ -218,7 +223,11 @@ protected:
 
   mutable std::mutex mutex_;
   Mode mode_{Mode::STOPPED};
-  bool armed_{false};         ///< the drives' power stages are on
+  bool armed_{false};        ///< the drives' power stages are on
+  uint8_t lost_wheel_id_{0}; ///< State::lost_wheel_id
+  /// Index of a wheel whose last successful status read is older than the
+  /// stale timeout (a never-polled wheel counts from boot), or npos.
+  size_t stale_wheel_locked(std::chrono::steady_clock::time_point now) const;
   bool disable_sent_{false};  ///< the one-shot motor stop for DISABLED was sent
   bool flush_pending_{false}; ///< a STOP / DISABLE landed: flush the transport before enacting it
   bool require_joystick_recenter_{false}; ///< ignore the joystick until it re-centers

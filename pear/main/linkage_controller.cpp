@@ -157,12 +157,11 @@ bool LinkageController::request_pose_component(PoseComponent component, float va
     logger_.error_rate_limited("Rejecting a non-finite pose component");
     return false;
   }
-  Pose pose = state().pose; // the measured pose, used when nothing is pending
-  {
-    std::lock_guard<std::mutex> lock(mutex_);
-    if (desired_pose_)
-      pose = *desired_pose_;
-  }
+  // base pose, modification and commit in ONE critical section: the CLI and
+  // the RTPS callbacks call this concurrently, and an interleaved command must
+  // not be overwritten from a stale base
+  std::lock_guard<std::mutex> lock(mutex_);
+  Pose pose = desired_pose_ ? *desired_pose_ : measured_pose_locked();
   switch (component) {
   case PoseComponent::ELEVATION:
     pose.elevation_m = value;
@@ -174,7 +173,7 @@ bool LinkageController::request_pose_component(PoseComponent component, float va
     pose.lateral_tilt_deg = value;
     break;
   }
-  return request_pose(pose);
+  return commit_pose_locked(pose);
 }
 
 bool LinkageController::request_pose(const Pose &pose) {
@@ -182,13 +181,24 @@ bool LinkageController::request_pose(const Pose &pose) {
     logger_.error_rate_limited("Rejecting a non-finite pose request");
     return false;
   }
+  std::lock_guard<std::mutex> lock(mutex_);
+  return commit_pose_locked(pose);
+}
+
+LinkageController::Pose LinkageController::measured_pose_locked() const {
+  Corners angles{};
+  for (const Corner corner : pear::kCorners)
+    angles[corner] = motor_status_[pear::index(corner)].position_degrees;
+  return pear::geometry::pose_from_corner_angles(geometry_, angles);
+}
+
+bool LinkageController::commit_pose_locked(const Pose &pose) {
   Corners targets = pear::geometry::corner_angles_from_pose(geometry_, pose);
   const bool all_clamped =
       std::all_of(pear::kCorners.begin(), pear::kCorners.end(),
                   [&](Corner corner) { return clamp_target(corner, targets[corner]); });
   if (!all_clamped)
     return false;
-  std::lock_guard<std::mutex> lock(mutex_);
   if (const char *reason = refusal_reason_locked()) {
     logger_.warn_rate_limited("Pose (elev {:.3f} m, fb {:.1f} deg, lat {:.1f} deg) refused: {}",
                               pose.elevation_m, pose.fb_tilt_deg, pose.lateral_tilt_deg, reason);
@@ -253,7 +263,7 @@ LinkageController::State LinkageController::state() const {
     state.any_faulted = state.any_faulted || (m.valid && m.faulted);
     state.motors[pear::index(corner)].target_pending = pending_[pear::index(corner)];
   }
-  state.pose = pear::geometry::pose_from_corner_angles(geometry_, state.angles_deg);
+  state.pose = measured_pose_locked();
   state.enabled = initialized_ && refusal_reason_locked() == nullptr;
   if (have_command_) {
     const auto age = std::chrono::duration_cast<std::chrono::milliseconds>(

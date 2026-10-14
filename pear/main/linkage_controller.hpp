@@ -137,6 +137,10 @@ protected:
   const char *refusal_reason_locked() const;
   /// Clamp a requested angle to the corner's range (non-finite -> refused).
   bool clamp_target(Corner corner, float &angle_deg);
+  /// Clamp, check the interlocks and queue every corner of `pose` (mutex_ held).
+  bool commit_pose_locked(const Pose &pose);
+  /// The pose the measured corner angles describe (mutex_ held).
+  Pose measured_pose_locked() const;
   void note_command_sent_locked();
 
   std::array<EyouMotor, pear::kCornerCount> &motors_;
