@@ -360,26 +360,37 @@ bool RtpsLink::watchdog_step() {
   // stalled one
   std::chrono::milliseconds age{0};
   bool held = false;
+  std::chrono::steady_clock::time_point fed{};
   {
     std::lock_guard<std::mutex> lock(mutex_);
     if (!watch_joystick_)
       return false; // a bench `enable` from the CLI, no joystick expected
     held = joystick_held_;
+    fed = watchdog_fed_;
     age = std::chrono::duration_cast<std::chrono::milliseconds>(std::chrono::steady_clock::now() -
-                                                                watchdog_fed_);
+                                                                fed);
   }
+  // The transition is taken under the link mutex and only if nothing fed the
+  // watchdog since the measurement: a sample or ENABLE that landed meanwhile
+  // owns a newer feed / generation and wins, and one that lands after this
+  // block finds the drive already stopped (it must ENABLE again), so a live
+  // stream is never overtaken by a stale "lost" verdict.
   if (age > config_.joystick_lost_timeout) {
+    std::lock_guard<std::mutex> lock(mutex_);
+    if (watch_generation_ != generation || watchdog_fed_ != fed)
+      return false;
     logger_.error("Joystick stream lost ({} ms): e-stop", age.count());
     drive_.stop();
-    std::lock_guard<std::mutex> lock(mutex_);
     joystick_lost_ = true;
     status_text_ = "JOYSTICK LOST";
   } else if (age > config_.joystick_hold_timeout && !held) {
+    std::lock_guard<std::mutex> lock(mutex_);
+    if (watch_generation_ != generation || watchdog_fed_ != fed)
+      return false;
     logger_.warn("Joystick stream paused ({} ms): holding zero", age.count());
     // not set_joystick_input(0, 0, 0): a synthetic zero must not count as the
     // centered sample the post-enable guard waits for
     drive_.hold_joystick();
-    std::lock_guard<std::mutex> lock(mutex_);
     joystick_held_ = true;
   }
   return false; // keep the timer running

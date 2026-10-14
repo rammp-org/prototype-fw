@@ -86,5 +86,5 @@ matplotlib).
   PHY, so the USB-Serial-JTAG console keeps working alongside it.
 - WebUSB / Web Serial need Chrome or Edge. Each browser console opens its own
   connection to the device.
-- `serial_protocol_example/` and `webserial_example/` are earlier text-protocol
-  experiments superseded by the USB module + `web/stem_console.html`.
+- `webserial_example/` is an earlier text-protocol experiment superseded by
+  the USB module + `web/stem_console.html`.

@@ -360,9 +360,13 @@ bool Ds402VelocityMotor::reset_fault(uint32_t timeout_ms) {
 // ---------------------------------------------------------------------------
 
 int32_t Ds402VelocityMotor::rpm_to_counts(float rpm) const {
-  const float counts = rpm * config_.velocity_counts_per_rpm;
-  constexpr float kLimit = static_cast<float>(std::numeric_limits<int32_t>::max());
-  return static_cast<int32_t>(std::lround(std::clamp(counts, -kLimit, kLimit)));
+  // scaled and clamped in double: both int32 limits are exact there (as a
+  // float, INT32_MAX rounds up to 2^31 and a saturated set-point would wrap)
+  const double counts =
+      static_cast<double>(rpm) * static_cast<double>(config_.velocity_counts_per_rpm);
+  constexpr double kMin = static_cast<double>(std::numeric_limits<int32_t>::min());
+  constexpr double kMax = static_cast<double>(std::numeric_limits<int32_t>::max());
+  return static_cast<int32_t>(std::lround(std::clamp(counts, kMin, kMax)));
 }
 
 bool Ds402VelocityMotor::write_target_velocity(int32_t counts, bool confirmed,

@@ -348,32 +348,57 @@ bool LinkageController::status_step() {
         to_move.fill(false);
       }
     }
+    // A batch is all-or-nothing for the platform: when a later corner cannot
+    // take its move, the corners accepted earlier are halted again (power
+    // stage off, then back on so they are ready; confirmed transactions) so
+    // the base is never twisted against the failed corner. The interlock
+    // bits of the halted corners are cleared only after their halts confirm.
+    uint8_t accepted = 0;
+    const auto halt_accepted = [&](const char *why) {
+      for (const Corner done : pear::kCorners) {
+        const uint8_t bit = static_cast<uint8_t>(1u << pear::index(done));
+        if ((accepted & bit) == 0)
+          continue;
+        auto &m = motors_[pear::index(done)];
+        logger_.warn("Linkage {}: halting the move accepted earlier ({})", pear::corner_name(done),
+                     why);
+        if (!m.disable_drive() || !m.enable_drive())
+          logger_.error("Linkage {}: halt / re-enable failed", pear::corner_name(done));
+        moving_mask_.fetch_and(static_cast<uint8_t>(~bit));
+      }
+      accepted = 0;
+    };
     for (const Corner corner : pear::kCorners) {
       if (!to_move[pear::index(corner)])
         continue;
       // re-validated per corner: a refusal (driving, fault, stale) between two
       // confirmed moves stops the rest of the batch
       {
-        std::lock_guard<std::mutex> lock(mutex_);
+        std::unique_lock<std::mutex> lock(mutex_);
         if (const char *reason = refusal_reason_locked()) {
           logger_.warn("Linkage batch stopped before {}: {}", pear::corner_name(corner), reason);
+          lock.unlock();
+          halt_accepted(reason);
           break;
         }
       }
       auto &motor = motors_[pear::index(corner)];
       const bool moved = motor.move_absolute(targets[corner]);
-      std::lock_guard<std::mutex> lock(mutex_);
       if (!moved) {
         // the platform must not be twisted against a corner that did not take
         // its move: the rest of the batch is abandoned (and re-requested whole)
         logger_.error("Linkage {}: move to {:.1f} deg failed; batch abandoned",
                       pear::corner_name(corner), targets[corner]);
+        halt_accepted("a later corner failed");
         break;
       }
+      std::lock_guard<std::mutex> lock(mutex_);
       motor_status_[pear::index(corner)].target_degrees = targets[corner];
       note_command_sent_locked();
       // physical motion starts now; the poll clears the bit on target reached
-      moving_mask_.fetch_or(static_cast<uint8_t>(1u << pear::index(corner)));
+      const uint8_t bit = static_cast<uint8_t>(1u << pear::index(corner));
+      moving_mask_.fetch_or(bit);
+      accepted = static_cast<uint8_t>(accepted | bit);
       motion_started_ = std::chrono::steady_clock::now();
     }
   }
