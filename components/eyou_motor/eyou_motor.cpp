@@ -499,6 +499,11 @@ bool EyouMotor::load_zero() {
 std::string EyouMotor::zero_nvs_key() const { return "zero_" + std::to_string(node_id_); }
 
 bool EyouMotor::set_position_limits(float minimum_degrees, float maximum_degrees) {
+  if (!std::isfinite(minimum_degrees) || !std::isfinite(maximum_degrees)) {
+    // a NaN would pass the ordering check and silently disable the clamp
+    logger_.error("Position limits must be finite (got {} / {})", minimum_degrees, maximum_degrees);
+    return false;
+  }
   if (minimum_degrees > maximum_degrees) {
     logger_.error("Position minimum {} exceeds maximum {}", minimum_degrees, maximum_degrees);
     return false;

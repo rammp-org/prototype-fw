@@ -692,7 +692,14 @@
         transport = t; parser.reset(); lastTelemetry = 0;
         setStatus("ok", "connected"); logLine("ok", "connected: " + t.describe());
         t.readLoop((chunk) => { for (const f of parser.feed(chunk)) onFrame(f); })
-          .catch(e => { logLine("err", "read loop: " + (e.message || e)); onLinkLost(); });
+          .catch(e => {
+            logLine("err", "read loop: " + (e.message || e));
+            // release the failed transport (Web Serial keeps its writer lock and port
+            // otherwise, and a reconnect fails until reload); a newer session that
+            // replaced it meanwhile is left alone
+            t.close().catch(() => {});
+            if (transport === t) onLinkLost();
+          });
         setConnected(true);
         checkModulePresent().catch(() => {});
         send(T.GET_INFO); send(T.GET_STATE);

@@ -22,6 +22,7 @@ constexpr int kUartBaudRate = 115200;
 constexpr int kUartBufferSize = 512;
 constexpr uint32_t kReadTimeoutTicks = pdMS_TO_TICKS(100);
 constexpr float kMoveRpm = 2.0f;
+constexpr float kPairLimitDeg = 60.0f; // every pair's software position limit
 constexpr float kSetRpm = 5.0f;
 
 SemaphoreHandle_t response_mutex;
@@ -57,9 +58,22 @@ public:
       return false;
     }
 
-    const bool left_ok = left_.set_position(-solution.theta1_deg, kMoveRpm);
-    const bool right_ok = right_.set_position(-solution.theta2_deg, kMoveRpm);
-    const bool seat_ok = seat_.set_position(-solution.m3_angle_deg, kMoveRpm);
+    // PairedActuator::set_position clamps to its limits and still succeeds, so a
+    // reachable pose whose solved angles exceed them would be reported OK while
+    // three independently clamped targets make a different pose: every target
+    // is checked first and nothing is commanded when one is out of range
+    const std::array<float, 3> targets{-solution.theta1_deg, -solution.theta2_deg,
+                                       -solution.m3_angle_deg};
+    for (const float target : targets) {
+      if (!std::isfinite(target) || target < -kPairLimitDeg || target > kPairLimitDeg) {
+        send_response("ERROR MOVE target %.3f deg outside [%.0f, %.0f]\n", target, -kPairLimitDeg,
+                      kPairLimitDeg);
+        return false;
+      }
+    }
+    const bool left_ok = left_.set_position(targets[0], kMoveRpm);
+    const bool right_ok = right_.set_position(targets[1], kMoveRpm);
+    const bool seat_ok = seat_.set_position(targets[2], kMoveRpm);
     if (!left_ok || !right_ok || !seat_ok) {
       return false;
     }
@@ -301,9 +315,9 @@ extern "C" void app_main(void) {
   right.zero_position(false);
   left.zero_position(false);
   seat.zero_position(false);
-  right.set_position_limits(-60.0f, 60.0f);
-  left.set_position_limits(-60.0f, 60.0f);
-  seat.set_position_limits(-60.0f, 60.0f);
+  right.set_position_limits(-kPairLimitDeg, kPairLimitDeg);
+  left.set_position_limits(-kPairLimitDeg, kPairLimitDeg);
+  seat.set_position_limits(-kPairLimitDeg, kPairLimitDeg);
 
   StemController controller(right, left, seat);
   protocol.controller.store(&controller);
