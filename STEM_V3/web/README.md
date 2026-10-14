@@ -1,7 +1,7 @@
 # STEM web console
 
 `stem_console.html` is the browser front end for the STEM firmware's USB
-interface: it draws the 5-bar linkage from the firmware's tracked pose, lets you
+interface: it draws the 5-bar linkage from the firmware's measured pose, lets you
 drag the end effector (M3) to move it, sends direct pose / pair commands and
 shows motor telemetry. It is a single self-contained page (no build step, no
 CDN) in the same style as the [espp web apps](https://esp-cpp.github.io/espp/apps/),
@@ -19,7 +19,7 @@ Chrome / Edge only (WebUSB and Web Serial). Serve the directory over
 single page):
 
 ```console
-cd STEM/web
+cd STEM_V3/web
 ./fetch_espp_consoles.sh            # once: hub + OTA + core-dump consoles from esp-cpp.github.io
 # or: ./fetch_espp_consoles.sh ~/esp-cpp/espp   (copy from a local espp checkout)
 python3 -m http.server 8000
@@ -45,12 +45,11 @@ other).
 ## What the page shows
 
 - **Linkage view** (analysis frame, mm: origin at M1, +x toward M2, +y up):
-  the solid linkage is the firmware's *tracked* pose — the forward kinematics
-  of the pair positions it has commanded since the last zero. The RMD status
-  frame only carries the motor-side (pre-gearbox) encoder, so there is no
-  measured output-shaft angle; the motor velocities are the "still moving"
-  indicator. The dashed box is the documented design travel with the five edge
-  poses marked.
+  the solid linkage is the firmware's pose — the forward kinematics of the
+  pair positions the Eyou motors report over CANopen (actual position, object
+  0x6064, relative to the software zero); the DS402 statusword (target
+  reached) is the "still moving" indicator. The dashed box is the documented
+  design travel with the five edge poses marked.
 - **Target** (translucent): drag anywhere in the drawing. The page runs the
   same IK and pair-limit checks as the firmware and turns the ghost red when a
   point is unreachable or a pair would leave its limits; such targets are not
@@ -60,7 +59,7 @@ other).
 - **Pose command**: `x_rel` / `y_rel` are millimetres relative to the IK
   reference pose (the firmware / CLI convention, `home` = 0, 0); the readouts
   also give the plate-frame coordinates from `Geometry.md`.
-- **Actuator pairs**: tracked position per pair, direct `Set`, per-pair
+- **Actuator pairs**: measured position per pair, direct `Set`, per-pair
   `Zero` / `Zero-align`, `Zero all`, `Zero-align all` and `Release brakes`.
   - `Zero` marks the current position as 0 without moving. `Zero-align` /
     `Zero-align all` (confirmation required) first drive each motor to its

@@ -47,7 +47,7 @@ swaps the actuator layer for `EyouMotor`/`PairedEyouActuator`.
   saved to the `coredump` partition and reported on the next boot / served to
   the core-dump console.
 - **Web console** (`web/stem_console.html`): draws the linkage from the
-  firmware's tracked pose, lets you drag the end effector to move it, sends
+  firmware's measured pose, lets you drag the end effector to move it, sends
   direct pose / pair commands and streams motor telemetry. See `web/README.md`.
 
 Note on "current pose": each Eyou motor reports its actual output position

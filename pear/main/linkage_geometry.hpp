@@ -130,13 +130,20 @@ inline float angle_from_height(const Geometry &g, float h_m) {
   return std::clamp(angle, g.min_angle_deg, g.max_angle_deg);
 }
 
-/// Corner heights (m) for a base pose. Non-finite pose -> all zeros.
+/// Largest tilt magnitude (deg) evaluated through tan(): the seat-axis table
+/// allows +/-90, where the float conversion lands a hair past pi/2 and tan()
+/// flips sign. Anything this steep saturates the corners anyway.
+constexpr float kMaxTiltDeg = 89.0f;
+
+/// Corner heights (m) for a base pose. Non-finite pose -> all zeros; tilts
+/// are clamped to +/-kMaxTiltDeg before the tangent.
 inline Corners corner_heights_from_pose(const Geometry &g, const Pose &pose) {
   Corners heights{};
   if (!is_finite(pose))
     return heights;
-  const float fb = std::tan(deg_to_rad(pose.fb_tilt_deg));
-  const float lat = std::tan(deg_to_rad(pose.lateral_tilt_deg));
+  const float fb = std::tan(deg_to_rad(std::clamp(pose.fb_tilt_deg, -kMaxTiltDeg, kMaxTiltDeg)));
+  const float lat =
+      std::tan(deg_to_rad(std::clamp(pose.lateral_tilt_deg, -kMaxTiltDeg, kMaxTiltDeg)));
   for (const Corner corner : kCorners) {
     heights[corner] = pose.elevation_m + corner_sx(corner) * g.half_length_m * fb +
                       corner_sy(corner) * g.half_width_m * lat;

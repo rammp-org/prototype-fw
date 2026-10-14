@@ -127,6 +127,20 @@ void test_pose_signs() {
     CHECK_NEAR(h[Corner::BR], -dz, 1e-6f);
     CHECK(h[Corner::FL] > h[Corner::FR]);
   }
+  // the +/-90 deg boundary of the seat-axis table: tan() must not flip sign
+  // past pi/2 - a maximum "front up" saturates the FRONT corners at the top
+  for (const float tilt : {90.0f, -90.0f}) {
+    const Corners a = pear::geometry::corner_angles_from_pose(kGeometry, {0.0f, tilt, 0.0f});
+    const float up = tilt > 0 ? kGeometry.max_angle_deg : kGeometry.min_angle_deg;
+    const float down = tilt > 0 ? kGeometry.min_angle_deg : kGeometry.max_angle_deg;
+    CHECK_NEAR(a[Corner::FR], up, 1e-6f);
+    CHECK_NEAR(a[Corner::FL], up, 1e-6f);
+    CHECK_NEAR(a[Corner::BR], down, 1e-6f);
+    CHECK_NEAR(a[Corner::BL], down, 1e-6f);
+    const Corners l = pear::geometry::corner_angles_from_pose(kGeometry, {0.0f, 0.0f, tilt});
+    CHECK_NEAR(l[Corner::FL], up, 1e-6f);
+    CHECK_NEAR(l[Corner::FR], down, 1e-6f);
+  }
   // the inverse sees the same signs
   {
     Corners h{};

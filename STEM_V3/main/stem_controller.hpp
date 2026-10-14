@@ -37,11 +37,11 @@ struct MotorTelemetry {
   float tracked_deg{0.0f}; ///< actual position read over CANopen (object 0x6064)
 };
 
-// Snapshot of what the controller knows. NOTE: the RMD status frame only carries
-// the motor-side single-turn encoder (pre-gearbox), so there is no measured
-// output-shaft angle; the pose here is the FK of the *tracked* pair positions
-// (what has been commanded since the last zero), with the motor velocities as
-// the "still moving" indicator.
+// Snapshot of what the controller knows. Unlike the RMD-based STEM, the Eyou
+// motors report their actual output-shaft position over CANopen (object
+// 0x6064, relative to the software zero): pair_deg is MEASURED and the pose is
+// the forward kinematics of those measured positions; "still moving" is the
+// DS402 statusword (target reached), not a velocity.
 struct State {
   bool can_ok{false};
   bool target_valid{false};

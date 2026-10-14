@@ -84,11 +84,14 @@
     }
     async function send(command) {
       if (!writer) return;
-      writeChain = writeChain.then(async () => {
+      // each write settles on its own: a rejected write (port gone, write error)
+      // must not leave the chain rejected and swallow every later command
+      const result = writeChain.then(async () => {
         await writer.write(new TextEncoder().encode(`${command}\n`));
         log(`> ${command}`);
       });
-      return writeChain;
+      writeChain = result.catch((error) => log(`Serial write failed: ${error.message}`));
+      return result;
     }
     async function readLoop() {
       const decoder = new TextDecoder();

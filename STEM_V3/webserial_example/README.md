@@ -19,7 +19,7 @@ console. Click **Home** or use the position pad to send `home` and `move x y`.
 
 ## Current commands
 
-The page uses commands already registered by `STEM/main/main.cpp`:
+The page uses commands already registered by `STEM_V3/main/main.cpp`:
 
 - `move <x_rel> <y_rel>`
 - `home`

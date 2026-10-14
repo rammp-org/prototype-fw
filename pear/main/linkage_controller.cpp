@@ -227,6 +227,12 @@ bool LinkageController::zero(std::optional<Corner> corner) {
   // no move may execute while the coordinate system changes, and whatever was
   // queued was expressed in the old one
   std::lock_guard<std::mutex> moves(move_mutex_);
+  if (moving_mask_.load() != 0) {
+    // a software zero only shifts the offset: an in-flight profile move would
+    // continue toward its old absolute target in the new coordinate system
+    logger_.error("Zero refused: a linkage is still moving (wait for target reached)");
+    return false;
+  }
   {
     std::lock_guard<std::mutex> lock(mutex_);
     invalidate_targets_locked();
@@ -256,6 +262,10 @@ bool LinkageController::save_zero() {
 
 bool LinkageController::load_zero() {
   std::lock_guard<std::mutex> moves(move_mutex_);
+  if (moving_mask_.load() != 0) { // see zero()
+    logger_.error("load_zero refused: a linkage is still moving (wait for target reached)");
+    return false;
+  }
   {
     std::lock_guard<std::mutex> lock(mutex_);
     invalidate_targets_locked();
@@ -402,11 +412,17 @@ bool LinkageController::status_step() {
       }
       auto &motor = motors_[pear::index(corner)];
       const bool moved = motor.move_absolute(targets[corner]);
+      const uint8_t bit = static_cast<uint8_t>(1u << pear::index(corner));
       if (!moved) {
         // the platform must not be twisted against a corner that did not take
-        // its move: the rest of the batch is abandoned (and re-requested whole)
+        // its move: the rest of the batch is abandoned (and re-requested whole).
+        // A failed move_absolute may still have been ACCEPTED by the drive
+        // (the set-point went out, only the acknowledgement timed out), so this
+        // corner counts as possibly moving and is halted with the rest.
         logger_.error("Linkage {}: move to {:.1f} deg failed; batch abandoned",
                       pear::corner_name(corner), targets[corner]);
+        moving_mask_.fetch_or(bit);
+        accepted = static_cast<uint8_t>(accepted | bit);
         halt_accepted("a later corner failed");
         break;
       }
@@ -414,7 +430,6 @@ bool LinkageController::status_step() {
       motor_status_[pear::index(corner)].target_degrees = targets[corner];
       note_command_sent_locked();
       // physical motion starts now; the poll clears the bit on target reached
-      const uint8_t bit = static_cast<uint8_t>(1u << pear::index(corner));
       moving_mask_.fetch_or(bit);
       accepted = static_cast<uint8_t>(accepted | bit);
       motion_started_ = std::chrono::steady_clock::now();
