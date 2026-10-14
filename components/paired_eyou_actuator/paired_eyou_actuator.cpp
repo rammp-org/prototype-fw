@@ -20,7 +20,20 @@ bool PairedEyouActuator::configure_profile_position(
 bool PairedEyouActuator::enable_drive(uint32_t timeout_ms) {
   const bool primary_ok = primary_.enable_drive(timeout_ms);
   const bool secondary_ok = secondary_.enable_drive(timeout_ms);
-  return primary_ok && secondary_ok;
+  if (primary_ok && secondary_ok) {
+    return true;
+  }
+  // a mechanically coupled pair is never left half energized: whichever side
+  // did enable is disabled again, so a failed result means both are off
+  logger_.error("Enable failed ({}); disabling both motors of the pair",
+                !primary_ok && !secondary_ok ? "both" : (primary_ok ? "secondary" : "primary"));
+  if (primary_ok) {
+    primary_.disable_drive(timeout_ms);
+  }
+  if (secondary_ok) {
+    secondary_.disable_drive(timeout_ms);
+  }
+  return false;
 }
 
 bool PairedEyouActuator::disable_drive(uint32_t timeout_ms) {

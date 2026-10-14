@@ -71,10 +71,13 @@ public:
         return false;
       }
     }
-    const bool left_ok = left_.set_position(targets[0], kMoveRpm);
-    const bool right_ok = right_.set_position(targets[1], kMoveRpm);
-    const bool seat_ok = seat_.set_position(targets[2], kMoveRpm);
-    if (!left_ok || !right_ok || !seat_ok) {
+    // commanded in order and short-circuited: a pair that rejects its target
+    // must not leave the pairs already commanded running toward a twisted
+    // pose, so every pair is stopped then (like StemController::move_to)
+    if (!left_.set_position(targets[0], kMoveRpm) || !right_.set_position(targets[1], kMoveRpm) ||
+        !seat_.set_position(targets[2], kMoveRpm)) {
+      stop_all();
+      send_response("ERROR MOVE a pair rejected its target; all pairs stopped\n");
       return false;
     }
 
@@ -104,11 +107,14 @@ public:
     send_response("OK SET pair=%s degrees=%.3f\n", name, degrees);
   }
 
-  void stop() {
+  void stop() { send_response("%s STOP\n", stop_all() ? "OK" : "ERROR"); }
+
+  /// Stop every pair (all attempted); false if any stop failed.
+  bool stop_all() {
     const bool right_ok = right_.stop();
     const bool left_ok = left_.stop();
     const bool seat_ok = seat_.stop();
-    send_response("%s STOP\n", right_ok && left_ok && seat_ok ? "OK" : "ERROR");
+    return right_ok && left_ok && seat_ok;
   }
 
   void release() {
