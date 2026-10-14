@@ -69,7 +69,12 @@ public:
     std::array<uint8_t, 8> data{};
     int temperature_c{0};
     int16_t torque_raw{0};
-    float velocity_rpm{0.0f};
+    float velocity_rpm{0.0f}; ///< output-shaft RPM
+    /// 0x9C bytes 6-7: the single-turn encoder count of the MOTOR shaft
+    /// (65536 per motor revolution).
+    int16_t encoder_raw{0};
+    /// encoder_raw as output-shaft degrees (through the gear ratio), so every
+    /// consumer (read_angle, CLI, diagnostics, telemetry) sees degrees.
     float angle_degrees{0.0f};
   };
 

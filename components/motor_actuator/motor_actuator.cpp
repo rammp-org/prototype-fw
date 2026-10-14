@@ -194,7 +194,9 @@ bool MotorActuator::read_status(Status &status, uint32_t timeout_ms) {
   status.temperature_c = response.data[1];
   status.torque_raw = read_i16(response.data, 2);
   status.velocity_rpm = static_cast<float>(read_i16(response.data, 4)) / (gear_ratio_ * 6.0f);
-  status.angle_degrees = static_cast<float>(read_i16(response.data, 6));
+  // converted ONCE here: 65536 counts per motor revolution, then the gearbox
+  status.encoder_raw = read_i16(response.data, 6);
+  status.angle_degrees = static_cast<float>(status.encoder_raw) / 32768.0f * 180.0f / gear_ratio_;
   return true;
 }
 
@@ -311,7 +313,7 @@ void MotorActuator::zero_position(bool need_align) {
       logger_.warn("Motor status read failed during zero alignment (attempt {}/5)", attempt);
     }
     if (status_ok) {
-      const float virtual_position_bias = status.angle_degrees / 32768.0f * 180.0f / gear_ratio_;
+      const float virtual_position_bias = status.angle_degrees; // already output-shaft degrees
       logger_.info("Virtual position bias set to {}", virtual_position_bias);
       send_incremental_position(virtual_position_bias, 5.0f);
     } else {
