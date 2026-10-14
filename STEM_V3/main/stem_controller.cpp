@@ -112,7 +112,12 @@ StemController::Result StemController::set_seat_tilt(float tilt_deg, float rpm) 
     seat_deg = -solution.m3_angle_deg + tilt_deg;
   } else {
     std::array<float, 2> seat_position{};
-    config_.seat.get_position(seat_position);
+    if (!config_.seat.get_position(seat_position)) {
+      // without the live seat angle the tilt change has no base: a failed
+      // read must not turn a small adjustment into a move to `tilt_deg`
+      logger_.error("seat tilt rejected: could not read the seat pair position");
+      return Result::ActuatorFailed;
+    }
     seat_deg = seat_position[0] - previous_tilt + tilt_deg;
   }
   if (seat_deg < config_.min_deg || seat_deg > config_.max_deg) {
