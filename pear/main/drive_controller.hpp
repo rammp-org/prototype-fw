@@ -65,17 +65,19 @@ public:
 
   /// Last known status of one wheel drive (pear::Corner order).
   struct MotorStatus {
-    uint8_t id{0};             ///< CAN node id.
-    float velocity_rpm{0.0f};  ///< Last reported output-shaft velocity.
-    float temperature_c{0.0f}; ///< Last reported driver temperature.
-    float current_a{0.0f};     ///< Last reported torque current.
-    float angle_degrees{0.0f}; ///< Last reported output-shaft position.
-    uint16_t statusword{0};    ///< Last reported statusword.
-    uint16_t error_code{0};    ///< Last reported error bits (0x2601).
-    float commanded_rpm{0.0f}; ///< Last commanded wheel speed.
-    bool valid{false};         ///< True once a status read has succeeded.
-    bool stale{true};          ///< True if not successfully read recently.
-    bool faulted{false};       ///< Statusword alarm bit (from the last read).
+    uint8_t id{0};                    ///< CAN node id.
+    float velocity_rpm{0.0f};         ///< Last reported output-shaft velocity.
+    float temperature_c{0.0f};        ///< Last reported driver temperature.
+    float current_a{0.0f};            ///< Last reported torque current.
+    float angle_degrees{0.0f};        ///< Last reported output-shaft position.
+    uint16_t statusword{0};           ///< Last reported statusword.
+    uint16_t error_code{0};           ///< Last reported error bits (0x2601).
+    float commanded_rpm{0.0f};        ///< Last commanded wheel speed.
+    bool valid{false};                ///< True once a status read has succeeded.
+    bool stale{true};                 ///< True if not successfully read recently.
+    bool faulted{false};              ///< Statusword alarm bit (from the last read).
+    uint32_t reply_latency_us{0};     ///< SDO round trip of the last status read.
+    uint32_t max_reply_latency_us{0}; ///< Longest SDO round trip seen.
   };
 
   /// Snapshot of the full controller state, for the GUI / CLI.

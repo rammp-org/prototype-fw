@@ -181,6 +181,10 @@ protected:
   /// the cached positions invalid until the next successful poll.
   std::mutex move_mutex_;
   std::atomic<uint32_t> frame_generation_{0};
+  /// initialize() has run (whatever its result): the status poll starts only
+  /// then, so it never hits a motor while it is being reset / configured
+  /// (those reads timed out and looked like bus trouble).
+  std::atomic<bool> init_finished_{false};
   std::atomic<bool> enacting_{false}; ///< moving(): a batch is being sent
   /// Corners commanded and not yet reporting DS402 target reached (bit =
   /// corner index): the physical-motion half of moving(). Set under mutex_

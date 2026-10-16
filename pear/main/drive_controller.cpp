@@ -490,6 +490,8 @@ bool DriveController::status_step() {
     motor_status.velocity_rpm = status.velocity_rpm;
     motor_status.temperature_c = status.temperature_c;
     motor_status.current_a = status.current_a;
+    motor_status.reply_latency_us = status.reply_latency_us;
+    motor_status.max_reply_latency_us = status.max_reply_latency_us;
     motor_status.angle_degrees = status.position_degrees;
     motor_status.statusword = status.statusword;
     motor_status.error_code = status.error_code;

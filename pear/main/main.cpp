@@ -504,11 +504,13 @@ extern "C" void app_main(void) {
           out << "W" << pear::index(corner) + 1 << " wheel " << pear::corner_name(corner)
               << ": temp " << w.temperature_c << " C, current " << w.current_a << " A, vel "
               << w.velocity_rpm << " rpm, sw 0x" << std::hex << w.statusword << " err 0x"
-              << w.error_code << std::dec << (w.valid ? "" : " [NO DATA]") << "\n";
+              << w.error_code << std::dec << ", sdo " << w.reply_latency_us / 1000.0f << " ms (max "
+              << w.max_reply_latency_us / 1000.0f << ")" << (w.valid ? "" : " [NO DATA]")
+              << (w.stale ? " [STALE]" : "") << "\n";
           out << "L" << pear::index(corner) + 1 << " link " << pear::corner_name(corner) << ": pos "
               << m.position_degrees << " deg, sw 0x" << std::hex << m.statusword << std::dec << " ("
               << EyouMotor::ds402_state_name(m.statusword) << ")" << (m.valid ? "" : " [NO DATA]")
-              << "\n";
+              << (m.stale ? " [STALE]" : "") << "\n";
         }
         out << "pose: elev " << l.pose.elevation_m * 1000.0f << " mm, fb " << l.pose.fb_tilt_deg
             << " deg, lat " << l.pose.lateral_tilt_deg << " deg\n";

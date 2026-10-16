@@ -77,6 +77,7 @@ bool LinkageController::initialize() {
   }
   std::lock_guard<std::mutex> lock(mutex_);
   initialized_ = ok;
+  init_finished_ = true;
   return ok;
 }
 
@@ -472,7 +473,10 @@ bool LinkageController::status_step() {
     }
   }
 
-  // 2. poll one motor (round-robin)
+  // 2. poll one motor (round-robin); not before initialize() is through with
+  //    the motors (its NMT resets leave a node silent for ~100 ms)
+  if (!init_finished_.load())
+    return false;
   const size_t index = status_poll_index_;
   status_poll_index_ = (status_poll_index_ + 1) % motors_.size();
   auto &motor = motors_[index];

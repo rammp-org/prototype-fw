@@ -4,6 +4,7 @@
 #include <cmath>
 #include <limits>
 
+#include "esp_timer.h"
 #include "freertos/task.h"
 
 namespace {
@@ -207,6 +208,7 @@ bool Ds402VelocityMotor::request_sdo_u32(uint16_t index, uint8_t subindex, uint3
                                        0x00,
                                        0x00,
                                        0x00};
+  const int64_t sent_at_us = esp_timer_get_time();
   if (!send_raw(0x600 + node_id_, request, /*wait_for_queue_space=*/true)) {
     return false;
   }
@@ -221,6 +223,8 @@ bool Ds402VelocityMotor::request_sdo_u32(uint16_t index, uint8_t subindex, uint3
     if (!sdo_matches(response, 0x580 + node_id_, index, subindex)) {
       continue;
     }
+    last_reply_latency_us_ = static_cast<uint32_t>(esp_timer_get_time() - sent_at_us);
+    max_reply_latency_us_ = std::max(max_reply_latency_us_, last_reply_latency_us_);
     if (response.data[0] == kSdoAbort) {
       logger_.error("SDO read 0x{:04X}:{:02X} aborted: 0x{:02X}{:02X}{:02X}{:02X}", index, subindex,
                     response.data[7], response.data[6], response.data[5], response.data[4]);
@@ -241,7 +245,9 @@ bool Ds402VelocityMotor::request_sdo_u32(uint16_t index, uint8_t subindex, uint3
     value = static_cast<uint32_t>(signed_payload(response.data[0], raw));
     return true;
   }
-  logger_.warn("Timed out reading SDO 0x{:04X}:{:02X}", index, subindex);
+  logger_.warn("Timed out reading SDO 0x{:04X}:{:02X} ({} ms; this drive's slowest reply so far "
+               "{} us)",
+               index, subindex, timeout_ms, max_reply_latency_us_);
   return false;
 }
 
@@ -314,23 +320,20 @@ bool Ds402VelocityMotor::enable_drive(uint32_t timeout_ms) {
     return false;
   }
   const int8_t mode = config_.use_acc_dec ? kSpeedModeWithRamps : kSpeedModeWithoutRamps;
-  if (!send_sdo_download(kModesOfOperationIndex, 0, kSdoDownloadU8, static_cast<uint8_t>(mode),
+  if (config_.set_operation_mode &&
+      !send_sdo_download(kModesOfOperationIndex, 0, kSdoDownloadU8, static_cast<uint8_t>(mode),
                          kDefaultSdoTimeoutMs)) {
     return false;
   }
   uint32_t raw = 0;
-  // the readback is part of the enable: a set-point written while the drive
-  // sits in another mode would be ignored or misinterpreted, so a failed or
-  // mismatched readback is an enable failure the controller retries
+  // advisory only: the L2DB's mode display answers 0 (seen on the bench) even
+  // when the stored mode is speed mode and the drive then runs set-points fine
   if (!request_sdo_u32(kModesOfOperationDisplayIndex, 0, raw, kDefaultSdoTimeoutMs)) {
-    logger_.error("Could not read the operation mode back after requesting {}",
-                  static_cast<int>(mode));
-    return false;
-  }
-  if (static_cast<int8_t>(raw) != mode) {
-    logger_.error("Drive reports operation mode {} after requesting {}",
-                  static_cast<int>(static_cast<int8_t>(raw)), static_cast<int>(mode));
-    return false;
+    logger_.warn("Could not read the operation mode display (0x6061)");
+  } else if (static_cast<int8_t>(raw) != mode) {
+    logger_.warn("Mode display (0x6061) reports {} where {} is expected; the L2DB reports 0 "
+                 "here, so this is informational",
+                 static_cast<int>(static_cast<int8_t>(raw)), static_cast<int>(mode));
   }
   if (config_.use_acc_dec) {
     const auto ramp = [&](float rps2) {
@@ -445,6 +448,8 @@ bool Ds402VelocityMotor::read_status(Status &status, uint32_t timeout_ms) {
   }
   status.statusword = static_cast<uint16_t>(raw);
   status.faulted = (status.statusword & kAlarmBit) != 0;
+  status.reply_latency_us = last_reply_latency_us_;
+  status.max_reply_latency_us = max_reply_latency_us_;
   float value = 0.0f;
   if (read_signed(config_.velocity_actual, value, timeout_ms)) {
     status.velocity_rpm = value;

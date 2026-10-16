@@ -73,6 +73,13 @@ public:
     /// NMT reset-communication + boot-up wait before enabling (drives that
     /// send a boot-up message and need the reset to leave a stale state).
     bool reset_communication_on_enable{false};
+    /// Write modes of operation (0x6060) during enable_drive(). The L2DB
+    /// stores its mode, so a drive set up once for speed mode needs no write
+    /// (the manual's minimum is controlword 0x0F, then the target velocity);
+    /// the write is harmless when the mode is already right. Either way the
+    /// mode display (0x6061) is read back and LOGGED: the L2DB answers 0 there
+    /// (observed), so a mismatch is not treated as an enable failure.
+    bool set_operation_mode{true};
     espp::Logger::Verbosity log_level{espp::Logger::Verbosity::INFO};
   };
 
@@ -84,6 +91,11 @@ public:
     float temperature_c{0.0f}; ///< 0 when the drive has no temperature object
     float current_a{0.0f};     ///< 0 when the drive has no current object
     bool faulted{false};       ///< statusword alarm bit
+    /// SDO round trip of the statusword read that produced this status, and
+    /// the longest seen since construction: tells a slow drive (raise the
+    /// read timeout) from a silent one.
+    uint32_t reply_latency_us{0};
+    uint32_t max_reply_latency_us{0};
   };
 
   Ds402VelocityMotor(CanBus &bus, uint8_t node_id, const Config &config);
@@ -143,4 +155,7 @@ private:
   /// Set-point (0x60FF) downloads sent whose reply has not been seen yet;
   /// guarded by transaction_mutex_.
   uint32_t owed_set_point_replies_{0};
+  /// Round trip of the last confirmed SDO read / the longest ever (us).
+  uint32_t last_reply_latency_us_{0};
+  uint32_t max_reply_latency_us_{0};
 };

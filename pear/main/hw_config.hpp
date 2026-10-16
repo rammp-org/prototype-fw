@@ -117,6 +117,9 @@ inline constexpr Ds402VelocityMotor::Config kWheelDriveConfig = {
     .acceleration_rps2 = kWheelAccelerationRps2,
     .deceleration_rps2 = kWheelDecelerationRps2,
     .max_speed_rpm = kWheelMaxSpeedRpm,
+    // the L2DB drives were set up (and store) speed mode: the manual's minimum
+    // is controlword enable + target velocity, no mode write
+    .set_operation_mode = false,
     .log_level = espp::Logger::Verbosity::INFO,
 };
 
