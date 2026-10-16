@@ -425,7 +425,7 @@ class MibWindow(QtWidgets.QMainWindow):
         column.addWidget(box)
         column.addStretch(1)
         for col, heading in enumerate(("", "Axis", "Value", "", "", "", "Target", "", "",
-                                       "Range", "Jog (unclamped)")):
+                                       "Spec row (HMI range)", "Jog")):
             grid.addWidget(_caption(heading), 0, col)
         self.seat_value_labels: List[QtWidgets.QLabel] = []
         self.seat_target_edits: List[QtWidgets.QLineEdit] = []
@@ -491,10 +491,12 @@ class MibWindow(QtWidgets.QMainWindow):
         grid.addLayout(footer, len(spec.SEAT_AXES) + 1, 0, 1, 10)
         grid.addWidget(_note(
             "Targets are absolute, in whole units, like the HMI's seat_step: - / + send one "
-            "step from the value the MIB last reported, clamped to the range - and only while "
-            "that value is fresh (the MIB reports every 0.5 s; a step from an old value is not "
-            "one step). The MIB refuses seat commands unless its state is IDLE, so the controls "
-            "grey out otherwise."), len(spec.SEAT_AXES) + 2, 0, 1, 10)
+            "step from the value the MIB last reported - only while that value is fresh (the "
+            "MIB reports every 0.5 s; a step from an old value is not one step). Nothing is "
+            "clamped here: the MIB's own per-corner limits decide (they are not on the wire; "
+            "the spec row is the HMI's jog range). A corner the MIB reports out of range takes "
+            "only a jog. The MIB refuses seat commands unless its state is IDLE, so the "
+            "controls grey out otherwise."), len(spec.SEAT_AXES) + 2, 0, 1, 10)
         grid.setColumnStretch(10, 1)
 
     @staticmethod
@@ -992,15 +994,18 @@ class MibWindow(QtWidgets.QMainWindow):
     def _refresh_seat(self, snap: Dict[str, Any]) -> None:
         status = snap["status"]
         values = spec.seat_values(status) if status is not None else []
+        # The MIB's limits are its own (per corner, in hw_config) and are not on
+        # the wire; what it does say is which corner is outside them, through
+        # MibStatus.error_message ("Linkage FR out of range").
+        error = (status.get("error_message") or "") if status is not None else ""
         for index, axis in enumerate(spec.SEAT_AXES):
             value = values[index] if index < len(values) else None
             text = format_seat(axis, value)
-            # outside the row's range (the hardware limits): the MIB refuses
-            # every normal move for that corner, only a jog gets it back
-            outside = value is not None and not (
-                axis.to_units(axis.min_value) <= value <= axis.to_units(axis.max_value))
+            corner = axis.name.rsplit("_", 1)[-1].upper()
+            outside = (axis.name.upper().startswith("PEAR_LINK")
+                       and error.startswith(f"Linkage {corner} out of range"))
             if outside:
-                text += "  OUT OF RANGE"
+                text += "  OUT OF RANGE (MIB)"
             label = self.seat_value_labels[index]
             if label.text() != text:
                 label.setText(text)

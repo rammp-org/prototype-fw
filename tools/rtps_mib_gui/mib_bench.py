@@ -272,7 +272,10 @@ class MibBench(rtps_host.RtpsHostHarness):
             rtps_host.log(f"[seat] {axis.short}: no fresh value to step from "
                           f"(last MibStatus {'never' if age is None else f'{age:.1f} s ago'})")
             return None
-        target_raw = axis.clamp(current + direction * axis.step)
+        # not clamped to the spec row: the row is the HMI's jog range, the
+        # MIB's own per-corner limits (which this tool cannot read) decide;
+        # the MIB clamps or refuses, this tool just must not step from stale data
+        target_raw = current + direction * axis.step
         target = axis.to_units(target_raw)
         self.send_seat(axis_id, target)
         return target

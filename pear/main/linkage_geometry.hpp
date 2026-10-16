@@ -87,13 +87,18 @@ template <typename T> struct PerCorner {
 /// Corner heights (m) or angles (deg).
 using Corners = PerCorner<float>;
 
+/// The per-corner angles are in the frame the firmware uses for every corner
+/// ("positive = up", the motor's mounting direction already applied), relative
+/// to whatever zero the motor reports from. Each corner has its own level
+/// angle and range because the motors were mounted at different angles (and,
+/// until a software zero is set, read their absolute encoder).
 struct Geometry {
-  float half_length_m;   ///< front/back corners sit at x = +/- half_length
-  float half_width_m;    ///< left/right corners sit at y = +/- half_width
-  float crank_length_m;  ///< 4-bar crank length (module rise per unit sin)
-  float level_angle_deg; ///< crank angle at the reference (level) height
-  float min_angle_deg;   ///< lowest allowed crank angle
-  float max_angle_deg;   ///< highest allowed crank angle
+  float half_length_m;     ///< front/back corners sit at x = +/- half_length
+  float half_width_m;      ///< left/right corners sit at y = +/- half_width
+  float crank_length_m;    ///< 4-bar crank length (module rise per unit sin)
+  Corners level_angle_deg; ///< per corner: crank angle at the reference (level) height
+  Corners min_angle_deg;   ///< per corner: lowest allowed crank angle
+  Corners max_angle_deg;   ///< per corner: highest allowed crank angle
 };
 
 struct Pose {
@@ -112,22 +117,24 @@ inline bool is_finite(const Corners &corners) {
                      [](float v) { return std::isfinite(v); });
 }
 
-/// Height (m) of the module above the level reference for a crank angle (deg).
-inline float height_from_angle(const Geometry &g, float angle_deg) {
+/// Height (m) of a corner's module above the level reference for its crank
+/// angle (deg).
+inline float height_from_angle(const Geometry &g, Corner corner, float angle_deg) {
   if (!std::isfinite(angle_deg))
     return 0.0f;
-  return g.crank_length_m * std::sin(deg_to_rad(angle_deg - g.level_angle_deg));
+  return g.crank_length_m * std::sin(deg_to_rad(angle_deg - g.level_angle_deg[corner]));
 }
 
-/// Crank angle (deg) that puts the module at height h (m), clamped to the
-/// crank's reach and to [min_angle, max_angle]. Non-finite h clamps to the
-/// nearest limit of the level height (i.e. the level angle, then clamped).
-inline float angle_from_height(const Geometry &g, float h_m) {
+/// Crank angle (deg) that puts a corner's module at height h (m), clamped to
+/// the crank's reach and to that corner's [min_angle, max_angle]. Non-finite h
+/// clamps to the nearest limit of the level height (i.e. the level angle,
+/// then clamped).
+inline float angle_from_height(const Geometry &g, Corner corner, float h_m) {
   float ratio = 0.0f;
   if (std::isfinite(h_m) && g.crank_length_m > 0.0f)
     ratio = std::clamp(h_m / g.crank_length_m, -1.0f, 1.0f);
-  const float angle = g.level_angle_deg + rad_to_deg(std::asin(ratio));
-  return std::clamp(angle, g.min_angle_deg, g.max_angle_deg);
+  const float angle = g.level_angle_deg[corner] + rad_to_deg(std::asin(ratio));
+  return std::clamp(angle, g.min_angle_deg[corner], g.max_angle_deg[corner]);
 }
 
 /// Largest tilt magnitude (deg) evaluated through tan(): the seat-axis table
@@ -156,7 +163,7 @@ inline Corners corner_angles_from_pose(const Geometry &g, const Pose &pose) {
   const Corners heights = corner_heights_from_pose(g, pose);
   Corners angles{};
   for (const Corner corner : kCorners)
-    angles[corner] = angle_from_height(g, heights[corner]);
+    angles[corner] = angle_from_height(g, corner, heights[corner]);
   return angles;
 }
 
@@ -164,7 +171,7 @@ inline Corners corner_angles_from_pose(const Geometry &g, const Pose &pose) {
 inline Corners corner_heights_from_angles(const Geometry &g, const Corners &angles) {
   Corners heights{};
   for (const Corner corner : kCorners)
-    heights[corner] = height_from_angle(g, angles[corner]);
+    heights[corner] = height_from_angle(g, corner, angles[corner]);
   return heights;
 }
 

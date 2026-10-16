@@ -127,32 +127,33 @@ inline constexpr Ds402VelocityMotor::Config kWheelDriveConfig = {
 // Corner linkages (Eyou motors, profile position)
 /////////////////////////////////////////////////////////////////////////////
 
-/// The 4-bar geometry (see linkage_geometry.hpp for the model). Angles are at
-/// the motor output shaft relative to the software zero stored in NVS
-/// (`zero` / `save_zero` on the CLI with the linkage at its level position),
-/// positive = module up.
-/// TODO(hardware): crank length, the level angle and the mechanical range are
-/// placeholders. The seat-axis table rows L1..L4 (rammp-rtps) must cover
-/// [min, max].
+/// The 4-bar geometry (see linkage_geometry.hpp for the model). Every angle is
+/// at the motor output shaft in the "positive = up" frame (kLinkageDirection
+/// applied), relative to the motor's software zero when one is stored in NVS
+/// (`zero` / `save_zero` on the CLI) and to its absolute encoder otherwise.
+/// The corners differ: the motors were mounted at different angles, so each
+/// has its own level angle and range, in pear::Corner order FR, FL, BR, BL.
+/// A corner whose measured angle is outside its range is reported as an ERROR
+/// and refuses every move except a jog (kLinkageJogMaxDeg).
+/// TODO(hardware): the crank length is a placeholder; the LEVEL angles are
+/// placeholders (the middle of each range) until measured - the pose solver
+/// (`pose`, the M1..M3 rows) is only right once they are; the ranges are
+/// PEAR v0's as measured.
 inline constexpr float kLinkageCrankLengthM = 0.15f;
-inline constexpr float kLinkageLevelAngleDeg = 0.0f;
-/// The range common to the corners (the geometry's, used by the pose solver):
-/// the hull of the per-corner ranges below.
-inline constexpr float kLinkageAngleMinDeg = -180.0f;
-inline constexpr float kLinkageAngleMaxDeg = 180.0f;
-/// Per-corner range (deg) in the "positive = up" frame the rest of the firmware
-/// uses, pear::Corner order FR, FL, BR, BL; each within [kLinkageAngleMinDeg,
-/// kLinkageAngleMaxDeg]. A corner whose measured angle is outside its range is
-/// reported as an ERROR and refuses every move except a jog (kLinkageJogMaxDeg).
-///
-/// The frame matters: a mirrored corner (kLinkageDirection -1) that spans
-/// -60..-30 at its MOTOR reads +30..+60 here. Until the software zero is set at
-/// the level position these are absolute-encoder values and differ per corner;
-/// after `zero all` + `save_zero` they become travel relative to level and
-/// should be the same for all four.
-/// TODO(hardware): re-measure after zeroing.
 inline constexpr pear::geometry::Corners kLinkageCornerMinDeg = {{-80.0f, 60.0f, 30.0f, -170.0f}};
 inline constexpr pear::geometry::Corners kLinkageCornerMaxDeg = {{60.0f, 170.0f, 170.0f, -40.0f}};
+inline constexpr pear::geometry::Corners kLinkageCornerLevelDeg = {
+    {-10.0f, 115.0f, 100.0f, -105.0f}};
+
+inline constexpr pear::geometry::Geometry kLinkageGeometry = {
+    .half_length_m = kHalfLengthM,
+    .half_width_m = kHalfWidthM,
+    .crank_length_m = kLinkageCrankLengthM,
+    .level_angle_deg = kLinkageCornerLevelDeg,
+    .min_angle_deg = kLinkageCornerMinDeg,
+    .max_angle_deg = kLinkageCornerMaxDeg,
+};
+
 /// Mounting direction of each linkage motor, pear::Corner order (FR, FL, BR,
 /// BL): +1 = a positive (CCW) motor angle raises the wheel module, -1 = lowers
 /// it (the motor is mirrored). FR and BL are mounted one way, FL and BR the
@@ -167,15 +168,6 @@ inline constexpr float kLinkageJogMaxDeg = 1.0f;
 /// A corner at most this far past a limit still counts as inside it (a move
 /// clamped to the limit settles within a fraction of a degree).
 inline constexpr float kLinkageRangeToleranceDeg = 0.1f;
-
-inline constexpr pear::geometry::Geometry kLinkageGeometry = {
-    .half_length_m = kHalfLengthM,
-    .half_width_m = kHalfWidthM,
-    .crank_length_m = kLinkageCrankLengthM,
-    .level_angle_deg = kLinkageLevelAngleDeg,
-    .min_angle_deg = kLinkageAngleMinDeg,
-    .max_angle_deg = kLinkageAngleMaxDeg,
-};
 
 /// Profile-position motion profile (STEM_V3's values as a start).
 /// TODO(hardware): tune for the loaded base.

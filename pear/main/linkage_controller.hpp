@@ -85,11 +85,9 @@ public:
     /// The linkage motors in pear::Corner order (FR, FL, BR, BL).
     // cppcheck-suppress uninitMemberVarNoCtor
     std::array<EyouMotor, pear::kCornerCount> &motors;
-    pear::geometry::Geometry geometry{};        ///< 4-bar model + angle range.
+    /// 4-bar model with each corner's level angle and range (the request clamp).
+    pear::geometry::Geometry geometry{};
     EyouMotor::ProfilePositionConfig profile{}; ///< Motion profile for every motor.
-    /// Per-corner request clamp (deg, "positive = up"), within the geometry's.
-    Corners min_deg{};
-    Corners max_deg{};
     /// +1 / -1 per corner: the motor's positive direction raises / lowers the
     /// module. Every angle read from or sent to a motor goes through it.
     Corners direction{};

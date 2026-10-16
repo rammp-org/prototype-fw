@@ -29,21 +29,15 @@ LinkageController::LinkageController(const Config &config)
                      .priority = 5}) {
   for (const Corner corner : pear::kCorners) {
     motor_status_[pear::index(corner)].id = motors_[pear::index(corner)].node_id();
-    // The hardware (hw_config: the corner's range) is the request clamp, kept
-    // within the geometry's range the pose solver uses. The seat-axis table
-    // row is what the HMI shows and jogs within: it must cover the corner's
-    // range, or the HMI cannot reach part of it (it does not widen the clamp
-    // either way). An intersection of the two used to be the clamp, which
-    // silently pinned every target when the ranges barely overlapped.
-    min_deg_[corner] = std::max(config.min_deg[corner], geometry_.min_angle_deg);
-    max_deg_[corner] = std::min(config.max_deg[corner], geometry_.max_angle_deg);
-    if (min_deg_[corner] != config.min_deg[corner] || max_deg_[corner] != config.max_deg[corner]) {
-      logger_.warn("Corner {}: its range [{}, {}] deg lies partly outside the geometry's [{}, "
-                   "{}] deg; using [{}, {}]",
-                   pear::corner_name(corner), config.min_deg[corner], config.max_deg[corner],
-                   geometry_.min_angle_deg, geometry_.max_angle_deg, min_deg_[corner],
-                   max_deg_[corner]);
-    }
+    // The hardware (hw_config: the corner's range in the geometry) is the
+    // request clamp, the same range the pose solver uses per corner. The
+    // seat-axis table row is what the HMI shows and jogs within: it must cover
+    // the corner's range, or the HMI cannot reach part of it (it does not
+    // widen the clamp either way). An intersection of the two used to be the
+    // clamp, which silently pinned every target when the ranges barely
+    // overlapped.
+    min_deg_[corner] = geometry_.min_angle_deg[corner];
+    max_deg_[corner] = geometry_.max_angle_deg[corner];
     direction_[corner] = config.direction[corner] < 0.0f ? -1.0f : 1.0f;
     if (config.table_min_deg[corner] > min_deg_[corner] ||
         config.table_max_deg[corner] < max_deg_[corner]) {

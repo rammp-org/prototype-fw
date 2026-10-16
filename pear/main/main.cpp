@@ -249,8 +249,6 @@ extern "C" void app_main(void) {
       .motors = linkage_motors,
       .geometry = hw_config::kLinkageGeometry,
       .profile = hw_config::kLinkageProfile,
-      .min_deg = hw_config::kLinkageCornerMinDeg,
-      .max_deg = hw_config::kLinkageCornerMaxDeg,
       .direction = hw_config::kLinkageDirection,
       .jog_max_deg = hw_config::kLinkageJogMaxDeg,
       .range_tolerance_deg = hw_config::kLinkageRangeToleranceDeg,
