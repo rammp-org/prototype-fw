@@ -88,20 +88,15 @@ bool CanBus::on_error(twai_node_handle_t handle, const twai_error_event_data_t *
   return false;
 }
 
-bool CanBus::start(uint32_t bitrate) {
-  std::lock_guard<std::mutex> lock(lifecycle_mutex_);
-  if (node_ != nullptr) {
-    return true;
-  }
-
+bool CanBus::create_node_locked() {
   twai_onchip_node_config_t config{};
   config.io_cfg.rx = rx_gpio_;
   config.io_cfg.tx = tx_gpio_;
   config.io_cfg.quanta_clk_out = GPIO_NUM_NC;
   config.io_cfg.bus_off_indicator = GPIO_NUM_NC;
-  config.bit_timing.bitrate = bitrate;
+  config.bit_timing.bitrate = bitrate_;
   config.tx_queue_depth = kTxQueueDepth;
-  config.fail_retry_cnt = kTxRetryLimit;
+  config.fail_retry_cnt = kTxRetryForever;
 
   esp_err_t error = twai_new_node_onchip(&config, &node_);
   if (error == ESP_OK) {
@@ -121,10 +116,50 @@ bool CanBus::start(uint32_t bitrate) {
     }
     return false;
   }
+  return true;
+}
 
+bool CanBus::start(uint32_t bitrate) {
+  std::lock_guard<std::mutex> lock(lifecycle_mutex_);
+  if (node_ != nullptr) {
+    return true;
+  }
+  bitrate_ = bitrate;
+  if (!create_node_locked()) {
+    return false;
+  }
   logger_.info("CAN bus started: RX GPIO {}, TX GPIO {}, {} bit/s", static_cast<int>(rx_gpio_),
                static_cast<int>(tx_gpio_), bitrate);
   return true;
+}
+
+bool CanBus::abort_pending() {
+  std::lock_guard<std::mutex> lock(transmit_mutex_); // no send() while the node is gone
+  return abort_pending_locked();
+}
+
+bool CanBus::abort_pending_locked() {
+  std::lock_guard<std::mutex> lock(lifecycle_mutex_);
+  if (node_ == nullptr) {
+    return false;
+  }
+  // ESP_ERR_INVALID_STATE = already stopped (bus-off), which is what delete needs
+  esp_err_t error = twai_node_disable(node_);
+  if (error != ESP_OK && error != ESP_ERR_INVALID_STATE) {
+    logger_.error("Could not disable the CAN node to drop its pending frames: {}",
+                  esp_err_to_name(error));
+    return false;
+  }
+  error = twai_node_delete(node_);
+  if (error != ESP_OK) {
+    logger_.error("Could not delete the CAN node to drop its pending frames: {}",
+                  esp_err_to_name(error));
+    twai_node_enable(node_); // keep what we have
+    return false;
+  }
+  node_ = nullptr;
+  logger_.warn("CAN TX queue dropped: a frame nobody acknowledged was blocking it");
+  return create_node_locked();
 }
 
 bool CanBus::send(const CanFrame &frame, bool wait_for_queue_space) {
@@ -227,20 +262,19 @@ bool CanBus::flush_pending() {
   if (node_ == nullptr) {
     return false;
   }
-  // The driver has no way to drop queued frames (and a disable/enable cycle
-  // RESUMES the pending transaction on IDF 6.x, it does not abort it), but the
-  // backlog is bounded: a frame is retried at most kTxRetryLimit times, so
-  // once it reaches the controller it completes or is given up within
-  // (kTxRetryLimit + 1) frame times (about 1 ms at 1 Mbit/s when nothing
-  // ACKs), and the whole backlog (kTxQueueDepth queued + 1 in flight) within
-  // about 10 ms. Wait that out: the caller's stop frames then find an empty
-  // queue, go out next, and nothing older follows.
-  static constexpr int kDrainTimeoutMs = 15;
+  // On a live bus the backlog (kTxQueueDepth queued + 1 in flight) is gone
+  // within a couple of ms at 1 Mbit/s, so the caller's stop frames then find
+  // an empty queue, go out next, and nothing older follows. If it does NOT
+  // drain, a frame nobody acknowledges is being retried forever in front
+  // (kTxRetryForever; motor power off): drop the whole queue so the stop
+  // frames are not queued behind a stale set-point that would execute the
+  // moment the bus comes back.
+  static constexpr int kDrainTimeoutMs = 10;
   const esp_err_t error = twai_node_transmit_wait_all_done(node_, kDrainTimeoutMs);
-  if (error != ESP_OK) {
-    logger_.warn("CAN TX queue did not drain within {} ms: {}", kDrainTimeoutMs,
-                 esp_err_to_name(error));
-    return false;
+  if (error == ESP_OK) {
+    return true;
   }
-  return true;
+  logger_.warn("CAN TX queue did not drain within {} ms ({}); dropping it", kDrainTimeoutMs,
+               esp_err_to_name(error));
+  return abort_pending_locked();
 }

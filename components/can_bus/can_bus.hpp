@@ -54,6 +54,13 @@ public:
 
   bool start(uint32_t bitrate = 1'000'000);
   Status get_status();
+  /// Drop every pending transmission (the frame in progress and the queue).
+  /// The driver has no abort and disable/enable only pauses, so the node is
+  /// deleted and created again (same pins, bitrate, callbacks; receivers are
+  /// ours and untouched); frames arriving during the few hundred microseconds
+  /// the node is gone are lost. Used by flush_pending() when the queue did
+  /// not drain, i.e. a frame nobody acknowledges is stuck in front.
+  bool abort_pending();
   /// Start the bus-off recovery sequence (128 x 11 recessive bits); the node
   /// is back once get_status() reports error active again.
   bool recover();
@@ -89,11 +96,16 @@ private:
 
   static bool on_receive(twai_node_handle_t handle, const twai_rx_done_event_data_t *event,
                          void *context);
+  /// Create, configure and enable the node (lifecycle_mutex_ held).
+  bool create_node_locked();
+  /// abort_pending() with transmit_mutex_ already held by the caller.
+  bool abort_pending_locked();
   static bool on_error(twai_node_handle_t handle, const twai_error_event_data_t *event,
                        void *context);
 
   gpio_num_t rx_gpio_;
   gpio_num_t tx_gpio_;
+  uint32_t bitrate_{1'000'000};
   twai_node_handle_t node_{nullptr};
   std::array<Receiver, 64> receivers_{};
   /// Guards receivers_ against the RX ISR (on either core): registration and
@@ -112,13 +124,16 @@ private:
   /// Driver TX queue depth; the ring below must exceed it plus the one frame in
   /// flight so a slot is never reused while the driver may still reference it.
   static constexpr size_t kTxQueueDepth = 8;
-  /// Hardware retransmissions after a lost arbitration or a bus error. The bus
-  /// is multi-master in practice (every CANopen node answers on its own, with
-  /// ids that beat ours), so single-shot (0) silently dropped any request that
-  /// started together with a reply - seen as sporadic SDO timeouts. Bounded,
-  /// so a frame nothing ACKs is given up within about a millisecond instead
-  /// of wedging the queue the way infinite retries (-1) would.
-  static constexpr int8_t kTxRetryLimit = 8;
+  /// Retransmission after a lost arbitration or a bus error: -1 = the CAN
+  /// standard's automatic retransmission. On the classic (SJA1000-style)
+  /// controller of the ESP32-P4 the HAL treats EVERY other value as single
+  /// shot (`.ss = retry_cnt != -1`), and single shot silently dropped any
+  /// request that started together with a slave's reply (ids 0x58x beat our
+  /// 0x60x): one SDO timeout per arbitration loss on the bench. The price of
+  /// -1 is that a frame nothing acknowledges (motor power off) is retried
+  /// forever and blocks the queue; flush_pending() drops it then, see
+  /// abort_pending().
+  static constexpr int8_t kTxRetryForever = -1;
   // Persistent, driver-referenced TX frames: send() only advances the ring
   // after a successful enqueue. All access is serialized by transmit_mutex_.
   static constexpr size_t kTxRingSize = 16;
