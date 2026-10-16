@@ -502,7 +502,8 @@ extern "C" void app_main(void) {
             << s.rx_error_count << ", bus errors since start " << s.bus_error_count
             << ", TX queue free " << s.tx_queue_free << "\n  by type: stuff " << s.stuff_errors
             << ", form " << s.form_errors << ", bit " << s.bit_errors << ", ack " << s.ack_errors
-            << ", arbitration lost " << s.arbitration_lost << " (normal, retransmitted)\n";
+            << ", arbitration lost " << s.arbitration_lost << " (normal, retransmitted)\n  bus-off "
+            << s.bus_off_count << " time(s) since start (recovered automatically)\n";
         if (s.bus_off) {
           out << "  the controller left the bus: fix the wiring / bitrate, then `can_recover`\n";
         } else if (s.stuff_errors + s.form_errors + s.bit_errors > 0) {

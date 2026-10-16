@@ -2,6 +2,8 @@
 
 #include <algorithm>
 
+#include "esp_timer.h"
+
 CanBus::CanBus(gpio_num_t rx_gpio, gpio_num_t tx_gpio)
     : espp::BaseComponent("CanBus", espp::Logger::Verbosity::INFO)
     , rx_gpio_(rx_gpio)
@@ -103,6 +105,7 @@ bool CanBus::create_node_locked() {
     twai_event_callbacks_t callbacks{};
     callbacks.on_rx_done = on_receive;
     callbacks.on_error = on_error;
+    callbacks.on_state_change = on_state_change;
     error = twai_node_register_event_callbacks(node_, &callbacks, this);
   }
   if (error == ESP_OK) {
@@ -117,6 +120,34 @@ bool CanBus::create_node_locked() {
     return false;
   }
   return true;
+}
+
+bool CanBus::on_state_change(twai_node_handle_t handle, const twai_state_change_event_data_t *event,
+                             void *context) {
+  (void)handle;
+  auto *bus = static_cast<CanBus *>(context);
+  const bool off = event->new_sta == TWAI_ERROR_BUS_OFF;
+  if (off && event->old_sta != TWAI_ERROR_BUS_OFF)
+    bus->bus_off_count_.fetch_add(1, std::memory_order_relaxed);
+  bus->bus_off_.store(off, std::memory_order_relaxed);
+  return false;
+}
+
+bool CanBus::handle_bus_off_locked() {
+  const int64_t now = esp_timer_get_time();
+  if (now - last_bus_off_log_us_ > 2'000'000) {
+    last_bus_off_log_us_ = now;
+    logger_.warn("CAN controller is BUS OFF ({} time(s) since start): recovering; frames are "
+                 "dropped until it is back on the bus",
+                 bus_off_count_.load(std::memory_order_relaxed));
+  }
+  if (now - last_recover_us_ > 100'000) {
+    last_recover_us_ = now;
+    const esp_err_t error = twai_node_recover(node_);
+    if (error != ESP_OK && error != ESP_ERR_INVALID_STATE) // INVALID_STATE: already back
+      logger_.error("CAN bus-off recovery failed: {}", esp_err_to_name(error));
+  }
+  return false;
 }
 
 bool CanBus::start(uint32_t bitrate) {
@@ -158,6 +189,7 @@ bool CanBus::abort_pending_locked() {
     return false;
   }
   node_ = nullptr;
+  bus_off_.store(false, std::memory_order_relaxed);
   logger_.warn("CAN TX queue dropped: a frame nobody acknowledged was blocking it");
   return create_node_locked();
 }
@@ -166,6 +198,9 @@ bool CanBus::send(const CanFrame &frame, bool wait_for_queue_space) {
   std::lock_guard<std::mutex> lock(transmit_mutex_);
   if (node_ == nullptr || frame.dlc > frame.data.size()) {
     return false;
+  }
+  if (bus_off_.load(std::memory_order_relaxed)) {
+    return handle_bus_off_locked(); // no point queueing: the driver refuses while bus-off
   }
 
   // Copy into a persistent ring slot: the on-chip TWAI TX queue is zero-copy and
@@ -241,6 +276,7 @@ CanBus::Status CanBus::get_status() {
   status.form_errors = form_errors_.load(std::memory_order_relaxed);
   status.stuff_errors = stuff_errors_.load(std::memory_order_relaxed);
   status.ack_errors = ack_errors_.load(std::memory_order_relaxed);
+  status.bus_off_count = bus_off_count_.load(std::memory_order_relaxed);
   return status;
 }
 

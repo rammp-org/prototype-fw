@@ -50,6 +50,7 @@ public:
     uint32_t form_errors{0};
     uint32_t stuff_errors{0};
     uint32_t ack_errors{0};
+    uint32_t bus_off_count{0}; ///< times the controller went bus-off since start()
   };
 
   bool start(uint32_t bitrate = 1'000'000);
@@ -102,6 +103,11 @@ private:
   bool abort_pending_locked();
   static bool on_error(twai_node_handle_t handle, const twai_error_event_data_t *event,
                        void *context);
+  static bool on_state_change(twai_node_handle_t handle,
+                              const twai_state_change_event_data_t *event, void *context);
+  /// Bus-off: start the recovery (at most every 100 ms) and say so (at most
+  /// every 2 s). transmit_mutex_ held. Returns false (the frame is not sent).
+  bool handle_bus_off_locked();
 
   gpio_num_t rx_gpio_;
   gpio_num_t tx_gpio_;
@@ -120,6 +126,16 @@ private:
   std::atomic<uint32_t> form_errors_{0};
   std::atomic<uint32_t> stuff_errors_{0};
   std::atomic<uint32_t> ack_errors_{0};
+  /// Set by the driver's state-change ISR while the controller is bus-off: a
+  /// burst of failed transmissions (32 in a row, 3 ms with retransmission on
+  /// a bus whose nodes are still powering up) takes the node off the bus and
+  /// the driver does NOT recover it by itself. send() starts the recovery
+  /// (128 x 11 recessive bits, ~1.4 ms at 1 Mbit/s) and the pending frame
+  /// resumes when the node is back.
+  std::atomic<bool> bus_off_{false};
+  std::atomic<uint32_t> bus_off_count_{0};
+  int64_t last_recover_us_{0};
+  int64_t last_bus_off_log_us_{0};
 
   /// Driver TX queue depth; the ring below must exceed it plus the one frame in
   /// flight so a slot is never reused while the driver may still reference it.

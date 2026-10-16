@@ -163,12 +163,16 @@ bool RtpsLink::start(const std::string &interface_address) {
       .name = "mib_status_pub",
       .period = config_.publish_period,
       .callback = [this]() { return publish_step(); },
+      // build_status() formats the error strings with fmt; a float conversion
+      // alone needs a few KB of stack (the 4 KB default overflowed)
+      .stack_size_bytes = 8192,
       .log_level = espp::Logger::Verbosity::WARN,
   });
   motor_state_timer_ = std::make_unique<espp::Timer>(espp::Timer::Config{
       .name = "motor_state_pub",
       .period = config_.motor_state_period,
       .callback = [this]() { return motor_state_step(); },
+      .stack_size_bytes = 6144,
       .log_level = espp::Logger::Verbosity::WARN,
   });
   watchdog_timer_ = std::make_unique<espp::Timer>(espp::Timer::Config{
@@ -445,10 +449,14 @@ MIB::MibStatus RtpsLink::build_status() {
       }
       if (link.valid && link.out_of_range) {
         error = fmt::format("Linkage {} out of range", pear::corner_name(corner));
-        footer =
-            fmt::format("At {:.1f} deg, allowed [{:.0f}, {:.0f}]: jog only (L{} +/-{:g} deg)",
-                        link.position_degrees, linkage.min_deg[corner], linkage.max_deg[corner],
-                        pear::index(corner) + 1, hw_config::kLinkageJogMaxDeg);
+        // integers only: this runs on the publish task and fmt's float path
+        // is stack-hungry
+        footer = fmt::format("At {} deg, allowed [{}, {}]: jog only (L{} +/-{} deg)",
+                             static_cast<int>(std::lround(link.position_degrees)),
+                             static_cast<int>(std::lround(linkage.min_deg[corner])),
+                             static_cast<int>(std::lround(linkage.max_deg[corner])),
+                             pear::index(corner) + 1,
+                             static_cast<int>(std::lround(hw_config::kLinkageJogMaxDeg)));
         break;
       }
       if (linkage.halt_unconfirmed_mask & (1u << pear::index(corner))) {
