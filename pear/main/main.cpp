@@ -466,6 +466,33 @@ extern "C" void app_main(void) {
       },
       "Print the link, drive, wheel and linkage state");
   root_menu->Insert(
+      "can",
+      [&can_bus](std::ostream &out) {
+        const auto s = can_bus.get_status();
+        out << "CAN controller: " << s.state << "\n  TEC " << s.tx_error_count << ", REC "
+            << s.rx_error_count << ", bus errors since start " << s.bus_error_count
+            << ", TX queue free " << s.tx_queue_free << "\n";
+        if (s.bus_off) {
+          out << "  the controller left the bus: fix the wiring / bitrate, then `can_recover`\n";
+        } else if (s.bus_error_count > 0 || s.rx_error_count > 0) {
+          out << "  errors on the bus: a node at another bitrate (the bus runs "
+              << hw_config::kCanBitrateBps / 1000
+              << " kbit/s; L2DB SW2-2 ON = 1 Mbit/s, OFF = 500 kbit/s, read at power-up), "
+                 "termination or wiring\n";
+        } else {
+          out << "  no bus errors: a node that does not answer is off, unpowered, at another id "
+                 "or not on this bus\n";
+        }
+      },
+      "Print the CAN controller state and error counters (bitrate / wiring check)");
+  root_menu->Insert(
+      "can_recover",
+      [&can_bus](std::ostream &out) {
+        out << (can_bus.recover() ? "bus-off recovery started; `can` shows when it is back\n"
+                                  : "recovery not started (see the log)\n");
+      },
+      "Start the CAN bus-off recovery");
+  root_menu->Insert(
       "diag",
       [&drive, &linkage](std::ostream &out) {
         // the diagnostics rows as the HMI shows them

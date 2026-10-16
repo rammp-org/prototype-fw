@@ -592,11 +592,11 @@ bool EyouMotor::request_sdo_u32(uint16_t index, uint8_t expected_response_comman
     if (xQueueReceive(receive_queue_, &response, timeout_ticks - elapsed) != pdTRUE) {
       break;
     }
-    logger_.info("CAN RX id=0x{:03X}, dlc={}, data={:02X} {:02X} {:02X} {:02X} {:02X} {:02X} "
-                 "{:02X} {:02X}",
-                 response.id, response.dlc, response.data[0], response.data[1], response.data[2],
-                 response.data[3], response.data[4], response.data[5], response.data[6],
-                 response.data[7]);
+    logger_.debug("CAN RX id=0x{:03X}, dlc={}, data={:02X} {:02X} {:02X} {:02X} {:02X} {:02X} "
+                  "{:02X} {:02X}",
+                  response.id, response.dlc, response.data[0], response.data[1], response.data[2],
+                  response.data[3], response.data[4], response.data[5], response.data[6],
+                  response.data[7]);
     if (response.id != 0x580 + node_id_ || response.dlc != 8 ||
         response.data[1] != static_cast<uint8_t>(index) ||
         response.data[2] != static_cast<uint8_t>(index >> 8) || response.data[3] != 0x00) {

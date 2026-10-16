@@ -27,8 +27,11 @@ CONFIG_CACHE_L2_CACHE_256KB=y
 CONFIG_CACHE_L2_CACHE_LINE_128B=y
 
 # RTPS endpoint budget: 2 + 8 MotorState writers and 3 readers here, plus
-# discovery's pair
+# discovery's pair. Two caps apply to writers: the stateless (BEST_EFFORT)
+# pool (1 slot reserved for SPDP) and the per-participant cap (3 builtin
+# discovery writers count against it): 10 user writers need 14 in each.
 CONFIG_RTPS_LIMIT_NUM_STATELESS_WRITERS=14
+CONFIG_RTPS_LIMIT_NUM_WRITERS_PER_PARTICIPANT=14
 CONFIG_RTPS_LIMIT_NUM_STATELESS_READERS=6
 CONFIG_RTPS_LIMIT_MAX_NUM_READER_CALLBACKS=6
 

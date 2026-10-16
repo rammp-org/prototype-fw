@@ -167,18 +167,72 @@ def _list_adapters_windows() -> List[Adapter]:
     return adapters
 
 
+def _list_adapters_posix() -> List[Adapter]:
+    """Adapter names via getifaddrs(3): macOS, Linux and the BSDs.
+
+    ctypes on libc rather than a subprocess: `ifconfig` prints differently on
+    every platform and `ip` is Linux only. Only the IPv4 entries are returned,
+    loopback excluded (never the right adapter for RTPS). The sockaddr layout
+    differs: BSD / macOS start with sa_len (u8) then sa_family (u8), Linux with
+    sa_family (u16); the address is at offset 4 on both.
+    """
+    import ctypes
+    import ctypes.util
+
+    class Ifaddrs(ctypes.Structure):
+        pass
+
+    Ifaddrs._fields_ = [
+        ("ifa_next", ctypes.POINTER(Ifaddrs)),
+        ("ifa_name", ctypes.c_char_p),
+        ("ifa_flags", ctypes.c_uint),
+        ("ifa_addr", ctypes.c_void_p),
+        ("ifa_netmask", ctypes.c_void_p),
+        ("ifa_dstaddr", ctypes.c_void_p),  # a union on Linux, same size
+        ("ifa_data", ctypes.c_void_p),
+    ]
+    libc = ctypes.CDLL(ctypes.util.find_library("c"), use_errno=True)
+    libc.getifaddrs.argtypes = [ctypes.POINTER(ctypes.POINTER(Ifaddrs))]
+    libc.getifaddrs.restype = ctypes.c_int
+    libc.freeifaddrs.argtypes = [ctypes.POINTER(Ifaddrs)]
+    libc.freeifaddrs.restype = None
+    head = ctypes.POINTER(Ifaddrs)()
+    if libc.getifaddrs(ctypes.byref(head)) != 0:
+        return []
+    bsd_sockaddr = sys.platform == "darwin" or sys.platform.startswith(("freebsd", "openbsd",
+                                                                          "netbsd"))
+    IFF_UP, IFF_LOOPBACK = 0x1, 0x8
+    adapters: List[Adapter] = []
+    try:
+        node = head
+        while node:
+            entry = node.contents
+            node = entry.ifa_next
+            if not entry.ifa_addr or entry.ifa_flags & IFF_LOOPBACK:
+                continue
+            raw = ctypes.string_at(entry.ifa_addr, 8)
+            family = raw[1] if bsd_sockaddr else int.from_bytes(raw[0:2], sys.byteorder)
+            if family != socket.AF_INET:
+                continue
+            name = (entry.ifa_name or b"").decode(errors="replace")
+            adapters.append(Adapter(name, socket.inet_ntoa(raw[4:8]),
+                                    bool(entry.ifa_flags & IFF_UP)))
+    finally:
+        libc.freeifaddrs(head)
+    return adapters
+
+
 def list_adapters(only_up: bool = False) -> List[Adapter]:
     """This host's IPv4 addresses, named where the platform allows it.
 
-    Never raises: a platform without the Win32 call, or a struct that does not
+    Never raises: a platform without the native call, or a struct that does not
     match, degrades to bare addresses rather than taking the tool down.
     """
     adapters: List[Adapter] = []
-    if sys.platform == "win32":
-        try:
-            adapters = _list_adapters_windows()
-        except Exception:  # noqa: BLE001 - any failure here is non-fatal
-            adapters = []
+    try:
+        adapters = _list_adapters_windows() if sys.platform == "win32" else _list_adapters_posix()
+    except Exception:  # noqa: BLE001 - any failure here is non-fatal
+        adapters = []
     if not adapters:
         try:
             for info in socket.getaddrinfo(socket.gethostname(), None, socket.AF_INET):

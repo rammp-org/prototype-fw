@@ -30,7 +30,23 @@ public:
   CanBus(const CanBus &) = delete;
   CanBus &operator=(const CanBus &) = delete;
 
+  /// Controller error state and counters (twai_node_get_info()): the quickest
+  /// way to tell a wiring / bitrate problem (REC and bus errors climb while
+  /// nothing answers) from a silent node (counters stay at zero).
+  struct Status {
+    const char *state{"not started"}; ///< error active / warning / passive / bus off
+    uint16_t tx_error_count{0};       ///< TEC
+    uint16_t rx_error_count{0};       ///< REC
+    uint32_t bus_error_count{0};      ///< bus errors seen since start()
+    uint32_t tx_queue_free{0};        ///< free slots in the driver's TX queue
+    bool bus_off{false};              ///< the controller left the bus; see recover()
+  };
+
   bool start(uint32_t bitrate = 1'000'000);
+  Status get_status();
+  /// Start the bus-off recovery sequence (128 x 11 recessive bits); the node
+  /// is back once get_status() reports error active again.
+  bool recover();
   /// Enqueue one frame for transmission. Never waits on wire completion: the
   /// on-chip TWAI TX queue is zero-copy (it stores a pointer to the frame and
   /// reads the buffer from the ISR when the frame actually goes out), so the
@@ -78,6 +94,13 @@ private:
   /// Driver TX queue depth; the ring below must exceed it plus the one frame in
   /// flight so a slot is never reused while the driver may still reference it.
   static constexpr size_t kTxQueueDepth = 8;
+  /// Hardware retransmissions after a lost arbitration or a bus error. The bus
+  /// is multi-master in practice (every CANopen node answers on its own, with
+  /// ids that beat ours), so single-shot (0) silently dropped any request that
+  /// started together with a reply - seen as sporadic SDO timeouts. Bounded,
+  /// so a frame nothing ACKs is given up within about a millisecond instead
+  /// of wedging the queue the way infinite retries (-1) would.
+  static constexpr int8_t kTxRetryLimit = 8;
   // Persistent, driver-referenced TX frames: send() only advances the ring
   // after a successful enqueue. All access is serialized by transmit_mutex_.
   static constexpr size_t kTxRingSize = 16;

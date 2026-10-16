@@ -171,8 +171,10 @@ inline constexpr std::chrono::milliseconds kControlPeriod{20}; // 50 Hz
 /// Wheel status polling period (round-robin, one motor per tick).
 inline constexpr std::chrono::milliseconds kStatusPollPeriod{250}; // 4 Hz: each motor at 1 Hz
 /// Per-status-read reply timeout; bounds how long a poll holds a drive's
-/// transaction mutex (the control loop waits on it for that motor).
-inline constexpr uint32_t kMotorStatusReadTimeoutMs = 20;
+/// transaction mutex (the control loop waits on it for that motor). A healthy
+/// drive answers within a millisecond; a silent one must not eat a whole
+/// control period (kControlPeriod) per poll.
+inline constexpr uint32_t kMotorStatusReadTimeoutMs = 10;
 /// After the joystick has been centered for this long, control falls back to
 /// the local (CLI) setpoint, which is zeroed on the handover.
 inline constexpr std::chrono::milliseconds kJoystickReleaseTimeout{500};

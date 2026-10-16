@@ -83,6 +83,7 @@ bool CanBus::start(uint32_t bitrate) {
   config.io_cfg.bus_off_indicator = GPIO_NUM_NC;
   config.bit_timing.bitrate = bitrate;
   config.tx_queue_depth = kTxQueueDepth;
+  config.fail_retry_cnt = kTxRetryLimit;
 
   esp_err_t error = twai_new_node_onchip(&config, &node_);
   if (error == ESP_OK) {
@@ -147,6 +148,56 @@ bool CanBus::send(const CanFrame &frame, bool wait_for_queue_space) {
   return false;
 }
 
+CanBus::Status CanBus::get_status() {
+  std::lock_guard<std::mutex> lock(lifecycle_mutex_);
+  Status status{};
+  if (node_ == nullptr) {
+    return status;
+  }
+  twai_node_status_t node_status{};
+  twai_node_record_t record{};
+  if (twai_node_get_info(node_, &node_status, &record) != ESP_OK) {
+    status.state = "unknown (get_info failed)";
+    return status;
+  }
+  switch (node_status.state) {
+  case TWAI_ERROR_ACTIVE:
+    status.state = "error active (healthy)";
+    break;
+  case TWAI_ERROR_WARNING:
+    status.state = "error warning (TEC/REC >= 96)";
+    break;
+  case TWAI_ERROR_PASSIVE:
+    status.state = "error passive (TEC/REC >= 128)";
+    break;
+  case TWAI_ERROR_BUS_OFF:
+    status.state = "BUS OFF";
+    status.bus_off = true;
+    break;
+  default:
+    status.state = "unknown";
+    break;
+  }
+  status.tx_error_count = node_status.tx_error_count;
+  status.rx_error_count = node_status.rx_error_count;
+  status.bus_error_count = record.bus_err_num;
+  status.tx_queue_free = node_status.tx_queue_remaining;
+  return status;
+}
+
+bool CanBus::recover() {
+  std::lock_guard<std::mutex> lock(lifecycle_mutex_);
+  if (node_ == nullptr) {
+    return false;
+  }
+  const esp_err_t error = twai_node_recover(node_);
+  if (error != ESP_OK) {
+    logger_.error("CAN bus-off recovery failed: {}", esp_err_to_name(error));
+    return false;
+  }
+  return true;
+}
+
 bool CanBus::flush_pending() {
   std::lock_guard<std::mutex> lock(transmit_mutex_);
   if (node_ == nullptr) {
@@ -154,12 +205,13 @@ bool CanBus::flush_pending() {
   }
   // The driver has no way to drop queued frames (and a disable/enable cycle
   // RESUMES the pending transaction on IDF 6.x, it does not abort it), but the
-  // backlog is bounded: the node transmits single-shot (no hardware retry), so
-  // once a frame reaches the controller it completes or fails within about one
-  // frame time, and the whole backlog (kTxQueueDepth queued + 1 in flight) is
-  // gone within a couple of ms at 1 Mbit/s. Wait that out: the caller's stop
-  // frames then find an empty queue, go out next, and nothing older follows.
-  static constexpr int kDrainTimeoutMs = 5;
+  // backlog is bounded: a frame is retried at most kTxRetryLimit times, so
+  // once it reaches the controller it completes or is given up within
+  // (kTxRetryLimit + 1) frame times (about 1 ms at 1 Mbit/s when nothing
+  // ACKs), and the whole backlog (kTxQueueDepth queued + 1 in flight) within
+  // about 10 ms. Wait that out: the caller's stop frames then find an empty
+  // queue, go out next, and nothing older follows.
+  static constexpr int kDrainTimeoutMs = 15;
   const esp_err_t error = twai_node_transmit_wait_all_done(node_, kDrainTimeoutMs);
   if (error != ESP_OK) {
     logger_.warn("CAN TX queue did not drain within {} ms: {}", kDrainTimeoutMs,
