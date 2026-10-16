@@ -1,0 +1,162 @@
+#pragma once
+
+#include <array>
+#include <atomic>
+#include <cstdint>
+#include <mutex>
+
+#include "base_component.hpp"
+#include "esp_twai.h"
+#include "esp_twai_onchip.h"
+#include "freertos/FreeRTOS.h"
+#include "freertos/queue.h"
+
+struct CanFrame {
+  uint32_t id{0};
+  bool extended{false};
+  bool rtr{false};
+  uint8_t dlc{0};
+  std::array<uint8_t, 8> data{};
+};
+
+/// One on-chip TWAI node shared by every protocol on the bus (CANopen/DS402
+/// drives, RMD motors, ...). Each protocol registers the CAN ids it wants on its
+/// own FreeRTOS queue BEFORE start(); the receive ISR fans every matching frame
+/// out to all registered queues.
+class CanBus : public espp::BaseComponent {
+public:
+  CanBus(gpio_num_t rx_gpio, gpio_num_t tx_gpio);
+  ~CanBus();
+
+  CanBus(const CanBus &) = delete;
+  CanBus &operator=(const CanBus &) = delete;
+
+  /// Controller error state and counters (twai_node_get_info()): the quickest
+  /// way to tell a wiring / bitrate problem (REC and bus errors climb while
+  /// nothing answers) from a silent node (counters stay at zero).
+  struct Status {
+    const char *state{"not started"}; ///< error active / warning / passive / bus off
+    uint16_t tx_error_count{0};       ///< TEC
+    uint16_t rx_error_count{0};       ///< REC
+    uint32_t bus_error_count{0};      ///< bus errors seen since start()
+    uint32_t tx_queue_free{0};        ///< free slots in the driver's TX queue
+    bool bus_off{false};              ///< the controller left the bus; see recover()
+    /// Errors by type since start() (the driver's error callback). Stuff /
+    /// form / bit / CRC-class errors are signal integrity (termination, a
+    /// floating isolated ground, a bad stub); ACK errors mean nobody heard a
+    /// frame we sent; arbitration losses are normal and retried.
+    uint32_t arbitration_lost{0};
+    uint32_t bit_errors{0};
+    uint32_t form_errors{0};
+    uint32_t stuff_errors{0};
+    uint32_t ack_errors{0};
+    uint32_t bus_off_count{0}; ///< times the controller went bus-off since start()
+  };
+
+  bool start(uint32_t bitrate = 1'000'000);
+  Status get_status();
+  /// Drop every pending transmission (the frame in progress and the queue).
+  /// The driver has no abort and disable/enable only pauses, so the node is
+  /// deleted and created again (same pins, bitrate, callbacks; receivers are
+  /// ours and untouched); frames arriving during the few hundred microseconds
+  /// the node is gone are lost. Used by flush_pending() when the queue did
+  /// not drain, i.e. a frame nobody acknowledges is stuck in front.
+  bool abort_pending();
+  /// Start the bus-off recovery sequence (128 x 11 recessive bits); the node
+  /// is back once get_status() reports error active again.
+  bool recover();
+  /// Enqueue one frame for transmission. Never waits on wire completion: the
+  /// on-chip TWAI TX queue is zero-copy (it stores a pointer to the frame and
+  /// reads the buffer from the ISR when the frame actually goes out), so the
+  /// frame is copied into a persistent ring slot (see tx_ring_) rather than a
+  /// stack frame, and a caller is never blocked on an ACK that may never arrive
+  /// (e.g. no motor attached). wait_for_queue_space=true (request/response
+  /// paths, which get their reply through the RX queue) briefly waits for queue
+  /// space so a poll is not dropped under transient pressure; false
+  /// (fire-and-forget set-points from a real-time loop) enqueues non-blocking
+  /// and drops the frame when the queue is full - the next tick supersedes it.
+  bool send(const CanFrame &frame, bool wait_for_queue_space = true);
+  /// Wait (bounded, a few ms at 1 Mbit/s) for every queued frame to leave: a
+  /// mode transition that must not let an older set-point execute after the
+  /// stop frames that follow calls this first, so those go out on an empty
+  /// queue. Returns false if the queue did not drain in time (a wedged
+  /// controller).
+  bool flush_pending();
+  bool register_receiver(uint32_t can_id, QueueHandle_t queue);
+  /// Drop every registration of `queue`, so the RX ISR stops writing to it.
+  /// Call it BEFORE deleting the queue; the slot's pointer is cleared with a
+  /// single store, so a frame the ISR is fanning out at that instant still
+  /// lands on the live queue and nothing later touches the deleted one.
+  void unregister_receiver(QueueHandle_t queue);
+
+private:
+  struct Receiver {
+    uint32_t can_id{0};
+    QueueHandle_t queue{nullptr};
+  };
+
+  static bool on_receive(twai_node_handle_t handle, const twai_rx_done_event_data_t *event,
+                         void *context);
+  /// Create, configure and enable the node (lifecycle_mutex_ held).
+  bool create_node_locked();
+  /// abort_pending() with transmit_mutex_ already held by the caller.
+  bool abort_pending_locked();
+  static bool on_error(twai_node_handle_t handle, const twai_error_event_data_t *event,
+                       void *context);
+  static bool on_state_change(twai_node_handle_t handle,
+                              const twai_state_change_event_data_t *event, void *context);
+  /// Bus-off: start the recovery (at most every 100 ms) and say so (at most
+  /// every 2 s). transmit_mutex_ held. Returns false (the frame is not sent).
+  bool handle_bus_off_locked();
+
+  gpio_num_t rx_gpio_;
+  gpio_num_t tx_gpio_;
+  uint32_t bitrate_{1'000'000};
+  twai_node_handle_t node_{nullptr};
+  std::array<Receiver, 64> receivers_{};
+  /// Guards receivers_ against the RX ISR (on either core): registration and
+  /// deregistration take it, and the ISR fans a frame out while holding it, so
+  /// once unregister_receiver() returns no ISR can still hold the queue handle.
+  mutable portMUX_TYPE receivers_lock_ = portMUX_INITIALIZER_UNLOCKED;
+  std::mutex transmit_mutex_;
+  std::mutex lifecycle_mutex_;
+  /// error counters by type, written from the driver's error ISR
+  std::atomic<uint32_t> arbitration_lost_{0};
+  std::atomic<uint32_t> bit_errors_{0};
+  std::atomic<uint32_t> form_errors_{0};
+  std::atomic<uint32_t> stuff_errors_{0};
+  std::atomic<uint32_t> ack_errors_{0};
+  /// Set by the driver's state-change ISR while the controller is bus-off: a
+  /// burst of failed transmissions (32 in a row, 3 ms with retransmission on
+  /// a bus whose nodes are still powering up) takes the node off the bus and
+  /// the driver does NOT recover it by itself. send() starts the recovery
+  /// (128 x 11 recessive bits, ~1.4 ms at 1 Mbit/s) and the pending frame
+  /// resumes when the node is back.
+  std::atomic<bool> bus_off_{false};
+  std::atomic<uint32_t> bus_off_count_{0};
+  int64_t last_recover_us_{0};
+  int64_t last_bus_off_log_us_{0};
+
+  /// Driver TX queue depth; the ring below must exceed it plus the one frame in
+  /// flight so a slot is never reused while the driver may still reference it.
+  static constexpr size_t kTxQueueDepth = 8;
+  /// Retransmission after a lost arbitration or a bus error: -1 = the CAN
+  /// standard's automatic retransmission. On the classic (SJA1000-style)
+  /// controller of the ESP32-P4 the HAL treats EVERY other value as single
+  /// shot (`.ss = retry_cnt != -1`), and single shot silently dropped any
+  /// request that started together with a slave's reply (ids 0x58x beat our
+  /// 0x60x): one SDO timeout per arbitration loss on the bench. The price of
+  /// -1 is that a frame nothing acknowledges (motor power off) is retried
+  /// forever and blocks the queue; flush_pending() drops it then, see
+  /// abort_pending().
+  static constexpr int8_t kTxRetryForever = -1;
+  // Persistent, driver-referenced TX frames: send() only advances the ring
+  // after a successful enqueue. All access is serialized by transmit_mutex_.
+  static constexpr size_t kTxRingSize = 16;
+  struct TxSlot {
+    twai_frame_t frame{};
+    std::array<uint8_t, 8> payload{};
+  };
+  std::array<TxSlot, kTxRingSize> tx_ring_{};
+  size_t tx_ring_index_{0};
+};

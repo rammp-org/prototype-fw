@@ -1,0 +1,395 @@
+#include "stem_controller.hpp"
+
+#include <algorithm>
+#include <cmath>
+
+namespace stem {
+
+const char *to_string(Pair pair) {
+  switch (pair) {
+  case Pair::Left:
+    return "left";
+  case Pair::Right:
+    return "right";
+  case Pair::Seat:
+    return "seat";
+  }
+  return "?";
+}
+
+std::optional<Pair> pair_from_name(std::string_view name) {
+  if (name == "left")
+    return Pair::Left;
+  if (name == "right")
+    return Pair::Right;
+  if (name == "seat")
+    return Pair::Seat;
+  return std::nullopt;
+}
+
+std::optional<Pair> pair_from_index(uint8_t index) {
+  if (index >= kPairCount)
+    return std::nullopt;
+  return static_cast<Pair>(index);
+}
+
+const char *StemController::to_string(Result result) {
+  switch (result) {
+  case Result::Ok:
+    return "ok";
+  case Result::Unreachable:
+    return "unreachable";
+  case Result::OutOfLimits:
+    return "outside position limits";
+  case Result::ActuatorFailed:
+    return "actuator command failed";
+  case Result::InvalidArgument:
+    return "invalid argument";
+  case Result::ZeroMismatch:
+    return "pair zero mismatch (re-zero required)";
+  }
+  return "?";
+}
+
+StemController::StemController(const Config &config)
+    : espp::BaseComponent("StemController", config.log_level)
+    , config_(config) {
+  for (uint8_t i = 0; i < kPairCount; ++i) {
+    actuator(static_cast<Pair>(i)).set_position_limits(config_.min_deg, config_.max_deg);
+  }
+}
+
+PairedEyouActuator &StemController::actuator(Pair pair) {
+  switch (pair) {
+  case Pair::Left:
+    return config_.left;
+  case Pair::Right:
+    return config_.right;
+  case Pair::Seat:
+    return config_.seat;
+  }
+  return config_.left;
+}
+
+const PairedEyouActuator &StemController::actuator(Pair pair) const {
+  return const_cast<StemController *>(this)->actuator(pair);
+}
+
+float StemController::effective_rpm(float rpm, float fallback) const {
+  if (!std::isfinite(rpm) || rpm <= 0.0f) {
+    rpm = fallback;
+  }
+  return std::clamp(rpm, 0.1f, config_.max_rpm);
+}
+
+std::array<float, kPairCount> StemController::pose_to_pair_deg(const IkSolution &solution) const {
+  // The pairs are mounted so that positive pair rotation is negative crank
+  // rotation (this is the sign convention the original CLI `move` used). The
+  // IK's seat angle keeps the seat level; the tilt offset rides on top of it.
+  return {-solution.theta1_deg, -solution.theta2_deg,
+          -solution.m3_angle_deg + seat_tilt_deg_.load()};
+}
+
+StemController::Result StemController::set_seat_tilt(float tilt_deg, float rpm) {
+  if (!std::isfinite(tilt_deg)) {
+    return Result::InvalidArgument;
+  }
+  std::lock_guard<std::mutex> lock(mutex_);
+  if (zero_mismatch_[static_cast<uint8_t>(Pair::Seat)]) {
+    logger_.error("seat tilt rejected: seat pair zero mismatch");
+    return Result::ZeroMismatch;
+  }
+  // New seat angle: the IK level angle of the current target plus the tilt, or
+  // -- with no target -- the tracked seat angle shifted by the tilt change.
+  const float previous_tilt = seat_tilt_deg_.load();
+  float seat_deg = 0.0f;
+  if (target_valid_) {
+    IkSolution solution{};
+    if (!solve_ik_for_m3_reference(target_x_, target_y_, config_.reference, solution,
+                                   config_.geometry)) {
+      return Result::Unreachable; // cannot happen for an accepted target
+    }
+    seat_deg = -solution.m3_angle_deg + tilt_deg;
+  } else {
+    std::array<float, 2> seat_position{};
+    if (!config_.seat.get_position(seat_position)) {
+      // without the live seat angle the tilt change has no base: a failed
+      // read must not turn a small adjustment into a move to `tilt_deg`
+      logger_.error("seat tilt rejected: could not read the seat pair position");
+      return Result::ActuatorFailed;
+    }
+    seat_deg = seat_position[0] - previous_tilt + tilt_deg;
+  }
+  if (seat_deg < config_.min_deg || seat_deg > config_.max_deg) {
+    logger_.warn("seat tilt {:.1f} deg would put the seat at {:.1f} deg, outside [{}, {}]",
+                 tilt_deg, seat_deg, config_.min_deg, config_.max_deg);
+    return Result::OutOfLimits;
+  }
+  (void)rpm; // EyouMotor moves at its pre-configured profile velocity, not a per-call speed.
+  if (!config_.seat.set_position(seat_deg)) {
+    return Result::ActuatorFailed;
+  }
+  seat_tilt_deg_.store(tilt_deg);
+  logger_.info("seat tilt {:.2f} deg -> seat pair {:.2f} deg", tilt_deg, seat_deg);
+  return Result::Ok;
+}
+
+bool StemController::solve(float x_rel, float y_rel, PoseCommand &out) const {
+  if (!std::isfinite(x_rel) || !std::isfinite(y_rel)) {
+    return false;
+  }
+  IkSolution solution{};
+  if (!solve_ik_for_m3_reference(x_rel, y_rel, config_.reference, solution, config_.geometry)) {
+    return false;
+  }
+  out.x_rel = x_rel;
+  out.y_rel = y_rel;
+  out.solution = solution;
+  out.pair_deg = pose_to_pair_deg(solution);
+  out.within_limits = std::all_of(out.pair_deg.begin(), out.pair_deg.end(), [&](float deg) {
+    return deg >= config_.min_deg && deg <= config_.max_deg;
+  });
+  return true;
+}
+
+StemController::Result StemController::command_pose(const PoseCommand &pose, float rpm) {
+  (void)rpm; // EyouMotor moves at its pre-configured profile velocity, not a per-call speed.
+  bool all_ok = true;
+  for (uint8_t i = 0; i < kPairCount; ++i) {
+    const auto pair = static_cast<Pair>(i);
+    if (!actuator(pair).set_position(pose.pair_deg[i])) {
+      logger_.error("{} pair rejected position {:.2f} deg", stem::to_string(pair),
+                    pose.pair_deg[i]);
+      all_ok = false;
+      break; // no further pair: a partial pose would twist the linkage
+    }
+  }
+  logger_.info("move x={:.1f} y={:.1f} -> left={:.2f} right={:.2f} seat={:.2f} deg{}", pose.x_rel,
+               pose.y_rel, pose.pair_deg[0], pose.pair_deg[1], pose.pair_deg[2],
+               all_ok ? "" : " (PARTIAL FAILURE)");
+  if (!all_ok) {
+    // The pairs no longer agree with any single target: halt the pairs that
+    // were already commanded (the safe policy for a broken pose).
+    stop_unlocked();
+    target_valid_ = false;
+    return Result::ActuatorFailed;
+  }
+  target_valid_ = true;
+  target_x_ = pose.x_rel;
+  target_y_ = pose.y_rel;
+  return Result::Ok;
+}
+
+StemController::Result StemController::move_to(float x_rel, float y_rel, float rpm,
+                                               PoseCommand *out) {
+  if (!std::isfinite(x_rel) || !std::isfinite(y_rel)) {
+    return Result::InvalidArgument;
+  }
+  // Solve, limit-check and command under ONE lock: solve() folds in the seat
+  // tilt, and set_seat_tilt() (which takes this mutex) must not change it
+  // between the solve and the command.
+  std::lock_guard<std::mutex> lock(mutex_);
+  PoseCommand pose{};
+  if (!solve(x_rel, y_rel, pose)) {
+    logger_.warn("move x={:.1f} y={:.1f}: unreachable", x_rel, y_rel);
+    return Result::Unreachable;
+  }
+  if (out) {
+    *out = pose;
+  }
+  if (!pose.within_limits) {
+    logger_.warn("move x={:.1f} y={:.1f}: pair angles ({:.1f}, {:.1f}, {:.1f}) outside [{}, {}]",
+                 x_rel, y_rel, pose.pair_deg[0], pose.pair_deg[1], pose.pair_deg[2],
+                 config_.min_deg, config_.max_deg);
+    return Result::OutOfLimits;
+  }
+  if (any_zero_mismatch_unlocked()) {
+    logger_.error("move x={:.1f} y={:.1f} rejected: pair zero mismatch", x_rel, y_rel);
+    return Result::ZeroMismatch;
+  }
+  return command_pose(pose, rpm);
+}
+
+StemController::Result StemController::home(float rpm, PoseCommand *out) {
+  return move_to(0.0f, 0.0f, rpm, out);
+}
+
+StemController::Result StemController::set_pair(Pair pair, float degrees, float rpm) {
+  if (!std::isfinite(degrees)) {
+    return Result::InvalidArgument;
+  }
+  std::lock_guard<std::mutex> lock(mutex_);
+  if (zero_mismatch_[static_cast<uint8_t>(pair)]) {
+    logger_.error("set {} rejected: pair zero mismatch", stem::to_string(pair));
+    return Result::ZeroMismatch;
+  }
+  (void)rpm; // EyouMotor moves at its pre-configured profile velocity, not a per-call speed.
+  const bool ok = actuator(pair).set_position(degrees);
+  // A single pair moved on its own: the end effector is no longer at a target.
+  target_valid_ = false;
+  logger_.info("set {} -> {:.2f} deg: {}", stem::to_string(pair), degrees, ok ? "ok" : "FAILED");
+  return ok ? Result::Ok : Result::ActuatorFailed;
+}
+
+bool StemController::stop() {
+  std::lock_guard<std::mutex> lock(mutex_);
+  return stop_unlocked();
+}
+
+bool StemController::stop_unlocked() {
+  // EyouMotor has no separate "halt in place" command: disabling the drive is
+  // the closest DS402 primitive (cuts torque, so the pair coasts to a stop).
+  const bool right_ok = config_.right.disable_drive();
+  const bool left_ok = config_.left.disable_drive();
+  const bool seat_ok = config_.seat.disable_drive();
+  logger_.warn("STOP: right={} left={} seat={}", right_ok, left_ok, seat_ok);
+  // the move this interrupted never reached its target: a later seat tilt must
+  // offset the MEASURED seat angle (the Eyou branch of set_seat_tilt), not the
+  // stale final pose of that move
+  target_valid_ = false;
+  return right_ok && left_ok && seat_ok;
+}
+
+bool StemController::release_brakes() {
+  std::lock_guard<std::mutex> lock(mutex_);
+  // EyouMotor has no separate brake relay; enabling the drive is the operative
+  // equivalent (the pair can move again after a stop()/disable_drive()).
+  const bool right_ok = config_.right.enable_drive();
+  const bool left_ok = config_.left.enable_drive();
+  const bool seat_ok = config_.seat.enable_drive();
+  logger_.info("drives enabled: right={} left={} seat={}", right_ok, left_ok, seat_ok);
+  return right_ok && left_ok && seat_ok;
+}
+
+bool StemController::zero(std::optional<Pair> pair, bool align) {
+  std::lock_guard<std::mutex> lock(mutex_);
+  // EyouMotor::zero() always reads the absolute CANopen encoder, so there is no
+  // separate alignment maneuver; `align` is kept only for CLI/protocol compatibility.
+  (void)align;
+  bool ok = true;
+  if (pair.has_value()) {
+    ok = actuator(*pair).zero();
+    logger_.info("{} pair zeroed: {}", stem::to_string(*pair), ok ? "ok" : "FAILED");
+    check_pair_unlocked(*pair);
+  } else {
+    for (uint8_t i = 0; i < kPairCount; ++i) {
+      ok = actuator(static_cast<Pair>(i)).zero() && ok;
+    }
+    logger_.info("all pairs zeroed: {}", ok ? "ok" : "FAILED");
+    for (uint8_t i = 0; i < kPairCount; ++i) {
+      check_pair_unlocked(static_cast<Pair>(i));
+    }
+  }
+  target_valid_ = false;
+  return ok;
+}
+
+bool StemController::save_zero() {
+  std::lock_guard<std::mutex> lock(mutex_);
+  bool ok = true;
+  for (uint8_t i = 0; i < kPairCount; ++i) {
+    ok = actuator(static_cast<Pair>(i)).save_zero() && ok;
+  }
+  logger_.info("all pairs' zero saved to NVS: {}", ok ? "ok" : "FAILED");
+  return ok;
+}
+
+bool StemController::read_zero(std::array<std::array<int32_t, 2>, kPairCount> &zero_offset_pulses) {
+  std::lock_guard<std::mutex> lock(mutex_);
+  bool ok = true;
+  for (uint8_t i = 0; i < kPairCount; ++i) {
+    ok = actuator(static_cast<Pair>(i)).read_zero(zero_offset_pulses[i]) && ok;
+  }
+  return ok;
+}
+
+bool StemController::load_zero() {
+  std::lock_guard<std::mutex> lock(mutex_);
+  bool ok = true;
+  for (uint8_t i = 0; i < kPairCount; ++i) {
+    ok = actuator(static_cast<Pair>(i)).load_zero() && ok;
+  }
+  logger_.info("all pairs' zero loaded from NVS: {}", ok ? "ok" : "FAILED");
+  target_valid_ = false;
+  for (uint8_t i = 0; i < kPairCount; ++i) {
+    check_pair_unlocked(static_cast<Pair>(i));
+  }
+  return ok;
+}
+
+bool StemController::check_pairs() {
+  std::lock_guard<std::mutex> lock(mutex_);
+  bool ok = true;
+  for (uint8_t i = 0; i < kPairCount; ++i) {
+    ok = check_pair_unlocked(static_cast<Pair>(i)) && ok;
+  }
+  return ok;
+}
+
+bool StemController::has_zero_mismatch() const {
+  std::lock_guard<std::mutex> lock(mutex_);
+  return any_zero_mismatch_unlocked();
+}
+
+bool StemController::check_pair_unlocked(Pair pair) {
+  float mismatch_degrees = 0.0f;
+  const bool ok = actuator(pair).check_mirrored(config_.mirror_tolerance_deg, mismatch_degrees);
+  zero_mismatch_[static_cast<uint8_t>(pair)] = !ok;
+  if (!ok) {
+    logger_.error("{} pair zero mismatch: moves are blocked until the pair is re-zeroed",
+                  stem::to_string(pair));
+  }
+  return ok;
+}
+
+bool StemController::any_zero_mismatch_unlocked() const {
+  return std::any_of(zero_mismatch_.begin(), zero_mismatch_.end(), [](bool m) { return m; });
+}
+
+State StemController::snapshot(bool read_motors) {
+  std::lock_guard<std::mutex> lock(mutex_);
+  State state{};
+  state.can_ok = config_.can_ok;
+  state.target_valid = target_valid_;
+  state.target_x = target_x_;
+  state.target_y = target_y_;
+  bool all_pairs_read = true;
+  for (uint8_t i = 0; i < kPairCount; ++i) {
+    std::array<float, 2> position{};
+    if (actuator(static_cast<Pair>(i)).get_position(position, 100)) {
+      state.pair_deg[i] = position[0];
+    } else {
+      all_pairs_read = false; // the entry stays 0: no pose may be derived from it
+    }
+  }
+  state.seat_tilt_deg = seat_tilt_deg_.load();
+  // Measured pair positions -> crank angles (inverse of pose_to_pair_deg) -> pose;
+  // only when every read succeeded (a zeroed entry would draw a false pose)
+  IkSolution fk{};
+  if (all_pairs_read && solve_fk_reference(-state.pair_deg[static_cast<uint8_t>(Pair::Left)],
+                                           -state.pair_deg[static_cast<uint8_t>(Pair::Right)],
+                                           config_.reference, fk, config_.geometry)) {
+    state.pose_valid = true;
+    state.pose_x = fk.m3[0] - config_.reference.x;
+    state.pose_y = fk.m3[1] - config_.reference.y;
+  }
+  state.motors_ok = read_motors;
+  const size_t count = std::min(config_.motors.size(), kMotorCount);
+  for (size_t i = 0; i < count; ++i) {
+    auto &motor = config_.motors[i];
+    auto &telemetry = state.motors[i];
+    telemetry.id = motor.node_id();
+    if (read_motors) {
+      float position_degrees = 0.0f;
+      const bool position_ok = motor.get_position(position_degrees, 50);
+      const bool statusword_ok = motor.get_statusword(telemetry.statusword, 50);
+      const bool error_code_ok = motor.get_error_code(telemetry.error_code, 50);
+      telemetry.tracked_deg = position_degrees;
+      telemetry.ok = position_ok && statusword_ok && error_code_ok;
+      state.motors_ok = state.motors_ok && telemetry.ok;
+    }
+  }
+  return state;
+}
+
+} // namespace stem
