@@ -133,6 +133,29 @@ public:
   /// (elevation m, tilts deg). Each corner is clamped on its own, so a pose
   /// outside the reach is approximated. Same refusals as above.
   bool request_pose(const Pose &pose);
+
+  /// What request_pose() WOULD do, without queueing anything: the same
+  /// geometry, clamps and refusals, laid out per corner. For checking the
+  /// kinematics against the real linkages before trusting `pose`.
+  struct CornerPlan {
+    bool measured_valid{false};    ///< a fresh position is known
+    float measured_deg{0.0f};      ///< where the corner is now
+    float measured_height_m{0.0f}; ///< ... and the height the model gives that angle
+    float raw_target_deg{0.0f};    ///< the geometry's answer before the range clamp
+    float target_deg{0.0f};        ///< what would be sent (after the clamp)
+    float target_height_m{0.0f};   ///< the height the model gives the target
+    float delta_deg{0.0f};         ///< target - measured
+    bool clamped{false};           ///< raw target was outside the corner's range
+    bool out_of_range{false};      ///< the corner itself is outside its range (refused)
+  };
+  struct PosePlan {
+    Pose requested{};
+    Pose measured{};  ///< the pose the current angles describe
+    Pose resulting{}; ///< the pose the (clamped) targets would describe
+    std::array<CornerPlan, pear::kCornerCount> corners{};
+    const char *refusal{nullptr}; ///< why request_pose() would refuse, or nullptr
+  };
+  PosePlan plan_pose(const Pose &pose) const;
   /// One component of the pose the HMI's seat rows adjust.
   enum class PoseComponent { ELEVATION, FB_TILT, LATERAL_TILT };
   /// Replace one component of the DESIRED pose (the last requested pose, or

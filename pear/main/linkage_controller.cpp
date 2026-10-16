@@ -258,6 +258,50 @@ bool LinkageController::request_pose_component(PoseComponent component, float va
   return commit_pose_locked(pose);
 }
 
+LinkageController::PosePlan LinkageController::plan_pose(const Pose &pose) const {
+  PosePlan plan;
+  plan.requested = pose;
+  if (!pear::geometry::is_finite(pose)) {
+    plan.refusal = "the pose is not finite";
+    return plan;
+  }
+  std::lock_guard<std::mutex> lock(mutex_);
+  plan.measured = measured_pose_locked();
+  const Corners raw = pear::geometry::corner_angles_from_pose(geometry_, pose);
+  Corners targets{};
+  for (const Corner corner : pear::kCorners) {
+    auto &c = plan.corners[pear::index(corner)];
+    const auto &status = motor_status_[pear::index(corner)];
+    c.measured_valid = status.valid && !status.stale;
+    c.measured_deg = status.position_degrees;
+    c.measured_height_m = pear::geometry::height_from_angle(geometry_, corner, c.measured_deg);
+    c.raw_target_deg = raw[corner];
+    // corner_angles_from_pose already clamps to the corner's range; say so
+    const float unclamped =
+        geometry_.level_angle_deg[corner] +
+        pear::geometry::rad_to_deg(
+            std::asin(std::clamp(pear::geometry::corner_heights_from_pose(geometry_, pose)[corner] /
+                                     std::max(geometry_.crank_length_m, 1e-6f),
+                                 -1.0f, 1.0f)));
+    c.raw_target_deg = unclamped;
+    c.target_deg = std::clamp(unclamped, min_deg_[corner], max_deg_[corner]);
+    c.clamped = c.target_deg != unclamped;
+    c.target_height_m = pear::geometry::height_from_angle(geometry_, corner, c.target_deg);
+    c.delta_deg = c.target_deg - c.measured_deg;
+    c.out_of_range = out_of_range_locked(corner);
+    targets[corner] = c.target_deg;
+  }
+  plan.resulting = pear::geometry::pose_from_corner_angles(geometry_, targets);
+  for (const Corner corner : pear::kCorners) {
+    if (plan.corners[pear::index(corner)].out_of_range) {
+      plan.refusal = "a corner is outside its range (jog it back first)";
+      return plan;
+    }
+  }
+  plan.refusal = refusal_reason_locked();
+  return plan;
+}
+
 bool LinkageController::request_pose(const Pose &pose) {
   if (!pear::geometry::is_finite(pose)) {
     logger_.error_rate_limited("Rejecting a non-finite pose request");

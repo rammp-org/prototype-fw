@@ -261,6 +261,8 @@ cd pear/test && c++ -std=c++20 -I../main linkage_geometry_test.cpp && ./a.out
 | `zero <fr\|fl\|br\|bl\|all>` | software zero = current position (`save_zero` to persist) |
 | `save_zero` / `load_zero` | the linkage zeros in NVS |
 | `reset_fault <corner\|all>` | clear the DS402 fault of a corner's wheel + linkage |
+| `plan <elev_mm> <fb_deg> <lat_deg>` | dry run of `pose`: per-corner targets, heights, deltas, clamps and whether it would be refused; nothing moves |
+| `heights` | each corner's measured angle, range, level angle and the height the model derives from it |
 | `status` | link, drive, wheel and linkage state |
 | `diag` | the diagnostics rows as the HMI shows them |
 

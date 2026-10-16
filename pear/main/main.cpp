@@ -425,6 +425,64 @@ extern "C" void app_main(void) {
       },
       "Move the four linkages to a base pose: pose <elev_mm> <fb_deg> <lat_deg>");
   root_menu->Insert(
+      "plan",
+      [&linkage](std::ostream &out, float elevation_mm, float fb_deg, float lat_deg) {
+        // the dry run: everything `pose` would compute and send, nothing moves
+        const auto plan = linkage.plan_pose({.elevation_m = elevation_mm * 0.001f,
+                                             .fb_tilt_deg = fb_deg,
+                                             .lateral_tilt_deg = lat_deg});
+        const auto pose_line = [&out](const char *name, const LinkageController::Pose &p) {
+          out << name << " elev " << p.elevation_m * 1000.0f << " mm, fb " << p.fb_tilt_deg
+              << " deg, lat " << p.lateral_tilt_deg << " deg\n";
+        };
+        pose_line("requested:", plan.requested);
+        pose_line("measured: ", plan.measured);
+        pose_line("resulting:", plan.resulting);
+        out << "corner  now(deg)  height(mm)  ->  target(deg)  height(mm)   delta(deg)\n";
+        for (const pear::Corner corner : pear::kCorners) {
+          const auto &c = plan.corners[pear::index(corner)];
+          out << "  " << pear::corner_name(corner) << "   ";
+          if (c.measured_valid)
+            out << c.measured_deg << "  " << c.measured_height_m * 1000.0f;
+          else
+            out << "(no fresh position)";
+          out << "  ->  " << c.target_deg << "  " << c.target_height_m * 1000.0f << "   "
+              << (c.delta_deg >= 0 ? "+" : "") << c.delta_deg
+              << (c.clamped ? "  [CLAMPED from " : "")
+              << (c.clamped ? std::to_string(c.raw_target_deg) + " deg]" : "")
+              << (c.out_of_range ? "  [OUT OF RANGE now]" : "") << "\n";
+        }
+        out << (plan.refusal ? std::string("`pose` would be REFUSED: ") + plan.refusal
+                             : std::string("`pose` would queue these targets"))
+            << " (nothing was commanded)\n";
+      },
+      "Dry run of `pose`: print the target angle per corner, the resulting pose and whether it "
+      "would be refused, without moving anything: plan <elev_mm> <fb_deg> <lat_deg>");
+  root_menu->Insert(
+      "heights",
+      [&linkage](std::ostream &out) {
+        // the model's view of where the corners are now: a wrong level angle
+        // or direction shows up here as an implausible height
+        const auto plan = linkage.plan_pose({});
+        out << "corner  angle(deg)  range(deg)        level(deg)  height(mm)\n";
+        const auto state = linkage.state();
+        for (const pear::Corner corner : pear::kCorners) {
+          const auto &c = plan.corners[pear::index(corner)];
+          out << "  " << pear::corner_name(corner) << "   ";
+          if (c.measured_valid)
+            out << c.measured_deg;
+          else
+            out << "(no fresh position)";
+          out << "   [" << state.min_deg[corner] << ", " << state.max_deg[corner] << "]   "
+              << hw_config::kLinkageCornerLevelDeg[corner] << "   " << c.measured_height_m * 1000.0f
+              << (c.out_of_range ? "   [OUT OF RANGE]" : "") << "\n";
+        }
+        out << "pose the model reads from these: elev " << plan.measured.elevation_m * 1000.0f
+            << " mm, fb " << plan.measured.fb_tilt_deg << " deg, lat "
+            << plan.measured.lateral_tilt_deg << " deg\n";
+      },
+      "Print each corner's measured angle, range, level angle and the height the model derives");
+  root_menu->Insert(
       "zero",
       [&linkage](std::ostream &out, const std::string &which) {
         std::optional<pear::Corner> corner;
