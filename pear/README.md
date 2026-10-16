@@ -126,6 +126,12 @@ only DISABLED (CLI `disable`) powers the stage off deliberately, and the next
   be overtaken by an in-flight drive command; a stop first drains the CAN TX
   queue (`CanBus::flush_pending`) so no older set-point follows the zeros.
 - Wheel speeds are scaled together so none exceeds `kMaxWheelRpm`.
+- Rotation: every commanded chassis rate (joystick twist and `speed ... w`) is
+  multiplied by `kTwistRotationScale` (20) before the kinematics, because with
+  the configured 30 deg wheel angles on this footprint the model gives the
+  wheels only 6 % of the lever arm (the holodeck's calibration of the same
+  mismatch). The profile rotation limits (3 / 6 / 9 RPM) are therefore nominal
+  until the wheel angle and footprint are measured and the scale set to 1.
 - **Linkage interlock**: a linkage move is refused while the drive controller is
   in DRIVE (the spec lets the HMI command seat rows only while `IDLE`; the CLI
   follows the same rule), and while any linkage motor is not initialized / not

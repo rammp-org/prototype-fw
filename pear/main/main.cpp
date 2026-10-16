@@ -344,7 +344,9 @@ extern "C" void app_main(void) {
         drive.set_gui_velocity(vx_mps, vy_mps, w_rpm);
         const auto state = drive.state();
         out << "Setpoint: vx=" << state.gui_vx_mps << " m/s vy=" << state.gui_vy_mps
-            << " m/s (+ = right) w=" << state.gui_w_rpm << " RPM (clamped to limits).\n";
+            << " m/s (+ = right) w=" << state.gui_w_rpm << " RPM (clamped to the profile's limits; "
+            << "the kinematics see w x " << state.twist_rotation_scale
+            << ", hw_config::kTwistRotationScale).\n";
         if (!state.enabled)
           out << "Not in DRIVE; `enable` to apply.\n";
         else if (state.source == DriveController::Source::JOYSTICK)

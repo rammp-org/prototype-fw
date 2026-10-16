@@ -315,16 +315,21 @@ bool DriveController::control_step() {
         // the joystick input is left-positive; the controller (and the platform)
         // frame is right-positive, so convert here
         vy = -joystick_left_ * max_speed_mps_;
-        // The twist scale deliberately lets the commanded rate exceed the
-        // nominal rotation limit (the per-wheel max_wheel_rpm scaling below
-        // still bounds the motors): the platform's rotation authority is much
-        // weaker than translation, so the twist axis needs its own gain.
-        w = joystick_ccw_ * max_rotation_rpm_ * twist_rotation_scale_;
+        w = joystick_ccw_ * max_rotation_rpm_;
       } else {
         vx = gui_vx_mps_;
         vy = gui_vy_mps_;
         w = gui_w_rpm_;
       }
+      // The rotation scale applies to EVERY source (joystick and console
+      // alike, so `speed 0 0 w` turns like the pad does) and deliberately lets
+      // the rate fed to the kinematics exceed the nominal rotation limit (the
+      // per-wheel max_wheel_rpm scaling below still bounds the motors): with
+      // the configured wheel angles the model's rotation authority is a few
+      // percent of the lever arm, so without it a chassis RPM is a fraction
+      // of a wheel RPM. It is a calibration for geometry that is not yet
+      // measured; see hw_config::kTwistRotationScale.
+      w *= twist_rotation_scale_;
       vx_mps_ = vx;
       vy_mps_ = vy;
       w_rpm_ = w;

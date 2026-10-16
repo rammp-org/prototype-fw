@@ -227,10 +227,20 @@ inline constexpr ProfileLimits kProfileLow{0.5f, 3.0f};
 inline constexpr ProfileLimits kProfileNormal{1.0f, 6.0f};
 inline constexpr ProfileLimits kProfileHigh{1.5f, 9.0f};
 
-/// Scale applied to the rotation rate commanded from the joystick TWIST axis
-/// (twist * scale * max-rotation). Tuned on the holodeck (see
-/// kWheelNodeIdsByPlatformWheel); wheel commands stay bounded by kMaxWheelRpm
-/// regardless.
+/// Scale applied to every commanded chassis rotation rate (joystick twist and
+/// the console's `speed ... w` alike) before the kinematics; wheel commands
+/// stay bounded by kMaxWheelRpm regardless. Why it exists: a wheel's share of
+/// a rotation is (half_length * sin(angle) - half_width * cos(angle)) metres
+/// per radian, and with the configured 30 deg wheels on this footprint that is
+/// 0.028 m/rad - 6 % of the 0.486 m lever arm (the two terms cancel at
+/// atan(W/L) = 33 deg) - so a chassis RPM asks for a fraction of a wheel RPM
+/// and the drives barely move. The base demonstrably turns faster than that
+/// model, which means the wheel angle and / or footprint in this file are not
+/// PEAR's; this is the holodeck's calibration of the same mismatch.
+/// TODO(hardware): measure the wheels' rolling direction relative to forward
+/// and the contact-point rectangle, fix kWheelAnglesDegrees / kHalfLengthM /
+/// kHalfWidthM, then set this back to 1 (the profile limits become real
+/// chassis RPM again).
 inline constexpr float kTwistRotationScale = 20.0f;
 
 /////////////////////////////////////////////////////////////////////////////
