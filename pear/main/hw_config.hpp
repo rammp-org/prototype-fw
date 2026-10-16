@@ -136,8 +136,8 @@ inline constexpr Ds402VelocityMotor::Config kWheelDriveConfig = {
 /// must cover [min, max].
 inline constexpr float kLinkageCrankLengthM = 0.15f;
 inline constexpr float kLinkageLevelAngleDeg = 0.0f;
-inline constexpr float kLinkageAngleMinDeg = -30.0f;
-inline constexpr float kLinkageAngleMaxDeg = 60.0f;
+inline constexpr float kLinkageAngleMinDeg = -60.0f;
+inline constexpr float kLinkageAngleMaxDeg = -30.0f;
 
 inline constexpr pear::geometry::Geometry kLinkageGeometry = {
     .half_length_m = kHalfLengthM,

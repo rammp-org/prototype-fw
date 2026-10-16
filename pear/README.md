@@ -157,8 +157,10 @@ only DISABLED (CLI `disable`) powers the stage off deliberately, and the next
 - **Wheel ramps** `kWheelAccelerationRps2` / `kWheelDecelerationRps2` 2 rev/s²,
   `kWheelMaxSpeedRpm` 0 (drive's own).
 - **Linkage 4-bar** `kLinkageCrankLengthM` 0.15, `kLinkageLevelAngleDeg` 0,
-  `kLinkageAngleMinDeg` -30, `kLinkageAngleMaxDeg` 60 (the seat-axis rows L1..L4
-  allow -30..60 deg; keep them covering the range), the motion profile
+  `kLinkageAngleMinDeg` -60, `kLinkageAngleMaxDeg` -30. These are the request
+  clamp; the seat-axis rows L1..L4 in the spec patch are the HMI's jog range
+  and must cover them (the firmware warns at boot if they do not; it does not
+  clamp to the rows), the motion profile
   `kLinkageProfile` 60 deg/s, 20 deg/s². The model assumes a parallelogram
   4-bar: height = crank · sin(angle − level); see `linkage_geometry.hpp`.
 - **Zero**: with every linkage at its level position run `zero all` then

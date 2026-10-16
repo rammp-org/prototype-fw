@@ -27,14 +27,21 @@ LinkageController::LinkageController(const Config &config)
                      .priority = 5}) {
   for (const Corner corner : pear::kCorners) {
     motor_status_[pear::index(corner)].id = motors_[pear::index(corner)].node_id();
-    // the request clamp is the intersection of the table row and the geometry
-    min_deg_[corner] = std::max(config.table_min_deg[corner], geometry_.min_angle_deg);
-    max_deg_[corner] = std::min(config.table_max_deg[corner], geometry_.max_angle_deg);
-    if (min_deg_[corner] > max_deg_[corner]) {
-      logger_.error("Corner {}: the seat-axis table range [{}, {}] and the geometry range [{}, "
-                    "{}] do not overlap; the corner cannot be commanded",
-                    pear::corner_name(corner), config.table_min_deg[corner],
-                    config.table_max_deg[corner], geometry_.min_angle_deg, geometry_.max_angle_deg);
+    // The hardware (hw_config geometry) is the request clamp. The seat-axis
+    // table row is what the HMI shows and jogs within: it must cover the
+    // geometry, or the HMI cannot reach part of the range (it does not widen
+    // the clamp either way). An intersection of the two used to be the clamp,
+    // which silently pinned every target when the ranges barely overlapped.
+    min_deg_[corner] = geometry_.min_angle_deg;
+    max_deg_[corner] = geometry_.max_angle_deg;
+    if (config.table_min_deg[corner] > geometry_.min_angle_deg ||
+        config.table_max_deg[corner] < geometry_.max_angle_deg) {
+      logger_.warn("Corner {}: the seat-axis table row allows [{}, {}] deg but the geometry is "
+                   "[{}, {}] deg: the HMI's L{} jog cannot reach the whole range - update "
+                   "RAMMP_SEAT_AXIS_TABLE (pear/spec/rammp-rtps-pear.patch)",
+                   pear::corner_name(corner), config.table_min_deg[corner],
+                   config.table_max_deg[corner], geometry_.min_angle_deg, geometry_.max_angle_deg,
+                   pear::index(corner) + 1);
     }
   }
 }

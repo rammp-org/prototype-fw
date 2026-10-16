@@ -82,7 +82,8 @@ public:
     pear::geometry::Geometry geometry{};        ///< 4-bar model + angle range.
     EyouMotor::ProfilePositionConfig profile{}; ///< Motion profile for every motor.
     /// Min / max angle (deg) the RTPS seat-axis row of each corner allows; the
-    /// request clamp is the intersection with the geometry's range.
+    /// HMI's display / jog range; the request clamp is the geometry's range,
+    /// and a row that does not cover it is warned about at construction.
     Corners table_min_deg{};
     Corners table_max_deg{};
     /// True while the base is driving (DRIVE); linkage moves are refused then.
