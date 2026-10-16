@@ -66,25 +66,24 @@ inline constexpr float kHalfWidthM = 0.267f;
 inline constexpr float kWheelDiameterM = 0.21f;
 /// Wheel drive directions in HoloDeckPlatform wheel order (TL, TR, BL, BR).
 inline constexpr std::array<float, 4> kWheelAnglesDegrees = {30.0f, 150.0f, -30.0f, -150.0f};
-/// Per-wheel direction sign in HoloDeckPlatform wheel order (+1 / -1).
-inline constexpr std::array<float, 4> kWheelDirections = {1.0f, 1.0f, 1.0f, 1.0f};
+/// Per-wheel direction sign in HoloDeckPlatform wheel order (+1 / -1): -1 on
+/// every wheel, i.e. a positive L2DB set-point drives each wheel opposite to
+/// the model's drive direction (bench: forward needs FR/BR positive and FL/BL
+/// negative, which is the model's pattern negated).
+inline constexpr std::array<float, 4> kWheelDirections = {-1.0f, -1.0f, -1.0f, -1.0f};
 
-/// Which wheel-drive node each HoloDeckPlatform wheel (TL, TR, BL, BR) commands.
+/// Which wheel-drive node each HoloDeckPlatform wheel (TL, TR, BL, BR) commands:
+/// the platform's own geometry, TL -> FL(1), TR -> FR(2), BL -> BL(4),
+/// BR -> BR(3) (+x forward, +y left).
 ///
-/// This is the holodeck's hardware-tuned mapping ({2, 4, 3, 1}, together with
-/// the wheel angles, direction signs and the twist scale above / below) and the
-/// PEAR wheel ids were assigned to match the holodeck's, so it reproduces the
-/// holodeck's driving behaviour as long as node 2/1/3/4 sit at the same
-/// corners on PEAR (FR/FL/BR/BL). Read against kWheelNodeIds it says
-/// TL -> FR(2), TR -> BL(4), BL -> BR(3), BR -> FL(1), which is NOT the
-/// platform's own geometric naming (that would be TL -> FL(1), TR -> FR(2),
-/// BL -> BL(4), BR -> BR(3) with +y = left): the holodeck never documented
-/// which physical corner each id is at, and its weak rotation authority (the
-/// 20x twist scale) hints the ids and angles compensate each other.
-/// TODO(hardware): on the kit, `enable` then `speed 0.2 0 0` must roll the base
-/// straight forward, `speed 0 0.2 0` straight right, `speed 0 0 3` turn
-/// counter-clockwise; if not, fix this table (or kWheelDirections) first.
-inline constexpr std::array<size_t, 4> kWheelNodeIdsByPlatformWheel = {2, 4, 3, 1};
+/// The holodeck's hardware-tuned {2, 4, 3, 1} was carried over first: it drove
+/// forward correctly (the right-side wheels in the left-side slots keep the
+/// forward sign), but strafing made the two sides fight and twisting was
+/// weak and reversed - exactly what the model predicts when the right wheels
+/// use the left slots' angles and lever arms. Verified on the PEAR bench
+/// 2026-10-16: forward and strafe patterns; twist to confirm (`speed 0 0 3`
+/// must turn counter-clockwise, at a sensible rate).
+inline constexpr std::array<size_t, 4> kWheelNodeIdsByPlatformWheel = {1, 2, 4, 3};
 
 inline constexpr HoloDeckPlatform::Configuration kPlatformConfiguration = {
     .wheel_diameter_m = kWheelDiameterM,
