@@ -176,9 +176,12 @@ only DISABLED (CLI `disable`) powers the stage off deliberately, and the next
 - **Linkage 4-bar** `kLinkageCrankLengthM` 0.15, `kLinkageLevelAngleDeg` 0,
   per corner (`pear::Corner` order FR, FL, BR, BL): `kLinkageCornerMinDeg` /
   `kLinkageCornerMaxDeg` (the request clamp and the pose solver's range) and
-  `kLinkageCornerLevelDeg` (the crank angle at the level height; **placeholders
-  = the middle of each range until measured**, and `pose` / the M1..M3 rows
-  are only right once they are), `kLinkageDirection` per corner (+1: a
+  `kLinkageLevelAboveMinDeg` (ONE number for the base: how far above a
+  corner's range minimum, the bottom stop, the module is level - the four
+  4-bars are the same mechanism and the per-corner ranges already carry the
+  mounting offsets, so each corner's level angle is its minimum plus this;
+  **a placeholder until measured** with `heights`, and `pose` / the M1..M3
+  rows are only right once it is), `kLinkageDirection` per corner (+1: a
   positive motor angle raises the module, -1: the motor is mirrored; FR/BL one
   way, FL/BR the other - every angle in the firmware, CLI and HMI rows is in
   the "positive = up" frame). The corners differ because the motors were

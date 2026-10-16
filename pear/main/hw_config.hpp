@@ -134,15 +134,31 @@ inline constexpr Ds402VelocityMotor::Config kWheelDriveConfig = {
 /// has its own level angle and range, in pear::Corner order FR, FL, BR, BL.
 /// A corner whose measured angle is outside its range is reported as an ERROR
 /// and refuses every move except a jog (kLinkageJogMaxDeg).
-/// TODO(hardware): the crank length is a placeholder; the LEVEL angles are
-/// placeholders (the middle of each range) until measured - the pose solver
-/// (`pose`, the M1..M3 rows) is only right once they are; the ranges are
-/// PEAR v0's as measured.
+/// TODO(hardware): the crank length is a placeholder; the ranges are PEAR
+/// v0's as measured (make sure every corner's MINIMUM is the same mechanical
+/// reference, the bottom stop); kLinkageLevelAboveMinDeg is a placeholder
+/// until measured - the pose solver (`pose`, the M1..M3 rows) is only right
+/// once it is.
 inline constexpr float kLinkageCrankLengthM = 0.15f;
 inline constexpr pear::geometry::Corners kLinkageCornerMinDeg = {{-80.0f, 60.0f, 30.0f, -170.0f}};
 inline constexpr pear::geometry::Corners kLinkageCornerMaxDeg = {{60.0f, 170.0f, 170.0f, -40.0f}};
-inline constexpr pear::geometry::Corners kLinkageCornerLevelDeg = {
-    {-10.0f, 115.0f, 100.0f, -105.0f}};
+/// Where the module is level, as an angle ABOVE the corner's range minimum
+/// (the bottom stop). The four 4-bars are the same mechanism, so this is one
+/// number for the base: the per-corner ranges already carry the mounting
+/// offsets (where the motor sits and the angle it read when mounted), and a
+/// corner's level angle is simply its range minimum plus this. Measure once:
+/// bring one corner to level and read `heights` ("above min" column).
+/// TODO(hardware): measured value.
+inline constexpr float kLinkageLevelAboveMinDeg = 65.0f;
+
+constexpr pear::geometry::Corners linkage_level_from_ranges() {
+  pear::geometry::Corners level{};
+  for (size_t i = 0; i < pear::kCornerCount; ++i)
+    level.values[i] = kLinkageCornerMinDeg.values[i] + kLinkageLevelAboveMinDeg;
+  return level;
+}
+/// Per-corner level angles, derived from the ranges (see above).
+inline constexpr pear::geometry::Corners kLinkageCornerLevelDeg = linkage_level_from_ranges();
 
 inline constexpr pear::geometry::Geometry kLinkageGeometry = {
     .half_length_m = kHalfLengthM,

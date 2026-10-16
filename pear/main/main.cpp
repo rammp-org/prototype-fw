@@ -464,19 +464,22 @@ extern "C" void app_main(void) {
         // the model's view of where the corners are now: a wrong level angle
         // or direction shows up here as an implausible height
         const auto plan = linkage.plan_pose({});
-        out << "corner  angle(deg)  range(deg)        level(deg)  height(mm)\n";
+        out << "corner  angle(deg)  above min(deg)  range(deg)        level(deg)  height(mm)\n";
         const auto state = linkage.state();
         for (const pear::Corner corner : pear::kCorners) {
           const auto &c = plan.corners[pear::index(corner)];
           out << "  " << pear::corner_name(corner) << "   ";
           if (c.measured_valid)
-            out << c.measured_deg;
+            out << c.measured_deg << "   " << c.measured_deg - state.min_deg[corner];
           else
             out << "(no fresh position)";
           out << "   [" << state.min_deg[corner] << ", " << state.max_deg[corner] << "]   "
               << hw_config::kLinkageCornerLevelDeg[corner] << "   " << c.measured_height_m * 1000.0f
               << (c.out_of_range ? "   [OUT OF RANGE]" : "") << "\n";
         }
+        out << "level = range minimum + " << hw_config::kLinkageLevelAboveMinDeg
+            << " deg (hw_config::kLinkageLevelAboveMinDeg): with one corner level, its "
+               "\"above min\" is the value to put there\n";
         out << "pose the model reads from these: elev " << plan.measured.elevation_m * 1000.0f
             << " mm, fb " << plan.measured.fb_tilt_deg << " deg, lat "
             << plan.measured.lateral_tilt_deg << " deg\n";
