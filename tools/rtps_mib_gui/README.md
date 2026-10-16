@@ -6,14 +6,26 @@ exists. It is the mirror image of `pace-hmi-fw/scripts/rtps_mcb_gui.py`, which
 plays the MIB for the real joystick: this tool subscribes to everything the MIB
 publishes and publishes everything the joystick would.
 
-Stdlib only (tkinter for the window). Python 3.10+.
+Python 3.10+. The RTPS side is stdlib only; the window is Qt (PySide6, or
+PyQt6 if that is what is installed), so `--headless` and `--self-test` need no
+third-party package.
 
 ## Running
 
+Once, a virtual environment with PySide6 (Homebrew's Python refuses `pip
+install` outside one):
+
 ```sh
-python3 tools/rtps_mib_gui/rtps_mib_gui.py --peer <mib-ip>
-python3 tools/rtps_mib_gui/rtps_mib_gui.py --peer <mib-ip> --advertised-address <this-pc-ip>
-python3 tools/rtps_mib_gui/rtps_mib_gui.py --headless --peer <mib-ip>    # over ssh
+python3 -m venv ~/.venvs/rammp && ~/.venvs/rammp/bin/pip install PySide6
+```
+
+Then:
+
+```sh
+V=~/.venvs/rammp/bin/python
+$V tools/rtps_mib_gui/rtps_mib_gui.py --peer <mib-ip>
+$V tools/rtps_mib_gui/rtps_mib_gui.py --peer <mib-ip> --advertised-address <this-pc-ip>
+python3 tools/rtps_mib_gui/rtps_mib_gui.py --headless --peer <mib-ip>    # over ssh, any python3
 python3 tools/rtps_mib_gui/rtps_mib_gui.py --self-test                   # no network
 python3 tools/rtps_mib_gui/rtps_mib_gui.py --list-interfaces
 ```
@@ -53,14 +65,19 @@ to the board, not the one that reaches the internet. Detect tries the saved
 address, `espressif` / `espressif.local`, then listens for multicast; Scan
 sweeps a subnet with discovery probes.
 
-## Python with Tk
+## Files
 
-The GUI needs a Python with `tkinter` **8.6 or newer**. Homebrew's `python3`
-ships without it (`ModuleNotFoundError: No module named '_tkinter'`):
-`brew install python-tk@3.14` (match your Homebrew Python version, `python3
---version`). Apple's interpreter (`/usr/bin/python3`, Xcode's Python 3.9) has
-tkinter, but its Tk 8.5 opens a window that stays blank on current macOS, so
-the tool refuses it. `--headless` and `--self-test` work with any Python 3.10+.
+| File | What |
+| --- | --- |
+| `rtps_mib_gui.py` | entry point: flags, `--headless`, `--self-test` |
+| `mib_window_qt.py` | the Qt window (PySide6 / PyQt6) |
+| `mib_bench.py` | the model: `MibBench` harness thread, the virtual `Stick`, formatters |
+| `rammp_spec.py` | the spec, parsed from the rammp-rtps headers; the XCDR1 codec |
+| `rtps_host.py`, `rtps_net.py` | the RTPS harness and adapter / discovery helpers (vendored from pace-hmi-fw) |
+
+The window was tkinter until October 2026: Apple's Tk 8.5 (Xcode's
+`/usr/bin/python3`) draws a blank window on current macOS and Homebrew's
+Python has no Tk at all, so it moved to Qt.
 
 ## Panels and what they are on the wire
 
