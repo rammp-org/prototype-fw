@@ -139,6 +139,17 @@ only DISABLED (CLI `disable`) powers the stage off deliberately, and the next
   retried until it does.
 - A wheel or linkage DS402 fault is shown in MibStatus (`ERROR`, motor named) and
   in that motor's MotorState (`FAULT`); `reset_fault` on the console clears it.
+- **A linkage outside its range** (after a limit change, before zeroing, or
+  pushed) is an `ERROR` in MibStatus ("Linkage X out of range", `status` shows
+  `[OUT OF RANGE: jog only]`) and refuses every `link` / `pose` / seat command,
+  since clamping such a corner to a limit would move it many degrees at once.
+  The only move it takes is a **jog**: `jog <corner> <deg>` on the console
+  (at most `kLinkageJogMaxDeg` = 1 deg, relative to the measured angle, not
+  clamped - the motor's own limit still bounds it), or from the HMI / bench
+  tool a SeatCommand within 1 deg of the value the MIB last reported (the
+  bench tool's -0.5 / +0.5 jog buttons; it refuses to step or jog from a
+  value older than 1 s). Positions reach the HMI through a 100 ms round-robin
+  poll (each corner at 2.5 Hz) and MibStatus every 500 ms.
 
 ## Geometry placeholders to fill (hw_config.hpp, all `TODO(hardware)`)
 
@@ -157,10 +168,14 @@ only DISABLED (CLI `disable`) powers the stage off deliberately, and the next
 - **Wheel ramps** `kWheelAccelerationRps2` / `kWheelDecelerationRps2` 2 rev/s²,
   `kWheelMaxSpeedRpm` 0 (drive's own).
 - **Linkage 4-bar** `kLinkageCrankLengthM` 0.15, `kLinkageLevelAngleDeg` 0,
-  `kLinkageAngleMinDeg` -60, `kLinkageAngleMaxDeg` -30. These are the request
-  clamp; the seat-axis rows L1..L4 in the spec patch are the HMI's jog range
-  and must cover them (the firmware warns at boot if they do not; it does not
-  clamp to the rows), the motion profile
+  `kLinkageAngleMinDeg` -60, `kLinkageAngleMaxDeg` -30 (the geometry's range),
+  `kLinkageCornerMinDeg` / `kLinkageCornerMaxDeg` per corner within it (the
+  request clamp), `kLinkageDirection` per corner (+1: a positive motor angle
+  raises the module, -1: the motor is mirrored; FR/BL one way, FL/BR the
+  other - every angle in the firmware, CLI and HMI rows is in the "positive =
+  up" frame). The seat-axis rows L1..L4 in the spec patch are the HMI's jog
+  range and must cover the corner ranges (the firmware warns at boot if they
+  do not; it does not clamp to the rows), the motion profile
   `kLinkageProfile` 60 deg/s, 20 deg/s². The model assumes a parallelogram
   4-bar: height = crank · sin(angle − level); see `linkage_geometry.hpp`.
 - **Zero**: with every linkage at its level position run `zero all` then

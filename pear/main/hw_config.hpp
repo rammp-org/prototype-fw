@@ -132,12 +132,35 @@ inline constexpr Ds402VelocityMotor::Config kWheelDriveConfig = {
 /// (`zero` / `save_zero` on the CLI with the linkage at its level position),
 /// positive = module up.
 /// TODO(hardware): crank length, the level angle and the mechanical range are
-/// placeholders. The seat-axis table rows L1..L4 (rammp-rtps, -30..60 deg)
-/// must cover [min, max].
+/// placeholders. The seat-axis table rows L1..L4 (rammp-rtps) must cover
+/// [min, max].
 inline constexpr float kLinkageCrankLengthM = 0.15f;
 inline constexpr float kLinkageLevelAngleDeg = 0.0f;
+/// The range common to the corners (the geometry's, used by the pose solver).
 inline constexpr float kLinkageAngleMinDeg = -60.0f;
 inline constexpr float kLinkageAngleMaxDeg = -30.0f;
+/// Per-corner range (deg, in the geometry's "positive = up" frame), pear::Corner
+/// order FR, FL, BR, BL; each must lie within [kLinkageAngleMinDeg,
+/// kLinkageAngleMaxDeg]. A corner whose measured angle is outside its range is
+/// reported as an ERROR and refuses every move except a jog (kLinkageJogMaxDeg).
+inline constexpr pear::geometry::Corners kLinkageCornerMinDeg = {
+    {kLinkageAngleMinDeg, kLinkageAngleMinDeg, kLinkageAngleMinDeg, kLinkageAngleMinDeg}};
+inline constexpr pear::geometry::Corners kLinkageCornerMaxDeg = {
+    {kLinkageAngleMaxDeg, kLinkageAngleMaxDeg, kLinkageAngleMaxDeg, kLinkageAngleMaxDeg}};
+/// Mounting direction of each linkage motor, pear::Corner order (FR, FL, BR,
+/// BL): +1 = a positive (CCW) motor angle raises the wheel module, -1 = lowers
+/// it (the motor is mirrored). FR and BL are mounted one way, FL and BR the
+/// other. Applied to every angle read from / sent to the motor, so the rest of
+/// the firmware (geometry, CLI, HMI rows) only sees the "positive = up" frame.
+/// TODO(hardware): confirm which way is up on each corner.
+inline constexpr pear::geometry::Corners kLinkageDirection = {{+1.0f, -1.0f, -1.0f, +1.0f}};
+/// The largest move accepted for a corner outside its range: a relative jog
+/// from the measured position (`jog <corner> <deg>` on the console; a
+/// SeatCommand within this of the current value from the HMI / bench tool).
+inline constexpr float kLinkageJogMaxDeg = 1.0f;
+/// A corner at most this far past a limit still counts as inside it (a move
+/// clamped to the limit settles within a fraction of a degree).
+inline constexpr float kLinkageRangeToleranceDeg = 0.1f;
 
 inline constexpr pear::geometry::Geometry kLinkageGeometry = {
     .half_length_m = kHalfLengthM,
@@ -159,7 +182,10 @@ inline constexpr EyouMotor::ProfilePositionConfig kLinkageProfile = {
 /// A linkage is "at target" within this; for the CLI / status display only.
 inline constexpr float kLinkageSettleTolDeg = 1.0f;
 /// Linkage status poll period (round-robin, one motor per tick).
-inline constexpr std::chrono::milliseconds kLinkageStatusPollPeriod{250};
+/// Linkage status polling period (round-robin, one motor per tick): 100 ms
+/// = each corner 2.5 Hz, so the position the HMI steps from is at most
+/// ~0.4 s old (two SDO reads, ~2 ms of bus per tick).
+inline constexpr std::chrono::milliseconds kLinkageStatusPollPeriod{100};
 /// Per-read reply timeout for a linkage status poll.
 inline constexpr uint32_t kLinkageStatusReadTimeoutMs = 50;
 /// A linkage's status is STALE when it has not been read for this long.

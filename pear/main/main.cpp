@@ -128,10 +128,13 @@ void print_linkage_status(std::ostream &out, const LinkageController::State &sta
     const auto &motor = state.motors[pear::index(corner)];
     out << "link " << pear::corner_name(corner) << " (node " << static_cast<int>(motor.id) << "): ";
     if (motor.valid)
-      out << "pos=" << motor.position_degrees << " deg target=" << motor.target_degrees << " deg "
+      out << "pos=" << motor.position_degrees << " deg target=" << motor.target_degrees
+          << " deg range=[" << state.min_deg[corner] << ", " << state.max_deg[corner] << "] "
           << EyouMotor::ds402_state_name(motor.statusword)
           << (motor.zero_loaded ? "" : " [NO ZERO]") << (motor.target_pending ? " [MOVING]" : "")
-          << (motor.faulted ? " [FAULT]" : "") << (motor.stale ? " [STALE]" : " [OK]");
+          << (motor.faulted ? " [FAULT]" : "")
+          << (motor.out_of_range ? " [OUT OF RANGE: jog only]" : "")
+          << (motor.stale ? " [STALE]" : " [OK]");
     else
       out << "[NO DATA]" << (motor.zero_loaded ? "" : " [NO ZERO]");
     out << "\n";
@@ -246,6 +249,11 @@ extern "C" void app_main(void) {
       .motors = linkage_motors,
       .geometry = hw_config::kLinkageGeometry,
       .profile = hw_config::kLinkageProfile,
+      .min_deg = hw_config::kLinkageCornerMinDeg,
+      .max_deg = hw_config::kLinkageCornerMaxDeg,
+      .direction = hw_config::kLinkageDirection,
+      .jog_max_deg = hw_config::kLinkageJogMaxDeg,
+      .range_tolerance_deg = hw_config::kLinkageRangeToleranceDeg,
       .table_min_deg = table_limits(false),
       .table_max_deg = table_limits(true),
       .drive_enabled = [&drive]() { return drive.is_enabled(); },
@@ -379,11 +387,32 @@ extern "C" void app_main(void) {
             continue;
           ok = linkage.request_corner_angle(c, angle_deg) && ok;
         }
-        out << (ok ? "Move queued" : "Refused (see the log)") << ": " << which << " -> "
-            << angle_deg << " deg (clamped to [" << linkage.min_angle_deg(pear::Corner::FR) << ", "
-            << linkage.max_angle_deg(pear::Corner::FR) << "]).\n";
+        out << (ok ? "Move queued"
+                   : "REFUSED (see the log; a corner outside its range only "
+                     "takes `jog`)")
+            << ": " << which << " -> " << angle_deg << " deg (clamped to the corner's range";
+        if (corner.has_value())
+          out << " [" << linkage.min_angle_deg(*corner) << ", " << linkage.max_angle_deg(*corner)
+              << "]";
+        out << ").\n";
       },
       "Move a corner linkage to an absolute crank angle: link <fr|fl|br|bl|all> <deg>");
+  root_menu->Insert(
+      "jog",
+      [&linkage](std::ostream &out, const std::string &which, float delta_deg) {
+        std::optional<pear::Corner> corner;
+        if (!parse_corner(which, corner) || !corner.has_value()) {
+          out << "One corner: jog <fr|fl|br|bl> <deg> (+/-" << hw_config::kLinkageJogMaxDeg
+              << " deg max)\n";
+          return;
+        }
+        out << (linkage.request_jog(*corner, delta_deg) ? "Jog queued" : "REFUSED (see the log)")
+            << ": " << which << " " << (delta_deg >= 0 ? "+" : "") << delta_deg
+            << " deg from its measured angle (not clamped to the range; the motor's own limit "
+               "still applies).\n";
+      },
+      "Jog one corner relative to its measured angle, the only move a corner outside its range "
+      "takes: jog <fr|fl|br|bl> <deg> (+/-1 max)");
   root_menu->Insert(
       "pose",
       [&linkage](std::ostream &out, float elevation_mm, float fb_deg, float lat_deg) {

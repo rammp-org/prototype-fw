@@ -30,30 +30,79 @@ from mib_bench import (AUTO_ADAPTER, CONFIG_ADDRESS, CONFIG_PEER, JOY_TICK_MS, K
 
 Qt = QtCore.Qt
 
-GREY = "#666666"
-UNSEEN = "#999999"
 RED = "#c62828"
 ORANGE = "#b06a00"
 GREEN = "#1e8a2e"
 BLUE = "#1a6dd4"
-BLACK = "#000000"
+#: "use the palette's text colour" (light and dark themes alike)
+DEFAULT: Optional[str] = None
 
 
-def _colour(label: QtWidgets.QLabel, colour: str) -> None:
-    label.setStyleSheet(f"color: {colour};")
+def _mix(a: QtGui.QColor, b: QtGui.QColor, t: float) -> str:
+    return QtGui.QColor(int(a.red() * (1 - t) + b.red() * t),
+                        int(a.green() * (1 - t) + b.green() * t),
+                        int(a.blue() * (1 - t) + b.blue() * t)).name()
+
+
+def _dim(amount: float = 0.45) -> str:
+    """A caption colour between the theme's text and its background, so grey
+    captions read on a dark theme too (a fixed #666666 vanished there)."""
+    palette = QtWidgets.QApplication.palette()
+    return _mix(palette.color(QtGui.QPalette.ColorRole.WindowText),
+                palette.color(QtGui.QPalette.ColorRole.Window), amount)
+
+
+def _colour(label: QtWidgets.QLabel, colour: Optional[str]) -> None:
+    label.setStyleSheet("" if colour is None else f"color: {colour};")
 
 
 def _caption(text: str) -> QtWidgets.QLabel:
     label = QtWidgets.QLabel(text)
-    _colour(label, GREY)
+    _colour(label, _dim())
     return label
 
 
 def _note(text: str) -> QtWidgets.QLabel:
     label = QtWidgets.QLabel(text)
     label.setWordWrap(True)
-    _colour(label, GREY)
+    _colour(label, _dim())
     return label
+
+
+def _disable_app_nap() -> None:
+    """macOS puts a backgrounded app to sleep (App Nap): its timers slow to a
+    crawl, so the tables stopped updating until the window was clicked. Tell
+    the OS this process is doing user-initiated work. Best effort, through the
+    Objective-C runtime; nothing to do elsewhere."""
+    import sys
+    if sys.platform != "darwin":
+        return
+    try:
+        import ctypes
+        import ctypes.util
+        objc = ctypes.cdll.LoadLibrary(ctypes.util.find_library("objc"))
+        ctypes.cdll.LoadLibrary(ctypes.util.find_library("Foundation"))
+        objc.objc_getClass.restype = ctypes.c_void_p
+        objc.objc_getClass.argtypes = [ctypes.c_char_p]
+        objc.sel_registerName.restype = ctypes.c_void_p
+        objc.sel_registerName.argtypes = [ctypes.c_char_p]
+        send = objc.objc_msgSend
+        send.restype = ctypes.c_void_p
+        send.argtypes = [ctypes.c_void_p, ctypes.c_void_p]
+        info = send(objc.objc_getClass(b"NSProcessInfo"), objc.sel_registerName(b"processInfo"))
+        send.argtypes = [ctypes.c_void_p, ctypes.c_void_p, ctypes.c_char_p]
+        reason = send(objc.objc_getClass(b"NSString"),
+                      objc.sel_registerName(b"stringWithUTF8String:"),
+                      b"RTPS bench: live telemetry")
+        options = 0x00FFFFFF & ~(1 << 20)  # NSActivityUserInitiatedAllowingIdleSystemSleep
+        send.argtypes = [ctypes.c_void_p, ctypes.c_void_p, ctypes.c_uint64, ctypes.c_void_p]
+        token = send(info, objc.sel_registerName(b"beginActivityWithOptions:reason:"), options,
+                     reason)
+        send.argtypes = [ctypes.c_void_p, ctypes.c_void_p]
+        send(token, objc.sel_registerName(b"retain"))  # the activity lives as long as we do
+        globals()["_APP_NAP_TOKEN"] = token
+    except Exception:  # noqa: BLE001 - a missing runtime must not take the tool down
+        pass
 
 
 class JoystickPad(QtWidgets.QWidget):
@@ -89,19 +138,20 @@ class JoystickPad(QtWidgets.QWidget):
     def paintEvent(self, _event: QtGui.QPaintEvent) -> None:  # noqa: N802 - Qt API
         painter = QtGui.QPainter(self)
         painter.setRenderHint(QtGui.QPainter.RenderHint.Antialiasing)
-        painter.fillRect(self.rect(), QtGui.QColor("#f4f4f4"))
-        border = QtGui.QColor(BLUE if self.hasFocus() else "#bbbbbb")
+        palette = self.palette()
+        painter.fillRect(self.rect(), palette.color(QtGui.QPalette.ColorRole.Base))
+        border = QtGui.QColor(BLUE if self.hasFocus() else _dim(0.6))
         painter.setPen(QtGui.QPen(border, 2))
         painter.drawRect(self.rect().adjusted(1, 1, -1, -1))
         centre = self.SIZE / 2
-        painter.setPen(QtGui.QPen(QtGui.QColor("#cccccc"), 1))
+        painter.setPen(QtGui.QPen(QtGui.QColor(_dim(0.75)), 1))
         painter.drawLine(QtCore.QPointF(centre - self.RADIUS, centre),
                          QtCore.QPointF(centre + self.RADIUS, centre))
         painter.drawLine(QtCore.QPointF(centre, centre - self.RADIUS),
                          QtCore.QPointF(centre, centre + self.RADIUS))
-        painter.setPen(QtGui.QPen(QtGui.QColor("#888888"), 2))
+        painter.setPen(QtGui.QPen(QtGui.QColor(_dim(0.5)), 2))
         painter.drawEllipse(QtCore.QPointF(centre, centre), self.RADIUS, self.RADIUS)
-        painter.setPen(QtGui.QColor("#888888"))
+        painter.setPen(QtGui.QColor(_dim(0.5)))
         small = painter.font()
         small.setPointSize(9)
         painter.setFont(small)
@@ -375,7 +425,7 @@ class MibWindow(QtWidgets.QMainWindow):
         column.addWidget(box)
         column.addStretch(1)
         for col, heading in enumerate(("", "Axis", "Value", "", "", "", "Target", "", "",
-                                       "Range")):
+                                       "Range", "Jog (unclamped)")):
             grid.addWidget(_caption(heading), 0, col)
         self.seat_value_labels: List[QtWidgets.QLabel] = []
         self.seat_target_edits: List[QtWidgets.QLineEdit] = []
@@ -417,19 +467,34 @@ class MibWindow(QtWidgets.QMainWindow):
                 controls.append(zero)
             grid.addWidget(_caption(f"{axis.format(axis.min_value)} .. "
                                     f"{axis.format(axis.max_value)} {axis.unit}"), row, 9)
+            if axis.short.upper().startswith("L"):
+                # the linkage rows: the recovery move for a corner outside its
+                # range (the MIB refuses every other move for it)
+                jog = QtWidgets.QHBoxLayout()
+                for delta in (-0.5, +0.5):
+                    button = QtWidgets.QPushButton(f"{delta:+g}")
+                    button.setFixedWidth(48)
+                    button.clicked.connect(lambda _c=False, i=index, d=delta: self._seat_jog(i, d))
+                    jog.addWidget(button)
+                    # not in seat_controls: a jog must stay available while the MIB
+                    # reports ERROR for a corner outside its range
+                grid.addLayout(jog, row, 10)
             self.seat_controls.extend(controls)
         footer = QtWidgets.QHBoxLayout()
         self.force_seat_check = QtWidgets.QCheckBox("force (send even when the MIB is not IDLE)")
         footer.addWidget(self.force_seat_check)
+        self.seat_age_label = _caption("values: no MibStatus yet")
+        footer.addWidget(self.seat_age_label)
         self.seat_note = _caption("")
         footer.addWidget(self.seat_note)
         footer.addStretch(1)
         grid.addLayout(footer, len(spec.SEAT_AXES) + 1, 0, 1, 10)
         grid.addWidget(_note(
             "Targets are absolute, in whole units, like the HMI's seat_step: - / + send one "
-            "step from the value the MIB last reported (min if unknown), clamped to the range. "
-            "The MIB refuses seat commands unless its state is IDLE, so the controls grey out "
-            "otherwise."), len(spec.SEAT_AXES) + 2, 0, 1, 10)
+            "step from the value the MIB last reported, clamped to the range - and only while "
+            "that value is fresh (the MIB reports every 0.5 s; a step from an old value is not "
+            "one step). The MIB refuses seat commands unless its state is IDLE, so the controls "
+            "grey out otherwise."), len(spec.SEAT_AXES) + 2, 0, 1, 10)
         grid.setColumnStretch(10, 1)
 
     @staticmethod
@@ -451,8 +516,9 @@ class MibWindow(QtWidgets.QMainWindow):
 
     @staticmethod
     def _set_row(table: QtWidgets.QTableWidget, row: int, values: Tuple[Any, ...],
-                 colour: str) -> None:
-        brush = QtGui.QBrush(QtGui.QColor(colour))
+                 colour: Optional[str]) -> None:
+        # None = the theme's text colour (an empty brush resets to the palette)
+        brush = QtGui.QBrush() if colour is None else QtGui.QBrush(QtGui.QColor(colour))
         for col, value in enumerate(values):
             item = table.item(row, col)
             text = str(value)
@@ -470,7 +536,7 @@ class MibWindow(QtWidgets.QMainWindow):
                                       len(spec.DIAGNOSTICS))
         for row, item in enumerate(spec.DIAGNOSTICS):
             self._set_row(self.diag_table, row, (item.short, item.label, "", "", "", "--", "--"),
-                          UNSEEN)
+                          _dim())
         grid.addWidget(self.diag_table, 0, 0)
         self.diag_summary = _caption("no Diagnostics yet")
         grid.addWidget(self.diag_summary, 1, 0)
@@ -489,7 +555,7 @@ class MibWindow(QtWidgets.QMainWindow):
         self.motor_rows = {axis.id: row for row, axis in enumerate(spec.AXES)}
         for row, axis in enumerate(spec.AXES):
             self._set_row(self.motor_table, row, (axis.label,) + ("--",) * (len(headings) - 1),
-                          UNSEEN)
+                          _dim())
         grid.addWidget(self.motor_table, 0, 0)
         grid.addWidget(_caption("Rows never seen stay grey; a row with nothing for "
                                 f"{MOTOR_STALE_S:g} s turns red; FAULT is orange."), 1, 0)
@@ -807,20 +873,26 @@ class MibWindow(QtWidgets.QMainWindow):
 
     # ---------------------------------------------------------- actuators
 
-    def _seat_allowed(self) -> bool:
+    def _seat_allowed(self, jog: bool = False) -> bool:
         if self.harness is None:
             return False
         if self.force_seat_check.isChecked():
             return True
         age = self.harness.link_age()
-        return (age is not None and age <= spec.MIB_STATUS_TIMEOUT_MS / 1000.0
-                and self.harness.system_state() == spec.ENUM_VALUES["MibSystemState"].get("IDLE"))
+        if age is None or age > spec.MIB_STATUS_TIMEOUT_MS / 1000.0:
+            return False
+        states = spec.ENUM_VALUES["MibSystemState"]
+        allowed = {states.get("IDLE")}
+        if jog:
+            allowed.add(states.get("ERROR"))  # a corner outside its range: jog is the way back
+        return self.harness.system_state() in allowed
 
     def _seat_step(self, index: int, direction: int) -> None:
         if not self._seat_allowed():
             self._append_log("[gui] seat command blocked: the MIB is not IDLE (tick force)")
             return
-        self.harness.seat_step(index, direction)
+        if self.harness.seat_step(index, direction) is None:
+            self._append_log("[gui] step refused: no fresh value from the MIB to step from")
 
     def _seat_set(self, index: int) -> None:
         if not self._seat_allowed():
@@ -835,6 +907,16 @@ class MibWindow(QtWidgets.QMainWindow):
             return
         self.harness.send_seat(index, axis.to_units(raw))
         self.seat_target_edits[index].clearFocus()
+
+    def _seat_jog(self, index: int, delta: float) -> None:
+        if not self._seat_allowed(jog=True):
+            self._append_log("[gui] jog blocked: the MIB is not IDLE or ERROR (tick force)")
+            return
+        target = self.harness.seat_jog(index, delta)
+        if target is None:
+            self._append_log("[gui] jog refused: no fresh value from the MIB to jog from")
+        else:
+            self._append_log(f"[gui] jog {spec.SEAT_AXES[index].short} {delta:+g} -> {target:g}")
 
     def _seat_zero(self, index: int) -> None:
         if not self._seat_allowed():
@@ -873,6 +955,8 @@ class MibWindow(QtWidgets.QMainWindow):
             self._refresh_diagnostics(snapshot)
             self._refresh_motors(snapshot)
             self._refresh_stream()
+            self.diag_table.viewport().update()
+            self.motor_table.viewport().update()
 
     def _refresh_status(self, snap: Dict[str, Any]) -> None:
         labels = self.status_labels
@@ -888,7 +972,7 @@ class MibWindow(QtWidgets.QMainWindow):
         _colour(labels["link"], RED if lost else GREEN)
         state = spec.enum_name("MibSystemState", status["systemState"])
         labels["state"].setText(f"{state} ({status['systemState']})")
-        _colour(labels["state"], UNSEEN if lost else STATE_COLOURS.get(state, "#6a1b9a"))
+        _colour(labels["state"], _dim() if lost else STATE_COLOURS.get(state, "#6a1b9a"))
         labels["profile"].setText(spec.enum_name("DriveProfile", status["activeProfile"]))
         speed = float(status["speed"])
         labels["speed"].setText(f"{speed:.2f} m/s  ({speed * spec.MPH_PER_MPS:.1f} mph)")
@@ -898,7 +982,7 @@ class MibWindow(QtWidgets.QMainWindow):
         labels["clock"].setText(format_clock(status))
         labels["status_text"].setText(status.get("status_text") or "(empty)")
         labels["error"].setText(status.get("error_message") or "(empty)")
-        _colour(labels["error"], RED if state == "ERROR" else BLACK)
+        _colour(labels["error"], RED if state == "ERROR" else DEFAULT)
         labels["footer"].setText(status.get("error_footer") or "(empty)")
         values = spec.seat_values(status)
         self.seat_summary.setText("   ".join(
@@ -909,9 +993,27 @@ class MibWindow(QtWidgets.QMainWindow):
         status = snap["status"]
         values = spec.seat_values(status) if status is not None else []
         for index, axis in enumerate(spec.SEAT_AXES):
-            text = format_seat(axis, values[index] if index < len(values) else None)
-            if self.seat_value_labels[index].text() != text:
-                self.seat_value_labels[index].setText(text)
+            value = values[index] if index < len(values) else None
+            text = format_seat(axis, value)
+            # outside the row's range (the hardware limits): the MIB refuses
+            # every normal move for that corner, only a jog gets it back
+            outside = value is not None and not (
+                axis.to_units(axis.min_value) <= value <= axis.to_units(axis.max_value))
+            if outside:
+                text += "  OUT OF RANGE"
+            label = self.seat_value_labels[index]
+            if label.text() != text:
+                label.setText(text)
+                _colour(label, RED if outside else DEFAULT)
+        age = self.harness.link_age() if self.harness is not None else None
+        if age is None:
+            self.seat_age_label.setText("values: no MibStatus yet")
+            _colour(self.seat_age_label, ORANGE)
+        else:
+            fresh = age <= MibBench.SEAT_STEP_MAX_AGE_S
+            self.seat_age_label.setText(f"values: {age * 1000:.0f} ms old"
+                                        + ("" if fresh else " - too old to step from"))
+            _colour(self.seat_age_label, _dim() if fresh else RED)
         allowed = self._seat_allowed()
         if allowed != self._seat_controls_enabled:
             self._seat_controls_enabled = allowed
@@ -926,7 +1028,7 @@ class MibWindow(QtWidgets.QMainWindow):
             return
         age = snap["now"] - snap["diag_at"]
         stale = age > spec.DIAG_TIMEOUT_MS / 1000.0
-        colour = RED if stale else BLACK
+        colour = RED if stale else DEFAULT
         items = diag["items"]
         for row, item in enumerate(spec.DIAGNOSTICS):
             values = items[item.id]["values"] if item.id < len(items) else []
@@ -939,7 +1041,7 @@ class MibWindow(QtWidgets.QMainWindow):
         self.diag_summary.setText(
             f"seq {diag['seq']}, {snap['diag_gaps']} gaps, {snap['diag_count']} rx, "
             f"{snap['diag_rate']:.1f} Hz" + (" - STALE" if stale else "") + extra)
-        _colour(self.diag_summary, RED if stale else GREY)
+        _colour(self.diag_summary, RED if stale else _dim())
 
     def _refresh_motors(self, snap: Dict[str, Any]) -> None:
         for axis in spec.AXES:
@@ -949,7 +1051,7 @@ class MibWindow(QtWidgets.QMainWindow):
             age = snap["now"] - at
             stale = age > MOTOR_STALE_S
             board = spec.enum_name("BoardState", state["state"])
-            colour = RED if stale else (ORANGE if board == "FAULT" else BLACK)
+            colour = RED if stale else (ORANGE if board == "FAULT" else DEFAULT)
             position = float(state["position"])
             velocity = float(state["velocity"])
             self._set_row(self.motor_table, self.motor_rows[axis.id], (
@@ -985,6 +1087,7 @@ class MibWindow(QtWidgets.QMainWindow):
 def run(cli: argparse.Namespace) -> int:
     """Open the window and run the Qt event loop until it is closed."""
     app = QtWidgets.QApplication.instance() or QtWidgets.QApplication([])
+    _disable_app_nap()
     window = MibWindow(cli)
     window.show()
     return app.exec()

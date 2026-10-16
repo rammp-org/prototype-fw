@@ -443,6 +443,14 @@ MIB::MibStatus RtpsLink::build_status() {
         footer = fmt::format("Motor {} stopped reporting on CAN; check it", link.id);
         break;
       }
+      if (link.valid && link.out_of_range) {
+        error = fmt::format("Linkage {} out of range", pear::corner_name(corner));
+        footer =
+            fmt::format("At {:.1f} deg, allowed [{:.0f}, {:.0f}]: jog only (L{} +/-{:g} deg)",
+                        link.position_degrees, linkage.min_deg[corner], linkage.max_deg[corner],
+                        pear::index(corner) + 1, hw_config::kLinkageJogMaxDeg);
+        break;
+      }
       if (linkage.halt_unconfirmed_mask & (1u << pear::index(corner))) {
         error = fmt::format("Linkage {} halt unconfirmed", pear::corner_name(corner));
         footer = fmt::format("Motor {} did not confirm its stop; drive locked out", link.id);

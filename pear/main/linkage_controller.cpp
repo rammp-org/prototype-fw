@@ -16,6 +16,8 @@ LinkageController::LinkageController(const Config &config)
     , motors_(config.motors)
     , geometry_(config.geometry)
     , profile_(config.profile)
+    , jog_max_deg_(config.jog_max_deg)
+    , range_tolerance_deg_(config.range_tolerance_deg)
     , drive_enabled_(config.drive_enabled)
     , status_stale_timeout_(config.status_stale_timeout)
     , status_read_timeout_ms_(config.status_read_timeout_ms)
@@ -27,20 +29,29 @@ LinkageController::LinkageController(const Config &config)
                      .priority = 5}) {
   for (const Corner corner : pear::kCorners) {
     motor_status_[pear::index(corner)].id = motors_[pear::index(corner)].node_id();
-    // The hardware (hw_config geometry) is the request clamp. The seat-axis
-    // table row is what the HMI shows and jogs within: it must cover the
-    // geometry, or the HMI cannot reach part of the range (it does not widen
-    // the clamp either way). An intersection of the two used to be the clamp,
-    // which silently pinned every target when the ranges barely overlapped.
-    min_deg_[corner] = geometry_.min_angle_deg;
-    max_deg_[corner] = geometry_.max_angle_deg;
-    if (config.table_min_deg[corner] > geometry_.min_angle_deg ||
-        config.table_max_deg[corner] < geometry_.max_angle_deg) {
-      logger_.warn("Corner {}: the seat-axis table row allows [{}, {}] deg but the geometry is "
-                   "[{}, {}] deg: the HMI's L{} jog cannot reach the whole range - update "
+    // The hardware (hw_config: the corner's range) is the request clamp, kept
+    // within the geometry's range the pose solver uses. The seat-axis table
+    // row is what the HMI shows and jogs within: it must cover the corner's
+    // range, or the HMI cannot reach part of it (it does not widen the clamp
+    // either way). An intersection of the two used to be the clamp, which
+    // silently pinned every target when the ranges barely overlapped.
+    min_deg_[corner] = std::max(config.min_deg[corner], geometry_.min_angle_deg);
+    max_deg_[corner] = std::min(config.max_deg[corner], geometry_.max_angle_deg);
+    if (min_deg_[corner] != config.min_deg[corner] || max_deg_[corner] != config.max_deg[corner]) {
+      logger_.warn("Corner {}: its range [{}, {}] deg lies partly outside the geometry's [{}, "
+                   "{}] deg; using [{}, {}]",
+                   pear::corner_name(corner), config.min_deg[corner], config.max_deg[corner],
+                   geometry_.min_angle_deg, geometry_.max_angle_deg, min_deg_[corner],
+                   max_deg_[corner]);
+    }
+    direction_[corner] = config.direction[corner] < 0.0f ? -1.0f : 1.0f;
+    if (config.table_min_deg[corner] > min_deg_[corner] ||
+        config.table_max_deg[corner] < max_deg_[corner]) {
+      logger_.warn("Corner {}: the seat-axis table row allows [{}, {}] deg but the corner's range "
+                   "is [{}, {}] deg: the HMI's L{} jog cannot reach the whole range - update "
                    "RAMMP_SEAT_AXIS_TABLE (pear/spec/rammp-rtps-pear.patch)",
                    pear::corner_name(corner), config.table_min_deg[corner],
-                   config.table_max_deg[corner], geometry_.min_angle_deg, geometry_.max_angle_deg,
+                   config.table_max_deg[corner], min_deg_[corner], max_deg_[corner],
                    pear::index(corner) + 1);
     }
   }
@@ -70,9 +81,13 @@ bool LinkageController::initialize() {
                    "absolute encoder until `zero` + `save_zero`",
                    name, motor.node_id());
     }
-    // the motor's own clamp is the geometry range: a target can never leave it
-    // whatever the table says
-    motor.set_position_limits(geometry_.min_angle_deg, geometry_.max_angle_deg);
+    // the motor's own clamp is the corner's range, in the motor's frame (a
+    // mirrored corner swaps the ends): a target can never leave it whatever
+    // the table says. A jog past the range is clamped by the motor, which is
+    // the intent: a jog moves a corner back INTO its range.
+    const float end_a = to_motor_deg(corner, min_deg_[corner]);
+    const float end_b = to_motor_deg(corner, max_deg_[corner]);
+    motor.set_position_limits(std::min(end_a, end_b), std::max(end_a, end_b));
     std::lock_guard<std::mutex> lock(mutex_);
     motor_status_[pear::index(corner)].zero_loaded = zero_loaded;
     if (zero_loaded) {
@@ -130,18 +145,60 @@ const char *LinkageController::refusal_reason_locked() const {
   return kNotEnabled[index];
 }
 
-bool LinkageController::clamp_target(Corner corner, float &angle_deg) {
+bool LinkageController::clamp_target_locked(Corner corner, float &angle_deg) {
   if (!std::isfinite(angle_deg))
     return false;
   if (min_deg_[corner] > max_deg_[corner])
     return false;
   const float clamped = std::clamp(angle_deg, min_deg_[corner], max_deg_[corner]);
   if (clamped != angle_deg) {
-    logger_.warn_rate_limited("Linkage {} target {:.1f} deg clamped to {:.1f} deg",
-                              pear::corner_name(corner), angle_deg, clamped);
+    logger_.warn_rate_limited("Linkage {} target {:.1f} deg clamped to {:.1f} deg (range [{:.1f}, "
+                              "{:.1f}])",
+                              pear::corner_name(corner), angle_deg, clamped, min_deg_[corner],
+                              max_deg_[corner]);
   }
   angle_deg = clamped;
   return true;
+}
+
+bool LinkageController::out_of_range_locked(Corner corner) const {
+  const auto &status = motor_status_[pear::index(corner)];
+  if (!status.valid || status.stale || !std::isfinite(status.position_degrees))
+    return false; // unknown; the stale / not-read refusals cover this
+  return status.position_degrees < min_deg_[corner] - range_tolerance_deg_ ||
+         status.position_degrees > max_deg_[corner] + range_tolerance_deg_;
+}
+
+bool LinkageController::queue_corner_locked(Corner corner, float angle_deg, const char *what) {
+  if (const char *reason = refusal_reason_locked()) {
+    logger_.warn_rate_limited("Linkage {} {} -> {:.1f} deg refused: {}", pear::corner_name(corner),
+                              what, angle_deg, reason);
+    return false;
+  }
+  pending_target_deg_[corner] = angle_deg;
+  pending_[pear::index(corner)] = true;
+  desired_pose_.reset(); // the corners no longer describe one requested pose
+  ++request_generation_;
+  logger_.info("Linkage {} {} -> {:.1f} deg", pear::corner_name(corner), what, angle_deg);
+  return true;
+}
+
+bool LinkageController::request_jog(Corner corner, float delta_deg) {
+  std::lock_guard<std::mutex> lock(mutex_);
+  if (!std::isfinite(delta_deg) || std::abs(delta_deg) > jog_max_deg_ || delta_deg == 0.0f) {
+    logger_.error_rate_limited("Linkage {}: a jog is at most +/-{:.1f} deg (got {})",
+                               pear::corner_name(corner), jog_max_deg_, delta_deg);
+    return false;
+  }
+  const auto &status = motor_status_[pear::index(corner)];
+  if (!status.valid || status.stale) {
+    logger_.error_rate_limited("Linkage {}: no fresh position to jog from",
+                               pear::corner_name(corner));
+    return false;
+  }
+  // relative to the MEASURED angle, not clamped: this is how a corner outside
+  // its range is brought back (the motor's own clamp still bounds it)
+  return queue_corner_locked(corner, status.position_degrees + delta_deg, "jog");
 }
 
 void LinkageController::note_command_sent_locked() {
@@ -150,23 +207,37 @@ void LinkageController::note_command_sent_locked() {
 }
 
 bool LinkageController::request_corner_angle(Corner corner, float angle_deg) {
-  if (!clamp_target(corner, angle_deg)) {
+  std::lock_guard<std::mutex> lock(mutex_);
+  if (!std::isfinite(angle_deg)) {
     logger_.error_rate_limited("Linkage {}: rejecting target {} deg", pear::corner_name(corner),
                                angle_deg);
     return false;
   }
-  std::lock_guard<std::mutex> lock(mutex_);
-  if (const char *reason = refusal_reason_locked()) {
-    logger_.warn_rate_limited("Linkage {} -> {:.1f} deg refused: {}", pear::corner_name(corner),
-                              angle_deg, reason);
+  if (out_of_range_locked(corner)) {
+    // Outside the range nothing is clamped: a clamp would snap the corner to
+    // a limit, many degrees at once (that broke a linkage). Only a jog-sized
+    // move relative to the measured angle is accepted (the HMI's one-step jog
+    // from the value it was shown, when that value is current); anything
+    // else is an error, the corner is reported as such in MibStatus.
+    const auto &status = motor_status_[pear::index(corner)];
+    const float delta = angle_deg - status.position_degrees;
+    if (std::abs(delta) > jog_max_deg_) {
+      logger_.error_rate_limited(
+          "Linkage {} is OUTSIDE its range [{:.1f}, {:.1f}] deg at {:.1f} deg: {:.1f} deg "
+          "refused; only jogs within +/-{:.1f} deg of the current position are accepted "
+          "(`jog {} <deg>`)",
+          pear::corner_name(corner), min_deg_[corner], max_deg_[corner], status.position_degrees,
+          angle_deg, jog_max_deg_, pear::corner_name(corner));
+      return false;
+    }
+    return queue_corner_locked(corner, angle_deg, "jog (out of range)");
+  }
+  if (!clamp_target_locked(corner, angle_deg)) {
+    logger_.error_rate_limited("Linkage {}: rejecting target {} deg", pear::corner_name(corner),
+                               angle_deg);
     return false;
   }
-  pending_target_deg_[corner] = angle_deg;
-  pending_[pear::index(corner)] = true;
-  desired_pose_.reset(); // the corners no longer describe one requested pose
-  ++request_generation_;
-  logger_.info("Linkage {} -> {:.1f} deg", pear::corner_name(corner), angle_deg);
-  return true;
+  return queue_corner_locked(corner, angle_deg, "");
 }
 
 bool LinkageController::request_pose_component(PoseComponent component, float value) {
@@ -210,10 +281,20 @@ LinkageController::Pose LinkageController::measured_pose_locked() const {
 }
 
 bool LinkageController::commit_pose_locked(const Pose &pose) {
+  for (const Corner corner : pear::kCorners) {
+    if (out_of_range_locked(corner)) {
+      logger_.error_rate_limited(
+          "Pose refused: linkage {} is OUTSIDE its range [{:.1f}, {:.1f}] deg at {:.1f} deg; "
+          "jog it back first (`jog {} <deg>`)",
+          pear::corner_name(corner), min_deg_[corner], max_deg_[corner],
+          motor_status_[pear::index(corner)].position_degrees, pear::corner_name(corner));
+      return false;
+    }
+  }
   Corners targets = pear::geometry::corner_angles_from_pose(geometry_, pose);
   const bool all_clamped =
       std::all_of(pear::kCorners.begin(), pear::kCorners.end(),
-                  [&](Corner corner) { return clamp_target(corner, targets[corner]); });
+                  [&](Corner corner) { return clamp_target_locked(corner, targets[corner]); });
   if (!all_clamped)
     return false;
   if (const char *reason = refusal_reason_locked()) {
@@ -319,6 +400,11 @@ LinkageController::State LinkageController::state() const {
   State state;
   state.motors = motor_status_;
   state.initialized = initialized_;
+  state.min_deg = min_deg_;
+  state.max_deg = max_deg_;
+  for (const Corner corner : pear::kCorners)
+    if (motor_status_[pear::index(corner)].out_of_range)
+      state.out_of_range_mask |= static_cast<uint8_t>(1u << pear::index(corner));
   state.halt_unconfirmed_mask = halt_unconfirmed_mask_.load();
   for (const Corner corner : pear::kCorners) {
     const auto &m = motor_status_[pear::index(corner)];
@@ -455,7 +541,7 @@ bool LinkageController::status_step() {
         }
       }
       auto &motor = motors_[pear::index(corner)];
-      const bool moved = motor.move_absolute(targets[corner]);
+      const bool moved = motor.move_absolute(to_motor_deg(corner, targets[corner]));
       const uint8_t bit = static_cast<uint8_t>(1u << pear::index(corner));
       if (!moved) {
         // the platform must not be twisted against a corner that did not take
@@ -519,8 +605,9 @@ bool LinkageController::status_step() {
   }
   // fresh only after a COMPLETE sample: a statusword that reads while the
   // position object keeps failing must not keep an old position looking current
+  const Corner corner = static_cast<Corner>(index);
   if (position_ok) {
-    motor_status.position_degrees = position;
+    motor_status.position_degrees = from_motor_deg(corner, position);
     motor_status.valid = true;
     motor_status_time_[index] = now;
   }
@@ -528,5 +615,14 @@ bool LinkageController::status_step() {
   // successful read is too old
   motor_status.stale =
       !motor_status.valid || (now - motor_status_time_[index]) > status_stale_timeout_;
+  const bool out = out_of_range_locked(corner);
+  if (out && !motor_status.out_of_range)
+    logger_.error("Linkage {} is OUTSIDE its range [{:.1f}, {:.1f}] deg at {:.1f} deg: moves "
+                  "refused except `jog {} <deg>` (+/-{:.1f} deg max)",
+                  pear::corner_name(corner), min_deg_[corner], max_deg_[corner],
+                  motor_status.position_degrees, pear::corner_name(corner), jog_max_deg_);
+  else if (!out && motor_status.out_of_range)
+    logger_.info("Linkage {} is back inside its range", pear::corner_name(corner));
+  motor_status.out_of_range = out;
   return false; // keep the timer running
 }

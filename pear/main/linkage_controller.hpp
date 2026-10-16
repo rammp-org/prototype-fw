@@ -56,6 +56,9 @@ public:
     bool operation_enabled{false}; ///< DS402 Operation Enabled.
     bool zero_loaded{false};       ///< A software zero is active (NVS or `zero`).
     bool target_pending{false};    ///< A move is queued for the task.
+    /// The measured angle is outside [min, max] (+ tolerance): the corner
+    /// refuses every move except a jog; MibStatus reports an ERROR.
+    bool out_of_range{false};
   };
 
   /// Snapshot of the controller state.
@@ -63,9 +66,12 @@ public:
     Corners angles_deg{}; ///< Measured corner angles (last reads).
     Pose pose{};          ///< The pose those angles describe (elevation in m).
     std::array<MotorStatus, pear::kCornerCount> motors{};
+    Corners min_deg{}; ///< Per-corner range (the request clamp), deg.
+    Corners max_deg{};
     bool enabled{false}; ///< Every motor enabled, un-faulted and read at least once.
     bool any_faulted{false};
-    bool initialized{false}; ///< initialize() succeeded for every motor.
+    uint8_t out_of_range_mask{0}; ///< Corners outside their range (bit = corner index).
+    bool initialized{false};      ///< initialize() succeeded for every motor.
     /// Corners whose halt (power stage off after a timed-out or abandoned
     /// move) has not been confirmed by the motor (bit = corner index): the
     /// move may still be running, the drive interlock stays asserted and the
@@ -81,6 +87,16 @@ public:
     std::array<EyouMotor, pear::kCornerCount> &motors;
     pear::geometry::Geometry geometry{};        ///< 4-bar model + angle range.
     EyouMotor::ProfilePositionConfig profile{}; ///< Motion profile for every motor.
+    /// Per-corner request clamp (deg, "positive = up"), within the geometry's.
+    Corners min_deg{};
+    Corners max_deg{};
+    /// +1 / -1 per corner: the motor's positive direction raises / lowers the
+    /// module. Every angle read from or sent to a motor goes through it.
+    Corners direction{};
+    /// Largest jog (deg) for a corner outside its range; see request_jog().
+    float jog_max_deg{1.0f};
+    /// How far past a limit still counts as inside it (deg).
+    float range_tolerance_deg{0.1f};
     /// Min / max angle (deg) the RTPS seat-axis row of each corner allows; the
     /// HMI's display / jog range; the request clamp is the geometry's range,
     /// and a row that does not cover it is warned about at construction.
@@ -110,6 +126,11 @@ public:
   /// Queue a move of one corner to an absolute crank angle (deg). Clamped;
   /// refused (false) while driving or with a motor not enabled / faulted.
   bool request_corner_angle(Corner corner, float angle_deg);
+  /// A relative move of at most Config::jog_max_deg from the corner's measured
+  /// angle, NOT clamped to the range: the only move accepted for a corner
+  /// that sits outside its range (to bring it back), usable in range as well.
+  /// Needs a fresh position; otherwise refused like any other move.
+  bool request_jog(Corner corner, float delta_deg);
   /// Queue a move of all four corners to the angles a base pose needs
   /// (elevation m, tilts deg). Each corner is clamped on its own, so a pose
   /// outside the reach is approximated. Same refusals as above.
@@ -148,7 +169,20 @@ protected:
   /// Why a request would be refused right now (nullptr = allowed). mutex_ held.
   const char *refusal_reason_locked() const;
   /// Clamp a requested angle to the corner's range (non-finite -> refused).
-  bool clamp_target(Corner corner, float &angle_deg);
+  /// mutex_ held.
+  bool clamp_target_locked(Corner corner, float &angle_deg);
+  /// The corner's measured angle is outside its range (mutex_ held).
+  bool out_of_range_locked(Corner corner) const;
+  /// Queue a target for one corner (mutex_ held): the shared tail of
+  /// request_corner_angle / request_jog.
+  bool queue_corner_locked(Corner corner, float angle_deg, const char *what);
+  /// Angle conversions through the corner's mounting direction.
+  float to_motor_deg(Corner corner, float logical_deg) const {
+    return direction_[corner] * logical_deg;
+  }
+  float from_motor_deg(Corner corner, float motor_deg) const {
+    return direction_[corner] * motor_deg;
+  }
   /// Drop queued corner targets and the desired pose (mutex_ held).
   void invalidate_targets_locked();
   /// Clamp, check the interlocks and queue every corner of `pose` (mutex_ held).
@@ -168,6 +202,9 @@ protected:
   EyouMotor::ProfilePositionConfig profile_;
   Corners min_deg_{};
   Corners max_deg_{};
+  Corners direction_{};
+  float jog_max_deg_{1.0f};
+  float range_tolerance_deg_{0.1f};
   std::function<bool()> drive_enabled_;
   std::chrono::milliseconds status_stale_timeout_;
   uint32_t status_read_timeout_ms_;

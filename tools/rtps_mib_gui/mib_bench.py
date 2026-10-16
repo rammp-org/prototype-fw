@@ -254,16 +254,52 @@ class MibBench(rtps_host.RtpsHostHarness):
         rtps_host.log(f"[seat] sent {name} -> {shown} to {sent_to} target(s)")
         return sent_to
 
+    #: a seat step is computed from the MIB's reported value; older than this
+    #: (two MibStatus periods) it is not a safe base, so the step is refused
+    SEAT_STEP_MAX_AGE_S = 2 * spec.MIB_STATUS_PERIOD_MS / 1000.0
+
     def seat_step(self, axis_id: int, direction: int) -> Optional[float]:
-        """One step from where the MIB last said the axis is (min if unknown), like the
-        HMI's seat_step: clamped, absolute, whole units. Returns the target sent."""
+        """One step from where the MIB last said the axis is, like the HMI's
+        seat_step: clamped, absolute, whole units. Returns the target sent, or
+        None when there is no fresh value to step from (the HMI starts from the
+        table's minimum then; this tool refuses - that can be a large move)."""
         if not 0 <= axis_id < len(spec.SEAT_AXES):
             return None
         axis = spec.SEAT_AXES[axis_id]
         current = self.seat_raw(axis_id)
-        start = axis.min_value if current is None else current
-        target_raw = axis.clamp(start + direction * axis.step)
+        age = self.link_age()
+        if current is None or age is None or age > self.SEAT_STEP_MAX_AGE_S:
+            rtps_host.log(f"[seat] {axis.short}: no fresh value to step from "
+                          f"(last MibStatus {'never' if age is None else f'{age:.1f} s ago'})")
+            return None
+        target_raw = axis.clamp(current + direction * axis.step)
         target = axis.to_units(target_raw)
+        self.send_seat(axis_id, target)
+        return target
+
+    #: the largest jog the tool sends (the MIB refuses more than its own limit, 1 deg)
+    SEAT_JOG_MAX_UNITS = 1.0
+
+    def seat_jog(self, axis_id: int, delta_units: float) -> Optional[float]:
+        """A small move relative to the MIB's fresh reported value, NOT clamped to
+        the table's range: the recovery move for a linkage that sits outside
+        its range (the MIB refuses every other command for it and itself
+        accepts a jog only within its jog limit of the current position).
+        Returns the target sent, or None if refused here."""
+        if not 0 <= axis_id < len(spec.SEAT_AXES):
+            return None
+        axis = spec.SEAT_AXES[axis_id]
+        if not abs(delta_units) <= self.SEAT_JOG_MAX_UNITS or delta_units == 0:
+            rtps_host.log(f"[seat] {axis.short}: a jog is at most "
+                          f"{self.SEAT_JOG_MAX_UNITS:g} {axis.unit}")
+            return None
+        current = self.seat_raw(axis_id)
+        age = self.link_age()
+        if current is None or age is None or age > self.SEAT_STEP_MAX_AGE_S:
+            rtps_host.log(f"[seat] {axis.short}: no fresh value to jog from "
+                          f"(last MibStatus {'never' if age is None else f'{age:.1f} s ago'})")
+            return None
+        target = axis.to_units(current) + delta_units
         self.send_seat(axis_id, target)
         return target
 
