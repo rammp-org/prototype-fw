@@ -1,6 +1,7 @@
 #pragma once
 
 #include <array>
+#include <atomic>
 #include <cstdint>
 #include <mutex>
 
@@ -40,6 +41,15 @@ public:
     uint32_t bus_error_count{0};      ///< bus errors seen since start()
     uint32_t tx_queue_free{0};        ///< free slots in the driver's TX queue
     bool bus_off{false};              ///< the controller left the bus; see recover()
+    /// Errors by type since start() (the driver's error callback). Stuff /
+    /// form / bit / CRC-class errors are signal integrity (termination, a
+    /// floating isolated ground, a bad stub); ACK errors mean nobody heard a
+    /// frame we sent; arbitration losses are normal and retried.
+    uint32_t arbitration_lost{0};
+    uint32_t bit_errors{0};
+    uint32_t form_errors{0};
+    uint32_t stuff_errors{0};
+    uint32_t ack_errors{0};
   };
 
   bool start(uint32_t bitrate = 1'000'000);
@@ -79,6 +89,8 @@ private:
 
   static bool on_receive(twai_node_handle_t handle, const twai_rx_done_event_data_t *event,
                          void *context);
+  static bool on_error(twai_node_handle_t handle, const twai_error_event_data_t *event,
+                       void *context);
 
   gpio_num_t rx_gpio_;
   gpio_num_t tx_gpio_;
@@ -90,6 +102,12 @@ private:
   mutable portMUX_TYPE receivers_lock_ = portMUX_INITIALIZER_UNLOCKED;
   std::mutex transmit_mutex_;
   std::mutex lifecycle_mutex_;
+  /// error counters by type, written from the driver's error ISR
+  std::atomic<uint32_t> arbitration_lost_{0};
+  std::atomic<uint32_t> bit_errors_{0};
+  std::atomic<uint32_t> form_errors_{0};
+  std::atomic<uint32_t> stuff_errors_{0};
+  std::atomic<uint32_t> ack_errors_{0};
 
   /// Driver TX queue depth; the ring below must exceed it plus the one frame in
   /// flight so a slot is never reused while the driver may still reference it.

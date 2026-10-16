@@ -1999,6 +1999,15 @@ def main() -> int:
         return 2
     root = tk.Tk()
     MibPanel(root, cli)
+    # macOS: Apple's Tk 8.5 (Xcode's python3) opens the window behind the
+    # terminal and does not activate the app; raise it once
+    root.update_idletasks()
+    root.lift()
+    try:
+        root.attributes("-topmost", True)
+        root.after(800, lambda: root.attributes("-topmost", False))
+    except tk.TclError:
+        pass
     root.mainloop()
     return 0
 

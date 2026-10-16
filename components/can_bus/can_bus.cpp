@@ -70,6 +70,24 @@ bool CanBus::on_receive(twai_node_handle_t handle, const twai_rx_done_event_data
   return task_woken == pdTRUE;
 }
 
+bool CanBus::on_error(twai_node_handle_t handle, const twai_error_event_data_t *event,
+                      void *context) {
+  (void)handle;
+  auto *bus = static_cast<CanBus *>(context);
+  const auto flags = event->err_flags;
+  if (flags.arb_lost)
+    bus->arbitration_lost_.fetch_add(1, std::memory_order_relaxed);
+  if (flags.bit_err)
+    bus->bit_errors_.fetch_add(1, std::memory_order_relaxed);
+  if (flags.form_err)
+    bus->form_errors_.fetch_add(1, std::memory_order_relaxed);
+  if (flags.stuff_err)
+    bus->stuff_errors_.fetch_add(1, std::memory_order_relaxed);
+  if (flags.ack_err)
+    bus->ack_errors_.fetch_add(1, std::memory_order_relaxed);
+  return false;
+}
+
 bool CanBus::start(uint32_t bitrate) {
   std::lock_guard<std::mutex> lock(lifecycle_mutex_);
   if (node_ != nullptr) {
@@ -89,6 +107,7 @@ bool CanBus::start(uint32_t bitrate) {
   if (error == ESP_OK) {
     twai_event_callbacks_t callbacks{};
     callbacks.on_rx_done = on_receive;
+    callbacks.on_error = on_error;
     error = twai_node_register_event_callbacks(node_, &callbacks, this);
   }
   if (error == ESP_OK) {
@@ -182,6 +201,11 @@ CanBus::Status CanBus::get_status() {
   status.rx_error_count = node_status.rx_error_count;
   status.bus_error_count = record.bus_err_num;
   status.tx_queue_free = node_status.tx_queue_remaining;
+  status.arbitration_lost = arbitration_lost_.load(std::memory_order_relaxed);
+  status.bit_errors = bit_errors_.load(std::memory_order_relaxed);
+  status.form_errors = form_errors_.load(std::memory_order_relaxed);
+  status.stuff_errors = stuff_errors_.load(std::memory_order_relaxed);
+  status.ack_errors = ack_errors_.load(std::memory_order_relaxed);
   return status;
 }
 

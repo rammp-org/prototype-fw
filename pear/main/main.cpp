@@ -471,14 +471,19 @@ extern "C" void app_main(void) {
         const auto s = can_bus.get_status();
         out << "CAN controller: " << s.state << "\n  TEC " << s.tx_error_count << ", REC "
             << s.rx_error_count << ", bus errors since start " << s.bus_error_count
-            << ", TX queue free " << s.tx_queue_free << "\n";
+            << ", TX queue free " << s.tx_queue_free << "\n  by type: stuff " << s.stuff_errors
+            << ", form " << s.form_errors << ", bit " << s.bit_errors << ", ack " << s.ack_errors
+            << ", arbitration lost " << s.arbitration_lost << " (normal, retried)\n";
         if (s.bus_off) {
           out << "  the controller left the bus: fix the wiring / bitrate, then `can_recover`\n";
-        } else if (s.bus_error_count > 0 || s.rx_error_count > 0) {
-          out << "  errors on the bus: a node at another bitrate (the bus runs "
-              << hw_config::kCanBitrateBps / 1000
-              << " kbit/s; L2DB SW2-2 ON = 1 Mbit/s, OFF = 500 kbit/s, read at power-up), "
-                 "termination or wiring\n";
+        } else if (s.stuff_errors + s.form_errors + s.bit_errors > 0) {
+          out << "  corrupted frames: signal integrity - 120 ohm termination at BOTH ends only "
+                 "(about 60 ohm across H/L, bus unpowered), every node's isolated CAN ground "
+                 "(L2DB CN5 pin 3 isoGND) tied to the bus ground, short stubs, or a node at "
+                 "another bitrate (L2DB SW2-2 ON = 1 Mbit/s, read at power-up)\n";
+        } else if (s.ack_errors > 0) {
+          out << "  frames we sent were not acknowledged by anyone: bus open / all nodes off at "
+                 "that moment\n";
         } else {
           out << "  no bus errors: a node that does not answer is off, unpowered, at another id "
                  "or not on this bus\n";
