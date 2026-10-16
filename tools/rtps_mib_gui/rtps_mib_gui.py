@@ -1995,7 +1995,14 @@ def main() -> int:
         return run_headless(cli)
     if not _import_tk():
         print("tkinter is not available in this Python; use --headless, or a Python built "
-              "with Tk (e.g. `brew install python-tk`)", file=sys.stderr)
+              "with Tk (e.g. `brew install python-tk@3.14`)", file=sys.stderr)
+        return 2
+    if tk.TkVersion < 8.6:
+        # Apple's Tk 8.5 (Xcode's /usr/bin/python3) opens the window but never
+        # paints the widgets on current macOS: a blank window, no error
+        print(f"this Python's Tk is {tk.TkVersion}; Tk 8.5 draws a blank window on current "
+              "macOS. Use Homebrew's python3 with `brew install python-tk@3.14` (match its "
+              "Python version), or --headless", file=sys.stderr)
         return 2
     root = tk.Tk()
     MibPanel(root, cli)

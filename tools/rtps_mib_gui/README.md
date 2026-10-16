@@ -55,11 +55,12 @@ sweeps a subnet with discovery probes.
 
 ## Python with Tk
 
-The GUI needs a Python with `tkinter`. Homebrew's `python3` ships without it
-(`ModuleNotFoundError: No module named '_tkinter'`): either
-`brew install python-tk@3.14` (match your Homebrew Python version) or run the
-tool with Apple's interpreter, `/usr/bin/python3 tools/rtps_mib_gui/rtps_mib_gui.py`.
-`--headless` and `--self-test` work with any Python 3.10+.
+The GUI needs a Python with `tkinter` **8.6 or newer**. Homebrew's `python3`
+ships without it (`ModuleNotFoundError: No module named '_tkinter'`):
+`brew install python-tk@3.14` (match your Homebrew Python version, `python3
+--version`). Apple's interpreter (`/usr/bin/python3`, Xcode's Python 3.9) has
+tkinter, but its Tk 8.5 opens a window that stays blank on current macOS, so
+the tool refuses it. `--headless` and `--self-test` work with any Python 3.10+.
 
 ## Panels and what they are on the wire
 
