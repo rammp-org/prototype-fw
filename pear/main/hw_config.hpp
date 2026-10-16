@@ -138,8 +138,8 @@ inline constexpr float kLinkageCrankLengthM = 0.15f;
 inline constexpr float kLinkageLevelAngleDeg = 0.0f;
 /// The range common to the corners (the geometry's, used by the pose solver):
 /// the hull of the per-corner ranges below.
-inline constexpr float kLinkageAngleMinDeg = -60.0f;
-inline constexpr float kLinkageAngleMaxDeg = 60.0f;
+inline constexpr float kLinkageAngleMinDeg = -180.0f;
+inline constexpr float kLinkageAngleMaxDeg = 180.0f;
 /// Per-corner range (deg) in the "positive = up" frame the rest of the firmware
 /// uses, pear::Corner order FR, FL, BR, BL; each within [kLinkageAngleMinDeg,
 /// kLinkageAngleMaxDeg]. A corner whose measured angle is outside its range is
@@ -151,8 +151,8 @@ inline constexpr float kLinkageAngleMaxDeg = 60.0f;
 /// after `zero all` + `save_zero` they become travel relative to level and
 /// should be the same for all four.
 /// TODO(hardware): re-measure after zeroing.
-inline constexpr pear::geometry::Corners kLinkageCornerMinDeg = {{-60.0f, 30.0f, 30.0f, -60.0f}};
-inline constexpr pear::geometry::Corners kLinkageCornerMaxDeg = {{-30.0f, 60.0f, 60.0f, -30.0f}};
+inline constexpr pear::geometry::Corners kLinkageCornerMinDeg = {{-80.0f, 60.0f, 30.0f, -170.0f}};
+inline constexpr pear::geometry::Corners kLinkageCornerMaxDeg = {{60.0f, 170.0f, 170.0f, -40.0f}};
 /// Mounting direction of each linkage motor, pear::Corner order (FR, FL, BR,
 /// BL): +1 = a positive (CCW) motor angle raises the wheel module, -1 = lowers
 /// it (the motor is mirrored). FR and BL are mounted one way, FL and BR the
