@@ -139,17 +139,35 @@ inline constexpr Ds402VelocityMotor::Config kWheelDriveConfig = {
 /// reference, the bottom stop); kLinkageLevelAboveMinDeg is a placeholder
 /// until measured - the pose solver (`pose`, the M1..M3 rows) is only right
 /// once it is.
+///
+/// Total (CAD) angle delta is 191.4 degrees. we'll set it to be 180 degrees
+/// conservatively
+///
+/// "level" (the arms straight out) rest angles for the motors are:
+///  - FR: 5 deg
+///  - FL: 120 deg
+///  - BR: 120 deg
+///  - BL: -95 deg
+///
+///  The motors can go 60 degrees up from that position and 120 degrees down, so
+///  the ranges are:
+///
+///  - FR: -115 to 65 deg (up is positive)
+///  - FL: 0 to 180 deg (up is positive)
+///  - BR: 0 to 180 deg (up is positive)
+///  - BL: -215 to -35 deg (up is positive)
 inline constexpr float kLinkageCrankLengthM = 0.15f;
-inline constexpr pear::geometry::Corners kLinkageCornerMinDeg = {{-80.0f, 60.0f, 30.0f, -170.0f}};
-inline constexpr pear::geometry::Corners kLinkageCornerMaxDeg = {{60.0f, 170.0f, 170.0f, -40.0f}};
+inline constexpr pear::geometry::Corners kLinkageCornerMinDeg = {{-115.0f, 0.0f, 0.0f, -215.0f}};
+inline constexpr pear::geometry::Corners kLinkageCornerMaxDeg = {{65.0f, 180.0f, 180.0f, -35.0f}};
 /// Where the module is level, as an angle ABOVE the corner's range minimum
 /// (the bottom stop). The four 4-bars are the same mechanism, so this is one
 /// number for the base: the per-corner ranges already carry the mounting
 /// offsets (where the motor sits and the angle it read when mounted), and a
-/// corner's level angle is simply its range minimum plus this. Measure once:
-/// bring one corner to level and read `heights` ("above min" column).
-/// TODO(hardware): measured value.
-inline constexpr float kLinkageLevelAboveMinDeg = 65.0f;
+/// corner's level angle is simply its range minimum plus this. "Level" = the
+/// arms straight out (one bar of the 4-bar horizontal w.r.t. gravity, easy to
+/// measure); the mechanism travels 120 deg below and 60 above it, see the
+/// range comment. Check with `heights` ("above min" column).
+inline constexpr float kLinkageLevelAboveMinDeg = 120.0f;
 
 constexpr pear::geometry::Corners linkage_level_from_ranges() {
   pear::geometry::Corners level{};
