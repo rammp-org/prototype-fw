@@ -203,6 +203,168 @@ class JoystickPad(QtWidgets.QWidget):
         super().focusInEvent(event)
 
 
+class BaseView(QtWidgets.QWidget):
+    """The base as the MIB reports it: side and front views of the plate (its
+    elevation and tilts, from the M1..M3 seat rows) and a top view with each
+    corner's linkage angle as a bar within its row's range (the L1..L4 rows).
+
+    Display geometry only: the footprint below is nominal (the real one lives
+    in the firmware's hw_config) and sets the drawing's proportions, not any
+    number shown."""
+
+    HALF_LENGTH_M = 0.406
+    HALF_WIDTH_M = 0.267
+    #: vertical scale of the side / front views: +/- this many mm fill the view
+    ELEVATION_SPAN_MM = 150.0
+
+    def __init__(self) -> None:
+        super().__init__()
+        self.setMinimumSize(640, 300)
+        self.setSizePolicy(QtWidgets.QSizePolicy.Policy.Expanding,
+                           QtWidgets.QSizePolicy.Policy.Expanding)
+        self._pose: Optional[Dict[str, float]] = None  # elevation_mm, fb_deg, lat_deg
+        self._corners: Dict[str, Optional[float]] = {}  # FR / FL / BR / BL -> deg
+        self._ranges: Dict[str, Tuple[float, float]] = {}
+        self._out_of_range: set = set()
+        self._fresh = False
+
+    def set_state(self, pose: Optional[Dict[str, float]], corners: Dict[str, Optional[float]],
+                  ranges: Dict[str, Tuple[float, float]], out_of_range: set,
+                  fresh: bool) -> None:
+        self._pose, self._corners, self._ranges = pose, corners, ranges
+        self._out_of_range, self._fresh = out_of_range, fresh
+        self.update()
+
+    # ------------------------------------------------------------ drawing
+
+    def _corner_heights_mm(self) -> Dict[str, float]:
+        """Corner heights from the pose (the firmware's plane model), for the views."""
+        if self._pose is None:
+            return {}
+        e = self._pose["elevation_mm"]
+        fb = math.tan(math.radians(self._pose["fb_deg"])) * self.HALF_LENGTH_M * 1000.0
+        lat = math.tan(math.radians(self._pose["lat_deg"])) * self.HALF_WIDTH_M * 1000.0
+        return {"FR": e + fb - lat, "FL": e + fb + lat, "BR": e - fb - lat, "BL": e - fb + lat}
+
+    def paintEvent(self, _event: QtGui.QPaintEvent) -> None:  # noqa: N802 - Qt API
+        painter = QtGui.QPainter(self)
+        painter.setRenderHint(QtGui.QPainter.RenderHint.Antialiasing)
+        palette = self.palette()
+        painter.fillRect(self.rect(), palette.color(QtGui.QPalette.ColorRole.Base))
+        text = palette.color(QtGui.QPalette.ColorRole.WindowText)
+        dim = QtGui.QColor(_dim(0.55))
+        faint = QtGui.QColor(_dim(0.8))
+        w, h = self.width(), self.height()
+        third = w / 3.0
+        pad = 14
+        small = painter.font()
+        small.setPointSize(9)
+        painter.setFont(small)
+        plate = QtGui.QColor(BLUE) if self._fresh else dim
+        heights = self._corner_heights_mm()
+
+        def elevation_view(x0: float, title: str, left_key: str, right_key: str,
+                           left_label: str, right_label: str, half_m: float,
+                           tilt_deg: float) -> None:
+            # a plate seen edge-on: its two ends at the corner heights
+            cx = x0 + third / 2
+            ground = h - pad - 14
+            top = pad + 16
+            span = ground - top
+            scale = span / (2 * self.ELEVATION_SPAN_MM)  # px per mm
+            mid = top + span / 2
+            painter.setPen(text)
+            painter.drawText(QtCore.QRectF(x0, pad, third, 14), Qt.AlignmentFlag.AlignHCenter,
+                             title)
+            painter.setPen(QtGui.QPen(faint, 1, Qt.PenStyle.DashLine))
+            painter.drawLine(QtCore.QPointF(x0 + pad, mid), QtCore.QPointF(x0 + third - pad, mid))
+            painter.setPen(dim)
+            painter.drawText(QtCore.QRectF(x0, mid + 2, third, 12), Qt.AlignmentFlag.AlignHCenter,
+                             "level 0 mm")
+            half_px = third / 2 - 2 * pad
+            if heights:
+                hl, hr = heights[left_key], heights[right_key]
+                yl = mid - max(-self.ELEVATION_SPAN_MM, min(self.ELEVATION_SPAN_MM, hl)) * scale
+                yr = mid - max(-self.ELEVATION_SPAN_MM, min(self.ELEVATION_SPAN_MM, hr)) * scale
+                painter.setPen(QtGui.QPen(plate, 6, Qt.PenStyle.SolidLine, Qt.PenCapStyle.RoundCap))
+                painter.drawLine(QtCore.QPointF(cx - half_px, yl), QtCore.QPointF(cx + half_px, yr))
+                painter.setPen(QtGui.QPen(dim, 1))
+                for x, y in ((cx - half_px, yl), (cx + half_px, yr)):
+                    painter.drawLine(QtCore.QPointF(x, y), QtCore.QPointF(x, ground))
+                painter.setPen(text)
+                for x, y, value in ((cx - half_px, yl, hl), (cx + half_px, yr, hr)):
+                    label_y = y - 28 if y - 28 > top else y + 10
+                    painter.drawText(QtCore.QRectF(x - 30, label_y, 60, 14),
+                                     Qt.AlignmentFlag.AlignHCenter, f"{value:+.0f} mm")
+                painter.drawText(QtCore.QRectF(x0, ground - 2, third, 14),
+                                 Qt.AlignmentFlag.AlignHCenter, f"tilt {tilt_deg:+.1f} deg")
+            else:
+                painter.setPen(dim)
+                painter.drawText(QtCore.QRectF(x0, mid - 7, third, 14),
+                                 Qt.AlignmentFlag.AlignHCenter, "no MibStatus")
+            painter.setPen(dim)
+            painter.drawText(QtCore.QRectF(cx - half_px - 30, ground + 1, 60, 12),
+                             Qt.AlignmentFlag.AlignHCenter, left_label)
+            painter.drawText(QtCore.QRectF(cx + half_px - 30, ground + 1, 60, 12),
+                             Qt.AlignmentFlag.AlignHCenter, right_label)
+
+        fb = self._pose["fb_deg"] if self._pose else 0.0
+        lat = self._pose["lat_deg"] if self._pose else 0.0
+        # side view from the LEFT: back on the left, front on the right
+        elevation_view(0, "side (from the left)", "BL", "FL", "back", "front",
+                       self.HALF_LENGTH_M, fb)
+        # front view: left on the left
+        elevation_view(third, "front", "FL", "FR", "left", "right", self.HALF_WIDTH_M, lat)
+
+        # top view: the footprint with a corner bar per linkage
+        x0 = 2 * third
+        painter.setPen(text)
+        painter.drawText(QtCore.QRectF(x0, pad, third, 14), Qt.AlignmentFlag.AlignHCenter,
+                         "top (front up): linkage angle within its range")
+        box = QtCore.QRectF(x0 + 2 * pad + 20, pad + 36, third - 4 * pad - 40, h - 2 * pad - 62)
+        painter.setPen(QtGui.QPen(dim, 1))
+        painter.drawRect(box)
+        painter.drawText(QtCore.QRectF(box.left(), box.top() - 13, box.width(), 12),
+                         Qt.AlignmentFlag.AlignHCenter, "front")
+        bar_w, bar_h = 26, min(90.0, box.height() * 0.4)
+        spots = {"FL": (box.left() - bar_w - 8, box.top() + 4),
+                 "FR": (box.right() + 8, box.top() + 4),
+                 "BL": (box.left() - bar_w - 8, box.bottom() - bar_h - 4),
+                 "BR": (box.right() + 8, box.bottom() - bar_h - 4)}
+        for corner, (bx, by) in spots.items():
+            rect = QtCore.QRectF(bx, by, bar_w, bar_h)
+            painter.setPen(QtGui.QPen(dim, 1))
+            painter.setBrush(Qt.BrushStyle.NoBrush)
+            painter.drawRect(rect)
+            angle = self._corners.get(corner)
+            lo, hi = self._ranges.get(corner, (0.0, 1.0))
+            colour = (QtGui.QColor(RED) if corner in self._out_of_range
+                      else (QtGui.QColor(GREEN) if self._fresh else dim))
+            if angle is not None and hi > lo:
+                frac = max(0.0, min(1.0, (angle - lo) / (hi - lo)))
+                fill_h = frac * (bar_h - 4)
+                painter.fillRect(QtCore.QRectF(bx + 2, by + bar_h - 2 - fill_h, bar_w - 4, fill_h),
+                                 colour)
+                # a marker when the angle is outside the range (fill is pinned)
+                if angle < lo or angle > hi:
+                    painter.setPen(QtGui.QPen(QtGui.QColor(RED), 2))
+                    y = by + 2 if angle > hi else by + bar_h - 2
+                    painter.drawLine(QtCore.QPointF(bx - 3, y), QtCore.QPointF(bx + bar_w + 3, y))
+            painter.setPen(text)
+            label_rect = QtCore.QRectF(bx - 20, by + bar_h + 2, bar_w + 40, 26)
+            painter.drawText(label_rect, Qt.AlignmentFlag.AlignHCenter | Qt.TextFlag.TextWordWrap,
+                             corner + ("\n--" if angle is None else f"\n{angle:+.1f}"))
+            painter.setPen(dim)
+            painter.drawText(QtCore.QRectF(bx - 20, by - 13, bar_w + 40, 12),
+                             Qt.AlignmentFlag.AlignHCenter, f"{hi:+.0f}")
+        if self._pose:
+            painter.setPen(text)
+            painter.drawText(box.adjusted(4, 4, -4, -4),
+                             Qt.AlignmentFlag.AlignCenter | Qt.TextFlag.TextWordWrap,
+                             f"elev {self._pose['elevation_mm']:+.0f} mm\n"
+                             f"fb {fb:+.1f} deg (front up +)\nlat {lat:+.1f} deg (left up +)")
+
+
 class MibWindow(QtWidgets.QMainWindow):
     """The window, plus the harness thread it starts and stops."""
 
@@ -245,6 +407,7 @@ class MibWindow(QtWidgets.QMainWindow):
         self.root_layout.addWidget(self.tabs)
         self._build_drive()
         self._build_actuators()
+        self._build_base()
         self._build_diagnostics()
         self._build_motors()
         self._build_log()
@@ -527,6 +690,18 @@ class MibWindow(QtWidgets.QMainWindow):
             if item.text() != text:
                 item.setText(text)
             item.setForeground(brush)
+
+    def _build_base(self) -> None:
+        tab = QtWidgets.QWidget()
+        self.tabs.addTab(tab, "Base")
+        column = QtWidgets.QVBoxLayout(tab)
+        self.base_view = BaseView()
+        column.addWidget(self.base_view, 1)
+        column.addWidget(_note(
+            "Drawn from MibStatus: the plate from the M1..M3 rows (elevation, front/back tilt, "
+            "lateral tilt - corner heights are the plane model with a nominal footprint), the "
+            "corner bars from the L1..L4 rows within their spec-row range. Blue / green = fresh, "
+            "grey = no recent status, red = the MIB reports that corner out of range."))
 
     def _build_diagnostics(self) -> None:
         tab = QtWidgets.QWidget()
@@ -954,6 +1129,7 @@ class MibWindow(QtWidgets.QMainWindow):
             snapshot = self.harness.snapshot()
             self._refresh_status(snapshot)
             self._refresh_seat(snapshot)
+            self._refresh_base(snapshot)
             self._refresh_diagnostics(snapshot)
             self._refresh_motors(snapshot)
             self._refresh_stream()
@@ -1026,6 +1202,37 @@ class MibWindow(QtWidgets.QMainWindow):
                 widget.setEnabled(allowed)
             self.seat_note.setText(
                 "" if allowed else "controls greyed: the MIB is not IDLE (or no status)")
+
+    def _refresh_base(self, snap: Dict[str, Any]) -> None:
+        status = snap["status"]
+        if status is None:
+            self.base_view.set_state(None, {}, {}, set(), False)
+            return
+        values = spec.seat_values(status)
+        by_name = {axis.name.upper(): (axis, values[i] if i < len(values) else None)
+                   for i, axis in enumerate(spec.SEAT_AXES)}
+
+        def value(name: str) -> Optional[float]:
+            entry = by_name.get(name)
+            return None if entry is None else entry[1]
+
+        pose = None
+        if all(value(n) is not None for n in ("FRONT_BACK_TILT", "LATERAL_TILT", "ELEVATION")):
+            pose = {"elevation_mm": value("ELEVATION"), "fb_deg": value("FRONT_BACK_TILT"),
+                    "lat_deg": value("LATERAL_TILT")}
+        corners: Dict[str, Optional[float]] = {}
+        ranges: Dict[str, Tuple[float, float]] = {}
+        for corner in ("FR", "FL", "BR", "BL"):
+            entry = by_name.get(f"PEAR_LINK_{corner}")
+            if entry is None:
+                continue
+            axis, v = entry
+            corners[corner] = v
+            ranges[corner] = (axis.to_units(axis.min_value), axis.to_units(axis.max_value))
+        error = status.get("error_message") or ""
+        out = {c for c in corners if error.startswith(f"Linkage {c} out of range")}
+        fresh = (snap["now"] - snap["status_at"]) <= spec.MIB_STATUS_TIMEOUT_MS / 1000.0
+        self.base_view.set_state(pose, corners, ranges, out, fresh)
 
     def _refresh_diagnostics(self, snap: Dict[str, Any]) -> None:
         diag = snap["diag"]
