@@ -3,12 +3,13 @@
 #include <array>
 #include <cstdint>
 #include <functional>
+#include <limits>
+#include <memory>
 #include <mutex>
 #include <utility>
 
 #include "base_component.hpp"
-#include "esp_twai.h"
-#include "esp_twai_onchip.h"
+#include "can_bus.hpp"
 #include "freertos/FreeRTOS.h"
 #include "freertos/queue.h"
 #include "logger.hpp"
@@ -22,6 +23,10 @@ struct MotorPacket {
 class MotorCanBus : public espp::BaseComponent {
 public:
   MotorCanBus(gpio_num_t rx_gpio, gpio_num_t tx_gpio);
+  /// \brief Attach the MotorActuator protocol adapter to a shared CAN interface.
+  /// \details Construct all protocol adapters before starting \p bus so they can
+  ///          register their independent receive queues.
+  explicit MotorCanBus(CanBus &bus);
   ~MotorCanBus();
 
   MotorCanBus(const MotorCanBus &) = delete;
@@ -38,55 +43,38 @@ public:
   bool flush_pending();
 
 private:
-  static bool on_receive(twai_node_handle_t handle, const twai_rx_done_event_data_t *event,
-                         void *context);
+  bool register_receivers();
   // Enqueue one frame with transaction_mutex_ already held. Never waits on wire
-  // completion (no twai_node_transmit_wait_all_done): the on-chip TWAI TX queue
-  // is zero-copy - it stores a pointer to the twai_frame_t and reads its buffer
-  // asynchronously from the ISR when the frame is actually transmitted - so the
-  // frame/payload must outlive the async send. We therefore copy into a
-  // persistent ring slot (see tx_ring_) rather than a stack frame, and never
-  // block a real-time control loop on an ACK that may never arrive (e.g. no
-  // motor attached). wait_for_queue_space=true (request path) briefly waits for
-  // queue space so a poll is not dropped; false (fire-and-forget set-points)
-  // enqueues non-blocking and drops the stale frame if the queue is full - the
-  // next control tick supersedes it. The request/response path relies on the RX
-  // queue wait for its reply, so it needs no TX-completion wait.
+  // completion: CanBus::send() copies the frame into its persistent TX ring
+  // (the on-chip TWAI TX queue is zero-copy) and never blocks a real-time
+  // control loop on an ACK that may never arrive. wait_for_queue_space=true
+  // (request path) briefly waits for queue space so a poll is not dropped;
+  // false (fire-and-forget set-points) enqueues non-blocking and drops the
+  // stale frame if the queue is full - the next control tick supersedes it.
   bool send_unlocked(const MotorPacket &command, bool wait_for_queue_space = true);
 
-  gpio_num_t rx_gpio_;
-  gpio_num_t tx_gpio_;
-  twai_node_handle_t node_{nullptr};
+  std::unique_ptr<CanBus> owned_bus_;
+  CanBus *bus_{nullptr};
   QueueHandle_t receive_queue_{nullptr};
   std::mutex transaction_mutex_;
-
-  // Persistent, driver-referenced TX frames. The on-chip TWAI TX queue stores
-  // pointers (zero-copy) and reads the frame/buffer from the ISR when the frame
-  // is transmitted, so each frame must outlive its async send. The ring is
-  // larger than the driver tx_queue_depth (3) plus the one in-flight frame, and
-  // send_unlocked() only advances after a successful enqueue, so a slot is never
-  // reused while the driver may still reference it. All access is serialized by
-  // transaction_mutex_.
-  static constexpr size_t kTxRingSize = 8;
-  struct TxSlot {
-    twai_frame_t frame{};
-    std::array<uint8_t, 8> payload{};
-  };
-  std::array<TxSlot, kTxRingSize> tx_ring_{};
-  size_t tx_ring_index_{0};
+  bool receivers_registered_{false};
 };
 
 class MotorActuator : public espp::BaseComponent {
 public:
   using CommunicationFunction =
-      std::function<bool(const MotorPacket &command, MotorPacket &response,
-               uint32_t timeout_ms)>;
+      std::function<bool(const MotorPacket &command, MotorPacket &response, uint32_t timeout_ms)>;
 
   struct Status {
     std::array<uint8_t, 8> data{};
     int temperature_c{0};
     int16_t torque_raw{0};
-    float velocity_rpm{0.0f};
+    float velocity_rpm{0.0f}; ///< output-shaft RPM
+    /// 0x9C bytes 6-7: the single-turn encoder count of the MOTOR shaft
+    /// (65536 per motor revolution).
+    int16_t encoder_raw{0};
+    /// encoder_raw as output-shaft degrees (through the gear ratio), so every
+    /// consumer (read_angle, CLI, diagnostics, telemetry) sees degrees.
     float angle_degrees{0.0f};
   };
 
@@ -108,7 +96,14 @@ public:
   bool send_torque(int16_t torque_raw);
   bool send_velocity(float velocity_rpm);
   // Reset the software-only position reference; this does not write motor ROM.
-  void zero_position();
+  // If need_align is true, first move the motor to its encoder zero (an
+  // incremental move by MINUS the current single-turn encoder angle), so the
+  // virtual zero coincides with the physical one. Returns false when the
+  // alignment could not be done (status unreadable or the move refused); the
+  // virtual position is reset regardless.
+  bool zero_position(bool need_align = false);
+  float get_position() const { return virtual_position_degrees_; }
+  bool set_position_limits(float minimum_degrees, float maximum_degrees);
   bool set_position(float position_degrees, float max_speed_rpm);
   bool send_incremental_position(float delta_degrees, float max_speed_rpm);
   bool stop();
@@ -120,6 +115,7 @@ public:
   bool stop_acknowledged(uint32_t timeout_ms = 20);
   bool disable();
   bool hold();
+  bool reset_system();
   bool release_brake();
   bool lock_brake();
   bool write_default_pid_rom();
@@ -142,4 +138,6 @@ private:
   CommunicationFunction communication_;
   uint8_t motor_id_;
   float virtual_position_degrees_{0.0f};
+  float minimum_position_degrees_{-std::numeric_limits<float>::infinity()};
+  float maximum_position_degrees_{std::numeric_limits<float>::infinity()};
 };
