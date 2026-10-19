@@ -1,5 +1,5 @@
 diff --git a/components/rammp_rtps_messages/include/messages/joystick_message.hpp b/components/rammp_rtps_messages/include/messages/joystick_message.hpp
-index cb92f26..872a913 100644
+index cb92f26..3efd54a 100644
 --- a/components/rammp_rtps_messages/include/messages/joystick_message.hpp
 +++ b/components/rammp_rtps_messages/include/messages/joystick_message.hpp
 @@ -102,13 +102,28 @@ inline constexpr Topic<Diagnostics> kMcbDiagnostics{RAMMP_TOPIC_MCB_DIAGNOSTICS,
@@ -10,10 +10,10 @@ index cb92f26..872a913 100644
 +  X(3, TRANSLATION, "M4", "Translation", 0, 500, 25, 1, "mm")                                       \
 +  /* PEAR: the four corner 4-bar linkage angles (deg, 0 = level); one row per   \
 +     corner so the HMI's DEBUG ACTUATORS page jogs them individually. */        \
-+  X(4, PEAR_LINK_FR, "L1", "Link FR", -800, 600, 10, 1, "deg")                                     \
-+  X(5, PEAR_LINK_FL, "L2", "Link FL", 600, 1700, 10, 1, "deg")                                     \
-+  X(6, PEAR_LINK_BR, "L3", "Link BR", 300, 1700, 10, 1, "deg")                                     \
-+  X(7, PEAR_LINK_BL, "L4", "Link BL", -1700, -400, 10, 1, "deg")
++  X(4, PEAR_LINK_FR, "L1", "Link FR", -1150, 650, 10, 1, "deg")                                     \
++  X(5, PEAR_LINK_FL, "L2", "Link FL", 0, 1800, 10, 1, "deg")                                     \
++  X(6, PEAR_LINK_BR, "L3", "Link BR", 0, 1800, 10, 1, "deg")                                     \
++  X(7, PEAR_LINK_BL, "L4", "Link BL", -2150, -350, 10, 1, "deg")
  
  /* D(id, NAME, short, label, unit1, dec1, unit2, dec2, unit3, dec3); a unit "" = unused */
  #define RAMMP_DIAG_TABLE(D)                                                                        \
