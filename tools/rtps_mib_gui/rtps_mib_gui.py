@@ -471,8 +471,12 @@ def run_self_test() -> int:
                   and bench.motors[last_axis.id].state["axis_id"] == 4)
             check("mib_enabled follows the status", bench.mib_enabled())
             check("streaming wanted while ENABLED", bench.streaming_wanted())
-            check("seat_step clamps at max",
-                  bench.seat_step(2, +1) == spec.SEAT_AXES[2].to_units(spec.SEAT_AXES[2].max_value))
+            # a step is NOT clamped to the row (the MIB's own limits decide; the row
+            # is the HMI's jog range): from the row's max it goes one step past it
+            check("seat_step steps up past the row's max (unclamped)",
+                  bench.seat_step(2, +1)
+                  == spec.SEAT_AXES[2].to_units(spec.SEAT_AXES[2].max_value
+                                                + spec.SEAT_AXES[2].step))
             check("seat_step steps down", bench.seat_step(0, -1)
                   == spec.SEAT_AXES[0].to_units(125 - spec.SEAT_AXES[0].step))
             check("headless 'seat L1 12.3' (or by id)", headless_command(

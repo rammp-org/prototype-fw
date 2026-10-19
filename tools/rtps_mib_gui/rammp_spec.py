@@ -176,9 +176,10 @@ class SeatAxis(NamedTuple):
         return f"{raw / (10 ** self.decimals):.{self.decimals}f}"
 
     def parse(self, text: str) -> int:
-        """Inverse of format(): '12.6' -> 126, rounded and clamped to range."""
-        raw = int(round(float(text) * (10 ** self.decimals)))
-        return self.clamp(raw)
+        """Inverse of format(): '12.6' -> 126, rounded. NOT clamped to the row: the
+        row is the HMI's jog range, the MIB's own limits decide (clamp() is there
+        for callers that want the row)."""
+        return int(round(float(text) * (10 ** self.decimals)))
 
     def clamp(self, raw: int) -> int:
         return max(self.min_value, min(self.max_value, raw))
