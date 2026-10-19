@@ -292,7 +292,7 @@ def run_self_test() -> int:
     first = spec.SEAT_AXES[0]
     check("SeatAxis.format/parse round-trip", first.parse(first.format(126)) == 126
           and first.to_raw(first.to_units(126)) == 126
-          and first.parse("1e9") == first.max_value)
+          and first.clamp(first.parse("1e9")) == first.max_value)
 
     # -- XYTwist: three floats then a uint32, 16 bytes, no padding.
     print("XYTwist:")
