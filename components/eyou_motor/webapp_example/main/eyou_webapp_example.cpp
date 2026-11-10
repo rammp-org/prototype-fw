@@ -116,6 +116,11 @@ extern "C" void app_main(void) {
   auto commission = [&]() -> bool {
     if (!motor.set_max_torque(kBootTorquePermille))
       return false;
+    // NMT start + profile position mode + target = actual: a fresh drive
+    // (mode 0) would otherwise refuse the enable sequence
+    if (!motor.prepare_profile_position())
+      logger.warn("Node {}: could not select profile position mode (enable may fail)",
+                  motor.node_id());
     motor.set_profile_position_config(
         {.velocity_degrees_per_second = static_cast<float>(CONFIG_EXAMPLE_PROFILE_VELOCITY_DPS),
          .acceleration_degrees_per_second_squared =

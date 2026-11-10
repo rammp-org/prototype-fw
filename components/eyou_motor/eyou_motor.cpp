@@ -38,7 +38,9 @@ constexpr uint16_t kControlwordImmediate = 0x0020;
 constexpr uint16_t kControlwordRelative = 0x0040;
 constexpr uint16_t kStoreParametersIndex = 0x1010;
 constexpr uint32_t kStoreParametersSignature = 0x65766173; // ASCII "save", little-endian
-constexpr uint16_t kNodeIdIndex = 0x26A0; // vendor: the drive's own node id (USINT)
+constexpr uint16_t kNodeIdIndex = 0x26A0; // vendor: the drive's own node id (USINT, saved)
+constexpr uint16_t kCanopenNodeIdIndex =
+    0x100B; // CiA 301: node id (effective after reset comm + start)
 } // namespace
 
 EyouMotor::EyouMotor(CanBus &bus, uint8_t node_id)
@@ -279,7 +281,30 @@ const char *EyouMotor::ds402_state_name(uint16_t statusword) {
 
 bool EyouMotor::enable_drive(uint32_t timeout_ms) {
   std::lock_guard<std::mutex> lock(transaction_mutex_);
+  // a fresh drive (no mode selected) does not complete the enable sequence
+  if (!prepare_profile_position_unlocked(timeout_ms))
+    return false;
   return ensure_operation_enabled(timeout_ms);
+}
+
+bool EyouMotor::prepare_profile_position(uint32_t timeout_ms) {
+  std::lock_guard<std::mutex> lock(transaction_mutex_);
+  return prepare_profile_position_unlocked(timeout_ms);
+}
+
+bool EyouMotor::prepare_profile_position_unlocked(uint32_t timeout_ms) {
+  const std::array<uint8_t, 2> nmt_start{0x01, node_id_};
+  if (!send_raw(0x000, nmt_start))
+    return false;
+  if (!ensure_profile_position_mode(timeout_ms))
+    return false;
+  // the set-point the drive would go to on enable: where it is now
+  uint32_t raw_position = 0;
+  if (!request_sdo_u32(kPositionActualIndex, 0x43, raw_position, 100)) {
+    logger_.error("Failed to read the actual position while preparing profile position mode");
+    return false;
+  }
+  return send_sdo_u32(kTargetPositionIndex, raw_position);
 }
 
 bool EyouMotor::disable_drive(uint32_t timeout_ms) {
@@ -1006,28 +1031,32 @@ bool EyouMotor::set_node_id(uint8_t new_node_id) {
   return true;
 }
 
-bool EyouMotor::set_drive_node_id(uint8_t new_node_id, uint32_t timeout_ms) {
+EyouMotor::NodeIdResult EyouMotor::set_drive_node_id(uint8_t new_node_id, uint32_t timeout_ms) {
   if (new_node_id < 1 || new_node_id > 127) {
     logger_.error("Invalid CANopen node id {} (1..127)", new_node_id);
-    return false;
+    return NodeIdResult::Failed;
   }
   std::lock_guard<std::mutex> lock(transaction_mutex_);
   const uint8_t old_node_id = node_id_;
   if (new_node_id == old_node_id) {
     logger_.info("The drive already is node {}", old_node_id);
-    return true;
+    return NodeIdResult::Applied;
   }
-  // 1. the new id into the drive's Node-ID object (takes effect after a restart)
+  // 1. the new id into both Node-ID objects: the saved vendor one and the
+  //    CiA 301 one (RW, "updated after reset communication + start")
   if (!send_sdo_u8(kNodeIdIndex, new_node_id)) {
     logger_.error("Failed to write node id {} to 0x26A0 on node {}", new_node_id, old_node_id);
-    return false;
+    return NodeIdResult::Failed;
   }
-  // 2. save it: 0x1010:01 reads 1 while saving and 2 once done (about 3 s)
+  if (!send_sdo_u8(kCanopenNodeIdIndex, new_node_id))
+    logger_.warn("Node {}: 0x100B (CiA 301 node id) refused {}; relying on 0x26A0", old_node_id,
+                 new_node_id);
+  // 2. save: 0x1010:01 reads 1 while saving and 2 once done (about 3 s)
   if (!send_sdo_u32(kStoreParametersIndex, kStoreParametersSignature, 1, 1000)) {
     logger_.error("Node {}: the drive refused the parameter save (0x1010:01); its node id is "
                   "unchanged until saved",
                   old_node_id);
-    return false;
+    return NodeIdResult::Failed;
   }
   const TickType_t start_tick = xTaskGetTickCount();
   bool saved = false;
@@ -1044,21 +1073,23 @@ bool EyouMotor::set_drive_node_id(uint8_t new_node_id, uint32_t timeout_ms) {
     logger_.error("Node {}: the drive did not confirm the parameter save within {} ms. If it "
                   "stops answering after a power cycle, it did save: select node {}",
                   old_node_id, timeout_ms, new_node_id);
-    return false;
+    return NodeIdResult::Failed;
   }
-  logger_.info("Node id {} written and saved on node {}; restarting the drive", new_node_id,
-               old_node_id);
-  // 3. restart it so the new id takes effect, and follow it
+  uint32_t readback = 0;
+  uint8_t size = 0;
+  if (request_sdo_expedited(kNodeIdIndex, 0, readback, size, 200))
+    logger_.info("Node {}: 0x26A0 now reads {} after the save", old_node_id, readback & 0xFF);
+  // 3. reset communication + start, as the manual prescribes for 0x100B, and
+  //    look for the drive on the new id
   EyouCanFrame frame{};
   while (xQueueReceive(receive_queue_, &frame, 0) == pdTRUE) {
   }
-  const std::array<uint8_t, 2> nmt_reset_node{0x81, old_node_id};
-  send_raw(0x000, nmt_reset_node);
+  const std::array<uint8_t, 2> nmt_reset_communication{0x82, old_node_id};
+  send_raw(0x000, nmt_reset_communication);
   if (!rebind_receivers_unlocked(new_node_id))
-    return false;
-  zero_offset_pulses_.reset();
+    return NodeIdResult::Failed;
   bool booted = false;
-  const TickType_t boot_timeout = pdMS_TO_TICKS(3000);
+  const TickType_t boot_timeout = pdMS_TO_TICKS(2000);
   const TickType_t boot_start = xTaskGetTickCount();
   while (xTaskGetTickCount() - boot_start < boot_timeout) {
     const TickType_t elapsed = xTaskGetTickCount() - boot_start;
@@ -1069,11 +1100,26 @@ bool EyouMotor::set_drive_node_id(uint8_t new_node_id, uint32_t timeout_ms) {
       break;
     }
   }
-  if (booted)
-    logger_.info("The drive is now node {} (booted with its new id)", node_id_);
-  else
-    logger_.warn("Node id {} saved, but no boot-up on the new id after the NMT reset: power-cycle "
-                 "the drive (this object already talks to node {})",
-                 node_id_, node_id_);
-  return true;
+  const std::array<uint8_t, 2> nmt_start_new{0x01, new_node_id};
+  send_raw(0x000, nmt_start_new);
+  // no boot-up frame does not mean no switch: ask it
+  uint32_t statusword = 0;
+  const bool answers = request_sdo_u32(kStatuswordIndex, 0x4B, statusword, 300);
+  if (booted || answers) {
+    zero_offset_pulses_.reset();
+    logger_.info("The drive is now node {} ({})", node_id_,
+                 booted ? "booted with its new id" : "answers on the new id");
+    return NodeIdResult::Applied;
+  }
+  // still its old self: stay there, the user power-cycles the drive
+  rebind_receivers_unlocked(old_node_id);
+  const std::array<uint8_t, 2> nmt_start_old{0x01, old_node_id};
+  send_raw(0x000, nmt_start_old);
+  const bool old_answers = request_sdo_u32(kStatuswordIndex, 0x4B, statusword, 300);
+  logger_.warn("Node id {} written and saved, but the drive does not answer on it after the reset "
+               "communication{}: power-cycle the drive, then select node {} (this object stays on "
+               "node {})",
+               new_node_id, old_answers ? " (it still answers on its old id)" : "", new_node_id,
+               old_node_id);
+  return NodeIdResult::SavedNeedsPowerCycle;
 }

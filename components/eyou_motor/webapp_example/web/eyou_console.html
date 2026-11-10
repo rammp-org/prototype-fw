@@ -1325,7 +1325,7 @@
         return;
       }
       programArmed = null; els.nodeNote.textContent = "";
-      logLine("tx", "program the drive's node id to " + id + " (write 0x26A0, save about 3 s, restart; the status stream pauses meanwhile)");
+      logLine("tx", "program the drive's node id to " + id + " (write 0x26A0 + 0x100B, save about 3 s, reset communication; the status stream pauses meanwhile). If the drive needs a power cycle the reply says so: power-cycle it, then 'Talk to' " + id + ".");
       send(T_SET_DRIVE_NODE_ID, encU8(id));
     });
     els.enableBtn.addEventListener("click", () => { logLine("tx", "enable drive"); send(T_ENABLE); });

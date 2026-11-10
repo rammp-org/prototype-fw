@@ -312,7 +312,21 @@ protected:
         return malformed("node id must be 1..127");
       const bool program = static_cast<Request>(type) == Request::SetDriveNodeId;
       const uint8_t before = motor_.node_id();
-      ok = program ? motor_.set_drive_node_id(req->node_id) : motor_.set_node_id(req->node_id);
+      if (program) {
+        const auto result = motor_.set_drive_node_id(req->node_id);
+        if (result == EyouMotor::NodeIdResult::SavedNeedsPowerCycle) {
+          send_error(type, std::errc::operation_in_progress,
+                     "node id " + std::to_string(req->node_id) +
+                         " written and saved, but the drive still runs node " +
+                         std::to_string(before) +
+                         ": power-cycle it, then 'Talk to' the new id (this device stays on the "
+                         "old one meanwhile)");
+          return;
+        }
+        ok = result == EyouMotor::NodeIdResult::Applied;
+      } else {
+        ok = motor_.set_node_id(req->node_id);
+      }
       if (ok && motor_.node_id() != before) {
         // a different drive (or the same one re-addressed): the target and the
         // settings shown were the old node's

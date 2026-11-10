@@ -119,12 +119,28 @@ public:
   // the bus may be running). The software zero is per node and is cleared:
   // load_zero() for the new node's saved zero. 1..127.
   bool set_node_id(uint8_t new_node_id);
-  // Re-address the DRIVE: write `new_node_id` to its Node-ID object (0x26A0),
-  // save its parameters (0x1010:01, about 3 s, confirmed by reading it back
-  // as 2), restart it (NMT reset node) and follow it to the new id (as
-  // set_node_id). True once the id is written and saved; the log says whether
-  // the drive came back on the new id (some need a power cycle).
-  bool set_drive_node_id(uint8_t new_node_id, uint32_t timeout_ms = 8000);
+  enum class NodeIdResult : uint8_t {
+    Applied,              ///< the drive answers on the new id; this object follows it
+    SavedNeedsPowerCycle, ///< written and saved, but the drive still runs its old id until
+                          ///< power-cycled; this object STAYS on the old id
+    Failed,               ///< nothing changed (the log says what failed)
+  };
+  // Re-address the DRIVE: write `new_node_id` to BOTH Node-ID objects (the
+  // vendor 0x26A0, saved, and the CANopen 0x100B, which the manual says takes
+  // effect after an NMT reset communication + start), save the parameters
+  // (0x1010:01, about 3 s, confirmed by reading it back as 2), reset
+  // communication + start the node, and look for it on the new id (boot-up,
+  // then a statusword read). Applied -> this object follows it; else it keeps
+  // talking to the old id.
+  NodeIdResult set_drive_node_id(uint8_t new_node_id, uint32_t timeout_ms = 8000);
+
+  // Get a drive ready for profile position moves without a node reset: NMT
+  // start, modes of operation = 1 (profile position, verified on 0x6061) and
+  // the target position = the actual position, so enabling does not jump. A
+  // fresh drive (mode 0) refuses the DS402 enable sequence otherwise; the
+  // manual's own example sets the mode before the controlword. Idempotent:
+  // enable_drive() runs it first.
+  bool prepare_profile_position(uint32_t timeout_ms = 1000);
 
   // The active software zero (encoder pulses), if one was set / loaded.
   std::optional<int32_t> zero_offset_pulses() const;
@@ -159,6 +175,8 @@ private:
   // Move the receive queue's registrations to 0x580 / 0x700 + new_node_id and
   // adopt it (transaction_mutex_ held). Keeps the old id if the bus refuses.
   bool rebind_receivers_unlocked(uint8_t new_node_id);
+  // prepare_profile_position() with transaction_mutex_ held.
+  bool prepare_profile_position_unlocked(uint32_t timeout_ms);
   bool degrees_to_pulses(float degrees, int32_t &pulses) const;
   bool degrees_to_profile_units(float degrees, uint32_t &pulses) const;
   static float pulses_to_degrees(int32_t pulses);

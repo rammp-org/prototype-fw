@@ -80,12 +80,18 @@ move with it, the saved zero of that node is loaded and the boot torque
 limit / profile applied once it answers) and the choice is saved on the
 device, so it survives a reboot (menuconfig's `EXAMPLE_NODE_ID` is only the
 default before the first choice). *Program drive id* re-addresses the drive
-that currently answers: the id is written to its Node-ID object (0x26A0),
-its parameters are saved (about 3 s, confirmed by reading 0x1010 back), the
-node is restarted with an NMT reset and the board follows it to the new id.
-A second click within 5 s confirms. If the drive does not come back on the
-new id after the reset, power-cycle it (some firmware only reads the id at
-power-on); the board is already talking to the new id.
+that currently answers: the id is written to both of its Node-ID objects (the
+saved vendor one, 0x26A0, and CiA 301's 0x100B), its parameters are saved
+(about 3 s, confirmed by reading 0x1010 back), the node gets an NMT reset
+communication + start, and if it answers on the new id the board follows it.
+A second click within 5 s confirms. If the drive keeps its old id until
+power-cycled, the reply says so and the board STAYS on the old id: power-cycle
+the drive, then *Talk to* the new id.
+
+**Enabling a fresh drive.** A drive with no operating mode selected refuses
+the DS402 enable sequence, so commissioning (and every *Enable*) first sends
+NMT start, selects profile position mode (0x6060 = 1) and sets the target to
+the current position, as the manual's own example does.
 A drive that is powered after the device (or that drops off the bus) is
 commissioned again the moment it answers.
 
