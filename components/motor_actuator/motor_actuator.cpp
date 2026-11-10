@@ -2,83 +2,66 @@
 
 #include <algorithm>
 #include <cmath>
+#include <mutex>
 
 namespace {
-constexpr gpio_num_t kUnusedGpio = GPIO_NUM_NC;
 constexpr size_t kPacketLength = 8;
 }
 
 MotorCanBus::MotorCanBus(gpio_num_t rx_gpio, gpio_num_t tx_gpio)
-    : espp::BaseComponent("MotorCanBus", espp::Logger::Verbosity::INFO), rx_gpio_(rx_gpio),
-      tx_gpio_(tx_gpio) {}
+    : espp::BaseComponent("MotorCanBus", espp::Logger::Verbosity::INFO)
+    , owned_bus_(std::make_unique<CanBus>(rx_gpio, tx_gpio))
+    , bus_(owned_bus_.get()) {}
+
+MotorCanBus::MotorCanBus(CanBus &bus)
+    : espp::BaseComponent("MotorCanBus", espp::Logger::Verbosity::INFO)
+    , bus_(&bus) {}
 
 MotorCanBus::~MotorCanBus() {
-  if (node_ != nullptr) {
-    twai_node_disable(node_);
-    twai_node_delete(node_);
-  }
   if (receive_queue_ != nullptr) {
+    if (bus_ != nullptr) {
+      bus_->unregister_receiver(receive_queue_); // the RX ISR must not see a deleted queue
+    }
     vQueueDelete(receive_queue_);
   }
 }
 
-bool MotorCanBus::on_receive(twai_node_handle_t handle, const twai_rx_done_event_data_t *,
-                             void *context) {
-  auto *bus = static_cast<MotorCanBus *>(context);
-  MotorPacket packet{};
-  twai_frame_t frame{};
-  frame.buffer = packet.data.data();
-  frame.buffer_len = packet.data.size();
-  if (twai_node_receive_from_isr(handle, &frame) != ESP_OK) {
+bool MotorCanBus::register_receivers() {
+  if (receivers_registered_ || bus_ == nullptr || receive_queue_ == nullptr) {
+    return receivers_registered_;
+  }
+  for (uint32_t motor_id = 1; motor_id <= 32; ++motor_id) {
+    if (!bus_->register_receiver(0x240 + motor_id, receive_queue_)) {
+      return false;
+    }
+  }
+  if (!bus_->register_receiver(0x300, receive_queue_)) {
     return false;
   }
-  packet.id = frame.header.id;
-  packet.length = twaifd_dlc2len(frame.header.dlc);
-  BaseType_t higher_priority_task_woken = pdFALSE;
-  xQueueSendFromISR(bus->receive_queue_, &packet, &higher_priority_task_woken);
-  return higher_priority_task_woken == pdTRUE;
+  receivers_registered_ = true;
+  return true;
 }
 
 bool MotorCanBus::start(uint32_t bitrate) {
   std::lock_guard<std::mutex> lock(transaction_mutex_);
-  if (node_ != nullptr) {
-    return true;
+  if (bus_ == nullptr) {
+    return false;
   }
-  receive_queue_ = xQueueCreate(32, sizeof(MotorPacket));
+  if (receive_queue_ == nullptr) {
+    receive_queue_ = xQueueCreate(32, sizeof(CanFrame));
+  }
   if (receive_queue_ == nullptr) {
     logger_.error("Failed to create CAN receive queue");
     return false;
   }
-
-  twai_onchip_node_config_t config{};
-  config.io_cfg.rx = rx_gpio_;
-  config.io_cfg.tx = tx_gpio_;
-  config.io_cfg.quanta_clk_out = kUnusedGpio;
-  config.io_cfg.bus_off_indicator = kUnusedGpio;
-  config.bit_timing.bitrate = bitrate;
-  config.tx_queue_depth = 3;
-
-  esp_err_t result = twai_new_node_onchip(&config, &node_);
-  if (result != ESP_OK) {
-    logger_.error("Failed to create motor CAN node: {}", esp_err_to_name(result));
+  if (!register_receivers()) {
+    logger_.error("Failed to register motor CAN receivers");
     return false;
   }
-
-  twai_event_callbacks_t callbacks{};
-  callbacks.on_rx_done = on_receive;
-  result = twai_node_register_event_callbacks(node_, &callbacks, this);
-  if (result == ESP_OK) {
-    result = twai_node_enable(node_);
-  }
-  if (result != ESP_OK) {
-    logger_.error("Failed to start motor CAN node: {}", esp_err_to_name(result));
-    twai_node_delete(node_);
-    node_ = nullptr;
+  if (!bus_->start(bitrate)) {
+    logger_.error("Failed to start shared CAN bus");
     return false;
   }
-
-  logger_.info("CAN bus started: RX GPIO {}, TX GPIO {}, {} bit/s", static_cast<int>(rx_gpio_),
-               static_cast<int>(tx_gpio_), bitrate);
   return true;
 }
 
@@ -93,28 +76,16 @@ bool MotorCanBus::send(const MotorPacket &command) {
 
 bool MotorCanBus::flush_pending() {
   std::lock_guard<std::mutex> lock(transaction_mutex_);
-  if (node_ == nullptr) {
+  if (bus_ == nullptr) {
     return false;
   }
-  // The driver has no way to drop queued frames (and a disable/enable cycle
-  // RESUMES the pending transaction on IDF 6.x, it does not abort it), but the
-  // backlog is bounded: the node transmits single-shot (fail_retry_cnt 0, no
-  // hardware retry), so once a frame reaches the controller it completes or
-  // fails within about one frame time, and the whole backlog (3 queued + 1 in
-  // flight) is gone within ~1 ms at 1 Mbit/s. Wait that out: the caller's stop
-  // frames then find an empty queue, go out next, and nothing older follows.
-  static constexpr int kDrainTimeoutMs = 5;
-  const esp_err_t result = twai_node_transmit_wait_all_done(node_, kDrainTimeoutMs);
-  if (result != ESP_OK) {
-    logger_.warn("Motor CAN TX queue did not drain within {} ms: {}", kDrainTimeoutMs,
-                 esp_err_to_name(result));
-    return false;
-  }
-  return true;
+  // The shared bus drains its (bounded) TX backlog; the caller's stop frames
+  // then go out on an empty queue with nothing older behind them.
+  return bus_->flush_pending();
 }
 
 bool MotorCanBus::send_unlocked(const MotorPacket &command, bool wait_for_queue_space) {
-  if (node_ == nullptr) {
+  if (bus_ == nullptr) {
     logger_.error("Motor CAN is not started");
     return false;
   }
@@ -122,47 +93,31 @@ bool MotorCanBus::send_unlocked(const MotorPacket &command, bool wait_for_queue_
     logger_.error("Invalid CAN motor packet: id={}, length={}", command.id, command.length);
     return false;
   }
-  // Copy into a persistent ring slot: the on-chip TWAI TX queue is zero-copy and
-  // reads this frame/buffer asynchronously from the ISR, so it must not live on
-  // the stack. Only advance the ring after a successful enqueue, so a slot is
-  // never reused while the driver may still reference it.
-  TxSlot &slot = tx_ring_[tx_ring_index_];
-  slot.payload = command.data;
-  slot.frame = twai_frame_t{};
-  slot.frame.header.id = command.data[0] == 0x79 ? 0x300u : 0x140u + command.id;
-  slot.frame.header.dlc = command.length;
-  slot.frame.buffer = slot.payload.data();
-  slot.frame.buffer_len = command.length;
-
-  // Never wait on wire completion: with no bus ACK (e.g. no motor attached) that
-  // would stall for the full timeout on every send. A brief enqueue wait is
-  // allowed for the request path so a poll is not dropped under transient queue
-  // pressure; fire-and-forget uses a non-blocking enqueue. The request/response
-  // path gets its reply via the RX queue, so it needs no TX-completion wait.
-  const uint32_t enqueue_timeout_ms = wait_for_queue_space ? 3 : 0;
-  esp_err_t result = twai_node_transmit(node_, &slot.frame, enqueue_timeout_ms);
-  if (result == ESP_OK) {
-    tx_ring_index_ = (tx_ring_index_ + 1) % kTxRingSize;
-    return true;
+  const CanFrame frame{
+      .id = command.data[0] == 0x79 ? 0x300u : 0x140u + command.id,
+      .dlc = static_cast<uint8_t>(command.length),
+      .data = command.data,
+  };
+  // CanBus::send() never waits on wire completion (see its TX ring); a dropped
+  // fire-and-forget set-point is expected when nothing drains the bus and is
+  // superseded by the next tick, so only the request path reports failures.
+  if (!bus_->send(frame, wait_for_queue_space)) {
+    if (wait_for_queue_space) {
+      logger_.error("Motor CAN transmit failed");
+    }
+    return false;
   }
-  if (wait_for_queue_space) {
-    logger_.warn("Motor CAN transmit failed: {}", esp_err_to_name(result));
-  } else {
-    // Expected and self-correcting when nothing is draining the bus; keep it off
-    // the error path so it does not spam a real-time control loop.
-    logger_.debug("Motor CAN frame dropped (non-blocking): {}", esp_err_to_name(result));
-  }
-  return false;
+  return true;
 }
 
-bool MotorCanBus::request(const MotorPacket &command, MotorPacket &response,
-                          uint32_t timeout_ms) {
+bool MotorCanBus::request(const MotorPacket &command, MotorPacket &response, uint32_t timeout_ms) {
   std::lock_guard<std::mutex> lock(transaction_mutex_);
   if (receive_queue_ == nullptr) {
     logger_.error("Motor CAN is not started");
     return false;
   }
-  while (xQueueReceive(receive_queue_, &response, 0) == pdTRUE) {
+  CanFrame frame{};
+  while (xQueueReceive(receive_queue_, &frame, 0) == pdTRUE) {
   }
   if (!send_unlocked(command)) {
     return false;
@@ -172,20 +127,22 @@ bool MotorCanBus::request(const MotorPacket &command, MotorPacket &response,
   const TickType_t timeout_ticks = pdMS_TO_TICKS(timeout_ms);
   while (xTaskGetTickCount() - start_tick < timeout_ticks) {
     const TickType_t elapsed = xTaskGetTickCount() - start_tick;
-    if (xQueueReceive(receive_queue_, &response, timeout_ticks - elapsed) != pdTRUE) {
+    if (xQueueReceive(receive_queue_, &frame, timeout_ticks - elapsed) != pdTRUE) {
       break;
     }
+    response = MotorPacket{
+        .id = frame.id,
+        .length = frame.dlc,
+        .data = frame.data,
+    };
     logger_.debug("CAN RX id=0x{:x} cmd=0x{:02x} length={}", response.id, response.data[0],
-           response.length);
-    const uint32_t expected_reply_id_value = command.data[0] == 0x79
-                           ? 0x300u
-                           : 0x240u + command.id;
-    const bool expected_reply_id = response.id == expected_reply_id_value ||
-                     response.id == (command.data[0] == 0x79
-                               ? 0x300u
-                               : 0x140u + command.id);
+                  response.length);
+    const uint32_t expected_reply_id_value = command.data[0] == 0x79 ? 0x300u : 0x240u + command.id;
+    const bool expected_reply_id =
+        response.id == expected_reply_id_value ||
+        response.id == (command.data[0] == 0x79 ? 0x300u : 0x140u + command.id);
     if (expected_reply_id && response.length == kPacketLength &&
-      response.data[0] == command.data[0]) {
+        response.data[0] == command.data[0]) {
       response.id = command.id;
       return true;
     }
@@ -194,8 +151,9 @@ bool MotorCanBus::request(const MotorPacket &command, MotorPacket &response,
 }
 
 MotorActuator::MotorActuator(CommunicationFunction communication, uint8_t motor_id)
-    : espp::BaseComponent("MotorActuator", espp::Logger::Verbosity::INFO),
-      communication_(std::move(communication)), motor_id_(motor_id) {
+    : espp::BaseComponent("MotorActuator", espp::Logger::Verbosity::INFO)
+    , communication_(std::move(communication))
+    , motor_id_(motor_id) {
   set_log_tag("MotorActuator-" + std::to_string(motor_id_));
 }
 
@@ -208,8 +166,7 @@ bool MotorActuator::send_command(const std::array<uint8_t, packet_length_> &comm
   return communication_ && communication_(packet, response, 0);
 }
 
-bool MotorActuator::request(uint8_t command_code, MotorPacket &response,
-                            uint32_t timeout_ms) {
+bool MotorActuator::request(uint8_t command_code, MotorPacket &response, uint32_t timeout_ms) {
   std::array<uint8_t, packet_length_> command{};
   command[0] = command_code;
   MotorPacket packet{};
@@ -237,7 +194,9 @@ bool MotorActuator::read_status(Status &status, uint32_t timeout_ms) {
   status.temperature_c = response.data[1];
   status.torque_raw = read_i16(response.data, 2);
   status.velocity_rpm = static_cast<float>(read_i16(response.data, 4)) / (gear_ratio_ * 6.0f);
-  status.angle_degrees = static_cast<float>(read_i16(response.data, 6)) / gear_ratio_;
+  // converted ONCE here: 65536 counts per motor revolution, then the gearbox
+  status.encoder_raw = read_i16(response.data, 6);
+  status.angle_degrees = static_cast<float>(status.encoder_raw) / 32768.0f * 180.0f / gear_ratio_;
   return true;
 }
 
@@ -252,8 +211,8 @@ bool MotorActuator::read_motor_id(uint8_t &motor_id, uint32_t timeout_ms) {
     logger_.warn("No motor ID response received");
     return false;
   }
-  const uint16_t can_id = static_cast<uint16_t>(response.data[6]) |
-                          (static_cast<uint16_t>(response.data[7]) << 8);
+  const uint16_t can_id =
+      static_cast<uint16_t>(response.data[6]) | (static_cast<uint16_t>(response.data[7]) << 8);
   if (can_id < 0x141 || can_id > 0x160) {
     logger_.warn("Invalid motor CAN ID in response: 0x{:x}", can_id);
     return false;
@@ -291,28 +250,32 @@ bool MotorActuator::is_connected(uint32_t timeout_ms) {
 
 bool MotorActuator::read_temperature(int &temperature_c, uint32_t timeout_ms) {
   Status status{};
-  if (!read_status(status, timeout_ms)) return false;
+  if (!read_status(status, timeout_ms))
+    return false;
   temperature_c = status.temperature_c;
   return true;
 }
 
 bool MotorActuator::read_angle(float &angle_degrees, uint32_t timeout_ms) {
   Status status{};
-  if (!read_status(status, timeout_ms)) return false;
+  if (!read_status(status, timeout_ms))
+    return false;
   angle_degrees = status.angle_degrees;
   return true;
 }
 
 bool MotorActuator::read_velocity(float &velocity_rpm, uint32_t timeout_ms) {
   Status status{};
-  if (!read_status(status, timeout_ms)) return false;
+  if (!read_status(status, timeout_ms))
+    return false;
   velocity_rpm = status.velocity_rpm;
   return true;
 }
 
 bool MotorActuator::read_torque(int16_t &torque_raw, uint32_t timeout_ms) {
   Status status{};
-  if (!read_status(status, timeout_ms)) return false;
+  if (!read_status(status, timeout_ms))
+    return false;
   torque_raw = status.torque_raw;
   return true;
 }
@@ -325,6 +288,10 @@ bool MotorActuator::send_torque(int16_t torque_raw) {
 }
 
 bool MotorActuator::send_velocity(float velocity_rpm) {
+  if (!std::isfinite(velocity_rpm)) { // same hole as send_incremental_position
+    logger_.error("Rejecting a non-finite velocity");
+    return false;
+  }
   const float motor_velocity_raw = velocity_rpm * gear_ratio_ * 6.0f * 100.0f;
   if (motor_velocity_raw < static_cast<float>(INT32_MIN) ||
       motor_velocity_raw > static_cast<float>(INT32_MAX)) {
@@ -337,21 +304,75 @@ bool MotorActuator::send_velocity(float velocity_rpm) {
   return send_command(command);
 }
 
-void MotorActuator::zero_position() {
+bool MotorActuator::zero_position(bool need_align) {
   virtual_position_degrees_ = 0.0f;
+  bool aligned = true;
+  if (need_align) {
+    Status status{};
+    bool status_ok = false;
+    for (int attempt = 1; attempt <= 5; ++attempt) {
+      status_ok = read_status(status, 100);
+      if (status_ok) {
+        break;
+      }
+      logger_.warn("Motor status read failed during zero alignment (attempt {}/5)", attempt);
+    }
+    if (status_ok) {
+      // the encoder reads +a (output-shaft degrees): moving by -a brings it to
+      // its zero, so the virtual zero set below coincides with the encoder zero
+      const float encoder_offset_degrees = status.angle_degrees;
+      logger_.info("Aligning to the encoder zero: offset {} deg", encoder_offset_degrees);
+      aligned = send_incremental_position(-encoder_offset_degrees, 5.0f);
+      if (!aligned) {
+        logger_.error("Zero alignment move was refused");
+      }
+    } else {
+      logger_.error("Failed to read motor status after 5 attempts; not aligned");
+      aligned = false;
+    }
+  }
+
   logger_.info("Virtual motor position set to zero");
+  return aligned;
+}
+
+bool MotorActuator::set_position_limits(float minimum_degrees, float maximum_degrees) {
+  if (!std::isfinite(minimum_degrees) || !std::isfinite(maximum_degrees)) {
+    // a NaN would pass the ordering check and silently disable the clamp
+    logger_.error("Position limits must be finite (got {} / {})", minimum_degrees, maximum_degrees);
+    return false;
+  }
+  if (minimum_degrees > maximum_degrees) {
+    logger_.error("Position minimum {} exceeds maximum {}", minimum_degrees, maximum_degrees);
+    return false;
+  }
+  minimum_position_degrees_ = minimum_degrees;
+  maximum_position_degrees_ = maximum_degrees;
+  logger_.info("Position limits set to [{}, {}] degrees", minimum_degrees, maximum_degrees);
+  return true;
 }
 
 bool MotorActuator::set_position(float position_degrees, float max_speed_rpm) {
-  const float delta_degrees = position_degrees - virtual_position_degrees_;
+  const float limited_position_degrees =
+      std::clamp(position_degrees, minimum_position_degrees_, maximum_position_degrees_);
+  if (limited_position_degrees != position_degrees) {
+    logger_.warn("Position {} degrees clamped to {} degrees", position_degrees,
+                 limited_position_degrees);
+  }
+  const float delta_degrees = limited_position_degrees - virtual_position_degrees_;
   if (!send_incremental_position(delta_degrees, max_speed_rpm)) {
     return false;
   }
-  virtual_position_degrees_ = position_degrees;
+  virtual_position_degrees_ = limited_position_degrees;
   return true;
 }
 
 bool MotorActuator::send_incremental_position(float delta_degrees, float max_speed_rpm) {
+  if (!std::isfinite(delta_degrees) || !std::isfinite(max_speed_rpm)) {
+    // a NaN passes every range comparison below and lround() of it is undefined
+    logger_.error("Rejecting a non-finite incremental position / speed");
+    return false;
+  }
   const float motor_delta_centidegrees = delta_degrees * gear_ratio_ * 100.0f;
   const float motor_speed_dps = max_speed_rpm * gear_ratio_ * 6.0f;
   if (motor_delta_centidegrees < static_cast<float>(INT32_MIN) ||
@@ -360,14 +381,15 @@ bool MotorActuator::send_incremental_position(float delta_degrees, float max_spe
     logger_.error("Requested incremental position or speed is out of range");
     return false;
   }
-  logger_.info("Sending incremental position command: delta={} deg, speed={} RPM",
-               delta_degrees, max_speed_rpm);
+  logger_.info("Sending incremental position command: delta={} deg, speed={} RPM", delta_degrees,
+               max_speed_rpm);
   std::array<uint8_t, packet_length_> command{};
   command[0] = 0xA8;
   const uint16_t speed_limit_dps = static_cast<uint16_t>(std::lround(motor_speed_dps));
   command[2] = static_cast<uint8_t>(speed_limit_dps & 0xFF);
   command[3] = static_cast<uint8_t>((speed_limit_dps >> 8) & 0xFF);
   set_i32(command, 4, static_cast<int32_t>(std::lround(motor_delta_centidegrees)));
+  logger_.info("the command bytes: {::02X}", command);
   return send_command(command);
 }
 
@@ -388,6 +410,12 @@ bool MotorActuator::stop_acknowledged(uint32_t timeout_ms) {
 
 bool MotorActuator::disable() { return send_torque(0); }
 bool MotorActuator::hold() { return send_velocity(0.0f); }
+
+bool MotorActuator::reset_system() {
+  std::array<uint8_t, packet_length_> command{};
+  command[0] = 0x76;
+  return send_command(command);
+}
 
 bool MotorActuator::release_brake() {
   std::array<uint8_t, packet_length_> command{};
@@ -414,7 +442,9 @@ bool MotorActuator::write_default_pid_ram() {
 bool MotorActuator::write_global_pid_gain(float gain) {
   gain = std::clamp(gain, 0.0f, 1.0f);
   std::array<uint8_t, packet_length_> command{
-      0x31, 0, static_cast<uint8_t>(std::lround(gain * 100.0f)),
+      0x31,
+      0,
+      static_cast<uint8_t>(std::lround(gain * 100.0f)),
       static_cast<uint8_t>(std::lround(gain * 100.0f)),
       static_cast<uint8_t>(std::lround(gain * 50.0f)),
       static_cast<uint8_t>(std::lround(gain * 40.0f)),

@@ -1,0 +1,1436 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Eyou Motor Console (WebUSB / Web Serial)</title>
+  <meta name="description" content="Test-stand console for one Eyou harmonic actuator driven over CAN by an ESP32-P4: live angle, speed, torque and current charts streamed over USB (WebUSB / Web Serial), the torque limit the drive clamps to, absolute and relative moves, enable / disable / fault reset / halt, and the software zero (set to the current angle or to a given angle, saved to the device). The device runs the CANopen / DS402 driver and exposes a high-level protocol.">
+  <meta name="espp-category" content="motors">
+  <meta name="espp-protocols" content="eyou.motor:1">
+  <meta name="espp-transports" content="webusb webserial">
+  <!--
+    Eyou Motor Console
+    ==================
+    A single-file, offline, dependency-free browser front-end for the Eyou motor
+    webapp example (components/eyou_motor/webapp_example). The ESP32-P4 runs the
+    EyouMotor CANopen / DS402 driver on its CAN bus and exposes a small
+    HIGH-LEVEL protocol over USB; this page speaks it over EITHER WebUSB (vendor
+    0xFF interface) OR Web Serial. All CAN work happens on the device - this page
+    sends requests (torque limit, moves, enable / disable / reset / halt, zero,
+    profile, limits) and decodes the streamed STATUS snapshots, which it shows
+    as live readouts and two strip charts (angle + speed, torque + current).
+
+    Framed with the espp stream_frame v2 codec, routed on module id 0x20 by
+    default (a routing key; the id actually used is discovered from the device,
+    see resolveModuleId). Requests use types 0x1X; replies/events use 0x9X
+    (reply flag set). STATUS payload (72 B, little-endian): see parseStatus.
+  -->
+  <style>
+    :root {
+      --bg:#f4f6f9; --panel-bg:#fff; --panel-border:#d9dee6; --text:#1c2330; --text-muted:#5c6675;
+      --accent:#2563eb; --accent-hover:#1d4ed8; --accent-contrast:#fff; --danger:#dc2626; --ok:#16a34a;
+      --warn:#b45309; --log-bg:#0f1420; --log-text:#d6dbe6; --tx:#7dd3fc; --rx:#86efac; --err:#fca5a5;
+      --sys:#fcd34d; --time:#64748b; --input-bg:#fff; --input-border:#c3cbd6; --chip-bg:#eef2f8;
+      --row-alt:#f7f9fc; --shadow:0 1px 3px rgba(0,0,0,.08),0 1px 2px rgba(0,0,0,.04);
+      --view-bg:#0d1118; --view-grid:#2a3344; --view-text:#9aa6ba;
+      --s-angle:#60a5fa; --s-velocity:#f59e0b; --s-torque:#f87171; --s-current:#4ade80; --s-target:#c084fc; --s-limit:#fb7185;
+    }
+    @media (prefers-color-scheme: dark) {
+      :root {
+        --bg:#0b0e14; --panel-bg:#151a23; --panel-border:#262d3a; --text:#e6eaf2; --text-muted:#98a2b3;
+        --accent:#3b82f6; --accent-hover:#60a5fa; --accent-contrast:#0b0e14; --danger:#ef4444; --ok:#22c55e;
+        --warn:#f59e0b; --log-bg:#05070c; --log-text:#cdd4e0; --tx:#38bdf8; --rx:#4ade80; --err:#f87171;
+        --sys:#fbbf24; --time:#64748b; --input-bg:#0e1219; --input-border:#2b3341; --chip-bg:#1b2230;
+        --row-alt:#10151d; --shadow:0 1px 3px rgba(0,0,0,.4);
+        --view-bg:#05070c; --view-grid:#222a38; --view-text:#8591a6;
+      }
+    }
+    :root[data-theme="dark"] {
+      --bg:#0b0e14; --panel-bg:#151a23; --panel-border:#262d3a; --text:#e6eaf2; --text-muted:#98a2b3;
+      --accent:#3b82f6; --accent-hover:#60a5fa; --accent-contrast:#0b0e14; --danger:#ef4444; --ok:#22c55e;
+      --warn:#f59e0b; --log-bg:#05070c; --log-text:#cdd4e0; --tx:#38bdf8; --rx:#4ade80; --err:#f87171;
+      --sys:#fbbf24; --time:#64748b; --input-bg:#0e1219; --input-border:#2b3341; --chip-bg:#1b2230; --row-alt:#10151d;
+      --view-bg:#05070c; --view-grid:#222a38; --view-text:#8591a6;
+    }
+    :root[data-theme="light"] {
+      --bg:#f4f6f9; --panel-bg:#fff; --panel-border:#d9dee6; --text:#1c2330; --text-muted:#5c6675;
+      --accent:#2563eb; --accent-hover:#1d4ed8; --accent-contrast:#fff; --danger:#dc2626; --ok:#16a34a;
+      --warn:#b45309; --log-bg:#0f1420; --log-text:#d6dbe6; --tx:#7dd3fc; --rx:#86efac; --err:#fca5a5;
+      --sys:#fcd34d; --time:#64748b; --input-bg:#fff; --input-border:#c3cbd6; --chip-bg:#eef2f8; --row-alt:#f7f9fc;
+      --view-bg:#0d1118; --view-grid:#2a3344; --view-text:#9aa6ba;
+    }
+    * { box-sizing: border-box; }
+    html, body { margin: 0; padding: 0; }
+    body { background: var(--bg); color: var(--text); font-family: system-ui, -apple-system, "Segoe UI", Roboto, Helvetica, Arial, sans-serif; font-size: 14px; line-height: 1.45; min-height: 100vh; }
+    .wrap { max-width: 1240px; margin: 0 auto; padding: 16px; }
+    header { display: flex; align-items: center; gap: 12px; flex-wrap: wrap; margin-bottom: 14px; }
+    header h1 { font-size: 18px; margin: 0; }
+    .status-pill { display: inline-flex; align-items: center; gap: 6px; padding: 3px 10px; border-radius: 999px; font-size: 12px; font-weight: 600; background: var(--chip-bg); color: var(--text-muted); border: 1px solid var(--panel-border); }
+    .status-pill::before { content: ""; width: 8px; height: 8px; border-radius: 50%; background: var(--text-muted); }
+    .status-pill.connected { color: var(--ok); } .status-pill.connected::before { background: var(--ok); }
+    .status-pill.error { color: var(--danger); } .status-pill.error::before { background: var(--danger); }
+    .panel { background: var(--panel-bg); border: 1px solid var(--panel-border); border-radius: 10px; box-shadow: var(--shadow); padding: 14px; margin-bottom: 14px; }
+    .panel h2 { font-size: 13px; text-transform: uppercase; letter-spacing: .06em; color: var(--text-muted); margin: 0 0 10px; }
+    .row { display: flex; align-items: center; gap: 10px; flex-wrap: wrap; }
+    .row + .row { margin-top: 10px; }
+    .muted { color: var(--text-muted); font-size: 12.5px; }
+    .spacer { flex: 1 1 auto; }
+    .main { display: grid; grid-template-columns: minmax(0, 1fr) 390px; gap: 14px; align-items: start; }
+    .nowrap { display: inline-flex; align-items: center; gap: 6px; white-space: nowrap; }
+    @media (max-width: 900px) { .main { grid-template-columns: minmax(0, 1fr); } }
+    button { font: inherit; padding: 7px 14px; border-radius: 7px; cursor: pointer; border: 1px solid var(--panel-border); background: var(--chip-bg); color: var(--text); }
+    button.primary { background: var(--accent); border-color: var(--accent); color: var(--accent-contrast); }
+    button.primary:hover:not(:disabled) { background: var(--accent-hover); border-color: var(--accent-hover); }
+    button.danger { background: var(--danger); border-color: var(--danger); color: #fff; }
+    button.ok { background: var(--ok); border-color: var(--ok); color: #fff; }
+    button.small { padding: 5px 10px; font-size: 13px; }
+    button.wide { min-width: 96px; }
+    button:disabled { opacity: .5; cursor: not-allowed; }
+    button:focus-visible, input:focus-visible, select:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
+    label { display: inline-flex; align-items: center; gap: 6px; font-size: 13px; color: var(--text-muted); }
+    input[type="text"], input[type="number"], select { font: inherit; padding: 6px 8px; border-radius: 6px; background: var(--input-bg); color: var(--text); border: 1px solid var(--input-border); }
+    input[type="text"], input[type="number"] { font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; width: 96px; }
+    input.tiny { width: 72px; }
+    input[type="range"] { width: 100%; accent-color: var(--accent); }
+    .mono { font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; }
+    .state-badge { display: inline-block; padding: 3px 10px; border-radius: 8px; font-weight: 700; font-size: 12.5px; border: 1px solid var(--panel-border); background: var(--chip-bg); color: var(--text-muted); }
+    .state-badge.enabled { color: var(--ok); border-color: var(--ok); }
+    .state-badge.idle { color: var(--accent); border-color: var(--accent); }
+    .state-badge.fault { color: var(--danger); border-color: var(--danger); }
+    .state-badge.warn { color: var(--warn); border-color: var(--warn); }
+    .statusline { display: flex; gap: 16px; flex-wrap: wrap; font-size: 12.5px; color: var(--text-muted); font-variant-numeric: tabular-nums; }
+    .statusline b { color: var(--text); font-weight: 600; }
+    hr.sep { border: none; border-top: 1px solid var(--panel-border); margin: 12px 0; }
+    /* live readouts: big numbers */
+    .readouts { display: grid; grid-template-columns: repeat(auto-fit, minmax(150px, 1fr)); gap: 10px; }
+    .readout { background: var(--chip-bg); border-radius: 8px; padding: 8px 12px; border-left: 4px solid var(--panel-border); min-width: 0; }
+    .readout .k { font-size: 11.5px; text-transform: uppercase; letter-spacing: .05em; color: var(--text-muted); }
+    .readout .v { font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; font-variant-numeric: tabular-nums; font-size: 22px; font-weight: 600; line-height: 1.2; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+    .readout .u { font-size: 12px; color: var(--text-muted); font-weight: 400; }
+    .readout .sub { font-size: 12px; color: var(--text-muted); font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; font-variant-numeric: tabular-nums; }
+    .readout.angle { border-left-color: var(--s-angle); } .readout.velocity { border-left-color: var(--s-velocity); }
+    .readout.torque { border-left-color: var(--s-torque); } .readout.current { border-left-color: var(--s-current); }
+    .readout.target { border-left-color: var(--s-target); }
+    /* the charts */
+    .chart { position: relative; background: var(--view-bg); border-radius: 8px; overflow: hidden; margin-top: 10px; }
+    .chart canvas { display: block; width: 100%; height: 200px; }
+    .chart .nodata { position: absolute; inset: 0; display: flex; align-items: center; justify-content: center; color: var(--view-text); font-size: 13px; pointer-events: none; }
+    /* settings: one line per setting -- label, input, apply */
+    .settings { display: grid; grid-template-columns: auto 1fr auto; gap: 8px 10px; align-items: center; font-size: 13px; }
+    .settings .k { color: var(--text-muted); white-space: nowrap; }
+    .settings select, .settings input[type="number"] { width: 100%; }
+    .settings .pair { display: flex; gap: 6px; }
+    .settings .pair input { width: 50%; min-width: 0; }
+    .settings .triple { display: flex; gap: 6px; }
+    .settings .triple input { width: 33%; min-width: 0; }
+    .settings .note { grid-column: 1 / -1; font-size: 12px; color: var(--warn); }
+    .settings .full { grid-column: 1 / -1; }
+    .kv { display: grid; grid-template-columns: auto 1fr; gap: 3px 12px; font-size: 12.5px; margin-top: 10px; }
+    .kv .k { color: var(--text-muted); } .kv .v { font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; font-variant-numeric: tabular-nums; }
+    .btns { display: grid; grid-template-columns: repeat(2, 1fr); gap: 8px; }
+    .btns.four { grid-template-columns: repeat(4, 1fr); }
+    .log { background: var(--log-bg); color: var(--log-text); border-radius: 8px; padding: 10px 12px; font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; font-size: 12px; line-height: 1.5; height: 150px; overflow-y: auto; overflow-x: auto; white-space: pre-wrap; word-break: break-word; }
+    .log .t { color: var(--time); } .log .tx { color: var(--tx); } .log .rx { color: var(--rx); } .log .err { color: var(--err); } .log .warn { color: #d08770; } .log .sys { color: var(--sys); }
+    footer { color: var(--text-muted); font-size: 12px; margin-top: 10px; }
+    #unsupported { display: none; background: var(--panel-bg); border: 1px solid var(--danger); color: var(--danger); border-radius: 10px; padding: 12px 14px; margin-bottom: 14px; }
+    /* espp web-app navigation: back to the Device Hub (primary) and the apps page */
+    .espp-nav { display: inline-flex; gap: 6px; align-items: center; margin-left: 12px; font-size: 12px; font-weight: 600; vertical-align: middle; }
+    .espp-nav a { text-decoration: none; white-space: nowrap; padding: 4px 10px; border-radius: 6px;
+      border: 1px solid var(--accent, #4aa8ff); color: var(--accent, #4aa8ff); }
+    .espp-nav a.hub { background: var(--accent, #4aa8ff); color: var(--accent-contrast, #06121f); }
+    .espp-nav a:hover { filter: brightness(1.1); }
+    .espp-nav a:focus-visible { outline: 2px solid var(--accent, #4aa8ff); outline-offset: 2px; }
+  </style>
+</head>
+<body>
+  <div class="wrap">
+    <header>
+      <h1>Eyou Motor Console <span class="muted">(WebUSB / Web Serial)</span></h1>
+      <nav class="espp-nav" aria-label="espp web apps"><a id="navHub" class="hub" href="https://esp-cpp.github.io/espp/apps/dispatcher_hub.html" title="Back to the espp Device Hub (hands a connected device back to it)">Device Hub</a><a id="navApps" href="https://esp-cpp.github.io/espp/apps/index.html" title="All espp web apps">All apps</a></nav>
+      <span id="status" class="status-pill">Disconnected</span>
+    </header>
+
+    <div id="unsupported">
+      This browser supports neither WebUSB nor Web Serial. Use a Chromium-based browser
+      (Chrome / Edge / Opera) on a secure origin (https, localhost or file://).
+    </div>
+
+    <!-- ============================ Device ============================ -->
+    <div class="panel">
+      <h2>Device</h2>
+      <div class="row">
+        <button id="connectUsbBtn" class="primary">Connect (WebUSB)</button>
+        <button id="connectSerialBtn">Connect (Web Serial)</button>
+        <button id="disconnectBtn" class="danger" disabled>Disconnect</button>
+        <label><input type="checkbox" id="anyDevice"> Any device (ignore VID/PID filter)</label>
+        <label title="Reconnect automatically when the device comes back after a reboot or re-plug"><input type="checkbox" id="autoReconnect" checked> auto-reconnect</label>
+        <div class="spacer"></div>
+        <label title="Stream a status snapshot from the device at this period (the device polls the drive every 50 ms by default)"><input type="checkbox" id="liveStream" checked> Live</label>
+        <label>every <select id="streamPeriod"><option value="50">50 ms</option><option value="100" selected>100 ms</option><option value="200">200 ms</option><option value="500">500 ms</option><option value="1000">1 s</option></select></label>
+        <button id="refreshBtn" class="small" disabled title="Fetch one status snapshot">Refresh</button>
+      </div>
+      <p id="devInfo" class="muted" style="margin: 10px 0 0;">Not connected. Default WebUSB filter: VID 0x1209 / PID 0x0d32 (espp default).</p>
+      <div class="statusline" style="margin-top:8px;">
+        <span>Drive: <span id="driveState" class="state-badge">-</span></span>
+        <span>CAN: <b id="devComm">-</b></span>
+        <span>Node: <b id="devNode">-</b></span>
+        <span>Mode: <b id="devMode">-</b></span>
+        <span>Statusword: <b id="devStatusword" class="mono">-</b></span>
+        <span>Error: <b id="devError" class="mono">-</b></span>
+        <span>Rated: <b id="devRated">-</b></span>
+        <span>Received: <b id="rxRate">-</b></span>
+      </div>
+      <div class="row" style="margin-top:10px;">
+        <span class="muted" title="The CANopen node id of the actuator on the bus (1..127)">Motor node id</span>
+        <input type="number" id="nodeId" class="tiny" value="1" min="1" max="127" step="1">
+        <button id="nodeUseBtn" class="small" disabled title="Talk to the drive with this node id from now on (saved on the device: used at its next boot too). Its saved zero is loaded and the boot torque limit / profile applied once it answers.">Talk to</button>
+        <button id="nodeProgramBtn" class="small" disabled title="Re-address the DRIVE that currently answers: write this id to its Node-ID object (0x26A0), save its parameters (about 3 s), restart it, then talk to it on the new id. Click twice to confirm.">Program drive id</button>
+        <span id="nodeNote" class="muted"></span>
+      </div>
+    </div>
+
+    <div class="main">
+      <div>
+        <!-- ============================ Live readings ============================ -->
+        <div class="panel">
+          <h2>Live readings</h2>
+          <div class="readouts">
+            <div class="readout angle"><div class="k">Angle</div><div class="v"><span id="rAngle">-</span> <span class="u">deg</span></div><div class="sub" id="rAngleSub">zero: not set</div></div>
+            <div class="readout velocity"><div class="k">Speed</div><div class="v"><span id="rVelocity">-</span> <span class="u">deg/s</span></div><div class="sub" id="rVelocitySub">&nbsp;</div></div>
+            <div class="readout torque"><div class="k">Torque</div><div class="v"><span id="rTorque">-</span> <span class="u" id="rTorqueUnit">Nm</span></div><div class="sub" id="rTorqueSub">limit: -</div></div>
+            <div class="readout current"><div class="k">Current</div><div class="v"><span id="rCurrent">-</span> <span class="u" id="rCurrentUnit">A</span></div><div class="sub" id="rCurrentSub">&nbsp;</div></div>
+            <div class="readout target"><div class="k">Target</div><div class="v"><span id="rTarget">-</span> <span class="u">deg</span></div><div class="sub" id="rTargetSub">&nbsp;</div></div>
+          </div>
+          <div class="row" style="margin-top:10px;">
+            <label>Window <select id="chartWindow"><option value="10">10 s</option><option value="30" selected>30 s</option><option value="60">60 s</option><option value="120">2 min</option><option value="300">5 min</option></select></label>
+            <label title="Show torque and current as per-thousand of the drive's rated values instead of Nm / A"><input type="checkbox" id="permilleUnits"> per-mille units</label>
+            <label title="Draw the torque limit (as lines at +/- the limit) on the torque chart"><input type="checkbox" id="showLimitLines" checked> limit lines</label>
+            <div class="spacer"></div>
+            <button id="clearChartsBtn" class="small">Clear charts</button>
+            <button id="csvBtn" class="small" title="Download the samples in the chart window as CSV">Download CSV</button>
+          </div>
+          <div class="chart"><canvas id="chartMotion" aria-label="angle and speed over time"></canvas><div id="noDataMotion" class="nodata">No data yet - connect and keep "Live" on.</div></div>
+          <div class="chart"><canvas id="chartEffort" aria-label="torque and current over time"></canvas><div id="noDataEffort" class="nodata">&nbsp;</div></div>
+        </div>
+      </div>
+
+      <div>
+        <!-- ============================ Drive ============================ -->
+        <div class="panel">
+          <h2>Drive</h2>
+          <div class="btns four">
+            <button id="enableBtn" class="small ok" disabled title="DS402: switch on and enable operation (the motor holds its position and accepts moves)">Enable</button>
+            <button id="disableBtn" class="small" disabled title="DS402: back to Ready to switch on (power stage off, the shaft is free)">Disable</button>
+            <button id="resetFaultBtn" class="small" disabled title="Clear a DS402 fault (the drive returns to Switch on disabled)">Reset fault</button>
+            <button id="haltBtn" class="small danger" disabled title="Stop the move in progress with the profile deceleration and stay enabled at the position reached">Halt</button>
+          </div>
+          <p id="driveNote" class="muted" style="margin: 10px 0 0;">Connect to a device to drive the motor.</p>
+        </div>
+
+        <!-- ============================ Torque limit ============================ -->
+        <div class="panel">
+          <h2>Torque limit</h2>
+          <div class="settings">
+            <span class="k" title="Max torque (object 0x6072): the drive clamps its torque demand to this in every mode, so a move cannot push harder. Per-thousand of the rated torque; 1000 = rated. The device's configuration (menuconfig) caps what can be set here.">Limit (&permil;)</span><input type="number" id="torqueLimit" value="300" min="0" max="3000" step="10"><button class="small" id="torqueLimitBtn" disabled>Apply</button>
+            <input type="range" id="torqueLimitSlider" class="full" min="0" max="1000" step="10" value="300" aria-label="torque limit slider">
+            <span class="note" id="torqueLimitNote" style="color: var(--text-muted);">= - Nm (rated torque unknown)</span>
+          </div>
+        </div>
+
+        <!-- ============================ Move ============================ -->
+        <div class="panel">
+          <h2>Move</h2>
+          <div class="settings">
+            <span class="k">Target (deg)</span><input type="number" id="targetAngle" value="0" step="1"><button class="small primary" id="moveToBtn" disabled title="Absolute move to the target angle (clamped to the position limits), under the torque limit">Move to</button>
+            <span class="k">Jog (deg)</span><span class="pair"><button class="small" id="jogMinusBtn" disabled title="Relative move by -step">&minus;</button><input type="number" id="jogStep" value="5" min="0.01" step="1" style="width:100%"><button class="small" id="jogPlusBtn" disabled title="Relative move by +step">+</button></span><span></span>
+            <label class="full" title="A new set-point replaces the move in progress at once; unticked, it is queued after the current move completes"><input type="checkbox" id="immediate" checked> immediate (replace the move in progress)</label>
+            <span class="k" title="Profile position velocity / acceleration / deceleration (objects 0x6081 / 0x6083 / 0x6084)">Profile</span><span class="triple"><input type="number" id="pVel" value="30" min="0.1" step="1" title="velocity (deg/s)"><input type="number" id="pAcc" value="20" min="0.1" step="1" title="acceleration (deg/s^2)"><input type="number" id="pDec" value="20" min="0.1" step="1" title="deceleration (deg/s^2)"></span><button class="small" id="profileBtn" disabled>Apply</button>
+            <span class="k" title="Move-to targets are clamped to this range (device-side, relative to the software zero)">Limits (deg)</span><span class="pair"><input type="number" id="lMin" value="-180" step="1" title="minimum"><input type="number" id="lMax" value="180" step="1" title="maximum"></span><button class="small" id="limitsBtn" disabled>Apply</button>
+          </div>
+        </div>
+
+        <!-- ============================ Zero ============================ -->
+        <div class="panel">
+          <h2>Zero</h2>
+          <div class="btns">
+            <button id="zeroHereBtn" class="small primary" disabled title="The current position becomes 0 deg (volatile until saved)">Zero here</button>
+            <span class="pair" style="display:flex; gap:6px;"><input type="number" id="zeroAngle" value="0" step="1" style="width:100%" title="angle the current position should read"><button id="zeroAtBtn" class="small" disabled title="The current position becomes this angle (volatile until saved)">Set = angle</button></span>
+            <button id="saveZeroBtn" class="small" disabled title="Persist the software zero on the device (NVS, per node id); loaded at boot">Save zero</button>
+            <button id="loadZeroBtn" class="small" disabled title="Reload the saved software zero">Load zero</button>
+          </div>
+          <div class="kv">
+            <span class="k">Zero offset</span><span class="v" id="zOffset">-</span>
+            <span class="k">Position limits</span><span class="v" id="zLimits">-</span>
+            <span class="k">Profile</span><span class="v" id="zProfile">-</span>
+            <span class="k">Stream</span><span class="v" id="zStream">-</span>
+          </div>
+        </div>
+      </div>
+    </div>
+
+    <!-- ============================ Log ============================ -->
+    <div class="panel">
+      <h2>Log <button id="clearLogBtn" class="small" style="float:right; margin-top:-4px;">Clear</button></h2>
+      <div id="log" class="log"></div>
+    </div>
+
+    <footer>
+      Eyou Motor Console &middot; talks to the Eyou motor webapp example
+      (<span class="mono">components/eyou_motor/webapp_example</span>), which runs the
+      <span class="mono">EyouMotor</span> CANopen / DS402 driver over CAN. Single-file, offline, no dependencies.
+    </footer>
+  </div>
+
+  <script>
+    "use strict";
+
+    // ===================== stream_frame protocol =====================
+    const DEFAULT_VID = 0x1209, DEFAULT_PID = 0x0d32, VENDOR_CLASS = 0xFF;
+    const MAGIC0 = 0x54, MAGIC1 = 0x4F, HEADER_SIZE = 9, CRC_SIZE = 4, CORRELATION_SIZE = 2;
+    const MAX_PAYLOAD = 4096, MAX_FRAME = HEADER_SIZE + CORRELATION_SIZE + MAX_PAYLOAD + CRC_SIZE;
+    const FLAGS_VERSION = 1, FLAGS_REQUEST = (FLAGS_VERSION << 4), FLAGS_REPLY_BIT = 0x01, FLAG_CORRELATION = 0x02;
+    // The dispatcher module byte is only a routing key: the Eyou service is
+    // published on module 0x20 by default, but a device may serve it on any id.
+    // The id actually used is resolved on connect from the device's discovery
+    // reply (by the advertised protocol id, then app / name), from ?module=N,
+    // or the default. PROTOCOL(_VERSION) mirror eyou_protocol::kProtocol(Version).
+    const DEFAULT_MODULE = 0x20;
+    const PROTOCOL = "eyou.motor", PROTOCOL_VERSION = 1;
+    const MODULE_IDENT = { protocol: PROTOCOL, protocolVersion: PROTOCOL_VERSION,
+                           app: "eyou_console.html", name: "Eyou motor", fallback: DEFAULT_MODULE, override: null };
+    let moduleEyou = DEFAULT_MODULE;            // adopted by adoptModule() before the first Eyou frame
+    // True once adoptModule() has run for this connection: every send path
+    // waits for it, so nothing can go out on the default id while the discovery
+    // probe (up to DISCOVERY_TIMEOUT_MS) is still pending.
+    let moduleReady = false;
+    // Reserved dispatcher discovery module: a device running an espp::Dispatcher
+    // answers a ListModules query on 0xFF with the modules it serves, which is
+    // how the Eyou module's id is found before driving it.
+    const MODULE_DISCOVERY = 0xFF, T_LIST_MODULES = 0x00;
+    const DISCOVERY_TIMEOUT_MS = 800;        // module-presence probe (0xFF ListModules) timeout
+    // requests (0x1X)
+    const T_GET_STATUS = 0x10, T_SET_STREAM = 0x11, T_SET_TORQUE_LIMIT = 0x12, T_MOVE_TO = 0x13, T_MOVE_BY = 0x14,
+          T_ENABLE = 0x15, T_DISABLE = 0x16, T_RESET_FAULT = 0x17, T_HALT = 0x18, T_SET_ZERO = 0x19, T_SAVE_ZERO = 0x1A,
+          T_LOAD_ZERO = 0x1B, T_SET_PROFILE = 0x1C, T_SET_POSITION_LIMITS = 0x1D, T_SET_NODE_ID = 0x1E,
+          T_SET_DRIVE_NODE_ID = 0x1F;
+    // replies (0x9X)
+    const T_STATUS = 0x90, T_OK = 0x91, T_ERROR = 0x92;
+    const REQ_NAME = { 0x10:"get status",0x11:"set stream",0x12:"set torque limit",0x13:"move to",0x14:"move by",
+      0x15:"enable",0x16:"disable",0x17:"reset fault",0x18:"halt",0x19:"set zero",0x1A:"save zero",0x1B:"load zero",
+      0x1C:"set profile",0x1D:"set position limits",0x1E:"set node id",0x1F:"program the drive's node id" };
+    const STATUS_POLL_MS = 1000;
+
+    const els = {};
+    for (const id of ["status","connectUsbBtn","connectSerialBtn","disconnectBtn","anyDevice","autoReconnect","devInfo",
+      "liveStream","streamPeriod","refreshBtn","nodeId","nodeUseBtn","nodeProgramBtn","nodeNote","driveState","devComm","devNode","devMode","devStatusword","devError","devRated","rxRate",
+      "rAngle","rAngleSub","rVelocity","rVelocitySub","rTorque","rTorqueUnit","rTorqueSub","rCurrent","rCurrentUnit","rCurrentSub","rTarget","rTargetSub",
+      "chartWindow","permilleUnits","showLimitLines","clearChartsBtn","csvBtn","chartMotion","noDataMotion","chartEffort","noDataEffort",
+      "enableBtn","disableBtn","resetFaultBtn","haltBtn","driveNote",
+      "torqueLimit","torqueLimitBtn","torqueLimitSlider","torqueLimitNote",
+      "targetAngle","moveToBtn","jogMinusBtn","jogStep","jogPlusBtn","immediate","pVel","pAcc","pDec","profileBtn","lMin","lMax","limitsBtn",
+      "zeroHereBtn","zeroAngle","zeroAtBtn","saveZeroBtn","loadZeroBtn","zOffset","zLimits","zProfile","zStream",
+      "clearLogBtn","log","unsupported"]) els[id] = document.getElementById(id);
+
+    function logLine(cls, text) {
+      const line = document.createElement("div");
+      const time = document.createElement("span"); time.className = "t"; time.textContent = new Date().toLocaleTimeString() + " ";
+      const body = document.createElement("span"); body.className = cls; body.textContent = text;
+      line.appendChild(time); line.appendChild(body); els.log.appendChild(line);
+      while (els.log.childNodes.length > 400) els.log.removeChild(els.log.firstChild);
+      els.log.scrollTop = els.log.scrollHeight;
+    }
+    els.clearLogBtn.addEventListener("click", () => { els.log.textContent = ""; });
+    function setStatus(state, text) { els.status.className = "status-pill" + (state ? " " + state : ""); els.status.textContent = text; }
+
+    // ---- CRC-32 (zlib), golden crc32("123456789") === 0xCBF43926 ----
+    const CRC_TABLE = (() => { const t = new Uint32Array(256); for (let i=0;i<256;i++){ let c=i; for(let k=0;k<8;k++) c=(c&1)?((c>>>1)^0xEDB88320):(c>>>1); t[i]=c>>>0; } return t; })();
+    function crc32(bytes) { let c=0xFFFFFFFF; for (let i=0;i<bytes.length;i++) c=CRC_TABLE[(c^bytes[i])&0xFF]^(c>>>8); return (~c)>>>0; }
+    if (crc32(new TextEncoder().encode("123456789")) !== 0xCBF43926) throw new Error("CRC-32 self-test failed");
+
+    function buildFrame(type, payload, module = moduleEyou) {
+      payload = payload || new Uint8Array(0);
+      const frame = new Uint8Array(HEADER_SIZE + payload.length + CRC_SIZE);
+      const view = new DataView(frame.buffer);
+      view.setUint16(0, 0x4F54, true);
+      frame[2] = FLAGS_REQUEST | ((type & 0x80) ? FLAGS_REPLY_BIT : 0);
+      frame[3] = module; frame[4] = type;
+      view.setUint32(5, payload.length, true);
+      frame.set(payload, HEADER_SIZE);
+      view.setUint32(HEADER_SIZE + payload.length, crc32(frame.subarray(0, HEADER_SIZE + payload.length)), true);
+      return frame;
+    }
+
+    class StreamParser {
+      constructor() { this.buf = new Uint8Array(0); }
+      reset() { this.buf = new Uint8Array(0); }
+      feed(chunk) {
+        const merged = new Uint8Array(this.buf.length + chunk.length);
+        merged.set(this.buf, 0); merged.set(chunk, this.buf.length);
+        const frames = []; let pos = 0;
+        for (;;) {
+          while (pos < merged.length && !(merged[pos] === MAGIC0 && (pos + 1 >= merged.length || merged[pos + 1] === MAGIC1))) pos++;
+          if (merged.length - pos < 3) break;
+          const flags = merged[pos + 2];
+          const ext = (flags & FLAG_CORRELATION) ? CORRELATION_SIZE : 0;
+          const headerSize = HEADER_SIZE + ext;
+          if (merged.length - pos < headerSize) break;
+          const view = new DataView(merged.buffer, merged.byteOffset + pos);
+          const len = view.getUint32(5 + ext, true);
+          if (len > MAX_PAYLOAD) { pos++; continue; }
+          const total = headerSize + len + CRC_SIZE;
+          if (merged.length - pos < total) break;
+          const expected = view.getUint32(headerSize + len, true);
+          if (crc32(merged.subarray(pos, pos + headerSize + len)) !== expected) { pos++; continue; }
+          frames.push({ module: merged[pos + 3], type: merged[pos + 4], reply: (flags & FLAGS_REPLY_BIT) !== 0,
+                        payload: merged.slice(pos + headerSize, pos + headerSize + len) });
+          pos += total;
+        }
+        this.buf = merged.slice(pos);
+        return frames;
+      }
+    }
+    const parser = new StreamParser();
+    // A pending checkModulePresent() parks its resolver here; onIncoming calls it
+    // when the 0xFF ListModules reply arrives.
+    let discoveryResolve = null;
+
+    // ===================== Transports (WebUSB + Web Serial) =====================
+    let transport = null;
+    // WebUSB requires a `filters` member (there is no acceptAllDevices). The
+    // "show all" path uses one empty filter `{}` (matches everything); a few
+    // WebUSB implementations reject an empty filter object, so fall back to a
+    // VID-only filter in that case.
+    async function requestUsbDevice(anyDevice) {
+      const showAll = { filters: [{}] };
+      const vidOnly = { filters: [{ vendorId: DEFAULT_VID }] };
+      try {
+        return await navigator.usb.requestDevice(anyDevice ? showAll : vidOnly);
+      } catch (e) {
+        if (anyDevice && e && e.name === "TypeError")
+          return await navigator.usb.requestDevice(vidOnly);
+        throw e;
+      }
+    }
+    class UsbTransport {
+      constructor() { this.device=null; this.iface=null; this.epIn=null; this.epOut=null; this.reading=false; }
+      // `preset`: an already-permitted USBDevice (auto-connect / reconnect) is
+      // opened directly, without the chooser.
+      async open(anyDevice, preset) {
+        this.device = preset || await requestUsbDevice(anyDevice);
+        await this.device.open();
+        if (this.device.configuration === null) await this.device.selectConfiguration(1);
+        const config = this.device.configuration; if (!config) throw new Error("no active USB configuration");
+        let found = null;
+        for (const itf of config.interfaces) { for (const alt of itf.alternates) {
+          if (alt.interfaceClass !== VENDOR_CLASS) continue;
+          let inEp=null, outEp=null;
+          for (const ep of alt.endpoints) { if (ep.type!=="bulk") continue; if (ep.direction==="in"&&!inEp) inEp=ep; else if (ep.direction==="out"&&!outEp) outEp=ep; }
+          if (inEp && outEp) { found = { itf: itf.interfaceNumber, alt: alt.alternateSetting, inEp, outEp }; break; }
+        } if (found) break; }
+        if (!found) throw new Error("no vendor-specific (0xFF) interface with a bulk IN+OUT endpoint pair was found");
+        await this.device.claimInterface(found.itf);
+        if (found.alt !== 0) await this.device.selectAlternateInterface(found.itf, found.alt);
+        this.iface = found.itf; this.epIn = found.inEp.endpointNumber; this.epOut = found.outEp.endpointNumber;
+      }
+      describe() { const d=this.device; return (d.productName||"USB device")+" ("+d.vendorId.toString(16).padStart(4,"0")+":"+d.productId.toString(16).padStart(4,"0")+") [WebUSB]"; }
+      identity() { return usbIdentity(this.device); }
+      async send(bytes) {
+        let sent = 0;
+        while (sent < bytes.length) {
+          const out = await this.device.transferOut(this.epOut, sent === 0 ? bytes : bytes.subarray(sent));
+          if (out.status === "stall") { try { await this.device.clearHalt("out", this.epOut); } catch(_){} throw new Error("OUT endpoint stalled"); }
+          if (out.status !== "ok") throw new Error("OUT transfer status: " + out.status);
+          const n = out.bytesWritten || 0; if (n === 0) throw new Error("OUT transfer made no progress"); sent += n;
+        }
+      }
+      async readLoop(onData) {
+        this.reading = true;
+        while (this.reading && this.device) {
+          let result;
+          try { result = await this.device.transferIn(this.epIn, MAX_FRAME); } catch(e) { if (this.reading) throw e; return; }
+          if (!this.reading) return;
+          if (result.status === "stall") { try { await this.device.clearHalt("in", this.epIn); } catch(_){} continue; }
+          if (result.data && result.data.byteLength) onData(new Uint8Array(result.data.buffer, result.data.byteOffset, result.data.byteLength));
+        }
+      }
+      async close() { this.reading = false; if (this.device) { if (this.iface !== null) { try { await this.device.releaseInterface(this.iface); } catch(_){} } try { await this.device.close(); } catch(_){} } this.device = null; }
+    }
+    class SerialTransport {
+      constructor() { this.port=null; this.reader=null; this.writer=null; this.reading=false; }
+      async open(preset) { this.port = preset || await navigator.serial.requestPort(); await this.port.open({ baudRate: 115200 }); this.writer = this.port.writable.getWriter(); }
+      describe() { const info = this.port.getInfo ? this.port.getInfo() : {}; let id = "Serial port"; if (info && info.usbVendorId != null) id = "USB serial ("+info.usbVendorId.toString(16).padStart(4,"0")+":"+(info.usbProductId||0).toString(16).padStart(4,"0")+")"; return id + " [Web Serial]"; }
+      identity() { return serialIdentity(this.port); }
+      async send(bytes) { await this.writer.write(bytes); }
+      async readLoop(onData) {
+        this.reading = true; this.reader = this.port.readable.getReader();
+        try { while (this.reading) { const { value, done } = await this.reader.read(); if (done) { if (this.reading) throw new Error("serial connection closed (EOF)"); break; } if (value && value.length) onData(new Uint8Array(value.buffer, value.byteOffset, value.byteLength)); } }
+        finally { try { this.reader.releaseLock(); } catch(_){} this.reader = null; }
+      }
+      async close() {
+        this.reading = false;
+        if (this.reader) { try { await this.reader.cancel(); } catch(_){} try { this.reader.releaseLock(); } catch(_){} this.reader = null; }
+        if (this.writer) { try { await this.writer.close(); } catch(_){} try { this.writer.releaseLock(); } catch(_){} this.writer = null; }
+        if (this.port) { try { await this.port.close(); } catch(_){} this.port = null; }
+      }
+    }
+
+    async function tx(bytes) { if (!transport) { logLine("err", "not connected"); return; } try { await transport.send(bytes); } catch(e) { logLine("err", "send failed: " + (e && e.message ? e.message : e)); } }
+    function send(type, payload) {
+      if (!moduleReady) { logLine("warn", "Module id not resolved yet (discovery pending)."); return; }
+      tx(buildFrame(type, payload));
+    }
+
+    // ===================== Module discovery + module id resolution =====================
+    // Decode the ListModules TLV (see espp::Dispatcher::describe).
+    function parseDiscovery(payload) {
+      let i = 0;
+      const need = (n) => { if (i + n > payload.length) throw new Error("truncated discovery payload"); };
+      const u8 = () => { need(1); return payload[i++]; };
+      const u16 = () => { need(2); const v = payload[i] | (payload[i + 1] << 8); i += 2; return v; };
+      const str = () => { const n = u8(); need(n); const s = new TextDecoder().decode(payload.subarray(i, i + n)); i += n; return s; };
+      const version = u8(); u8();            // version, reserved
+      const device = str(), fw = str();
+      const count = u8();
+      const modules = [];
+      for (let m = 0; m < count; m++) {
+        const rec = { id: u8(), name: str(), app: str(), desc: str(), protocol: "", protocolVersion: 0 };
+        // Version 2 records also carry [protocol str][protocol_version u16 LE].
+        // Records carry no length, so a payload version newer than
+        // DISCOVERY_VERSION_KNOWN is parsed with the exact version-2 record
+        // layout: a future version may only append bytes AFTER the record list
+        // (reported as `trailing`, ignored), never inside a record.
+        if (version >= 2) { rec.protocol = str(); rec.protocolVersion = u16(); }
+        modules.push(rec);
+      }
+      return { version, device, fw, modules, trailing: payload.length - i };
+    }
+    // ---- module id resolution (identical in every espp console) --------------
+    // The dispatcher module byte is a routing key, not the identity of a
+    // service: a device may serve any protocol on any id. Identity is what the
+    // device advertises in its ListModules reply -- the protocol id first
+    // (e.g. "espp.ota"), then the hosted app filename, then the module name.
+    // Latest discovery payload version these helpers understand.
+    const DISCOVERY_VERSION_KNOWN = 2;
+    // info: parseDiscovery() output, or null when the device did not answer.
+    // ident: { protocol, protocolVersion, app, name, fallback, override } -- the
+    //   identity this console implements; `override` (from ?module=) wins.
+    // Returns { id, source: "override"|"protocol"|"app"|"name"|"default",
+    //           protocolVersion (advertised by the chosen module, else null),
+    //           warnings: [strings], notes: [informational strings] }.
+    function resolveModuleId(info, ident) {
+      const norm = (s) => String(s == null ? "" : s).trim().toLowerCase();
+      const base = (s) => { const n = norm(s).split("?")[0].split("#")[0]; return n.slice(n.lastIndexOf("/") + 1); };
+      const list = (info && Array.isArray(info.modules)) ? info.modules : null;
+      const label = (m) => (m.name || m.protocol || "?") + " (#" + m.id + ")";
+      const want = String(ident.protocol || "");
+      const warnings = [], notes = [];
+      if (info && info.version > DISCOVERY_VERSION_KNOWN)
+        warnings.push("discovery payload v" + info.version + " is newer than this console understands (v" + DISCOVERY_VERSION_KNOWN + "); parsed with the v" + DISCOVERY_VERSION_KNOWN + " record layout");
+      if (info && info.trailing > 0)
+        notes.push("ignoring " + info.trailing + " trailing byte(s) after the module list (discovery v" + info.version + ")");
+      // Finish with the chosen module (m may be null when unknown), checking
+      // that it speaks the protocol we implement, at a version we support.
+      const done = (m, source) => {
+        const v = (m && Number.isInteger(m.protocolVersion)) ? m.protocolVersion : null;
+        if (m && want && m.protocol && m.protocol !== want)
+          warnings.push("module #" + m.id + " advertises protocol " + m.protocol + ", not " + want);
+        else if (v && Number.isInteger(ident.protocolVersion) && v !== ident.protocolVersion)
+          warnings.push("device speaks " + (m.protocol || want) + " v" + v + ", this console supports v" + ident.protocolVersion);
+        return { id: m ? m.id : ident.fallback, source, protocolVersion: v, warnings, notes };
+      };
+      const ov = ident.override;
+      if (Number.isInteger(ov) && ov >= 0 && ov <= 0xEF) { // 0xF0..0xFF: reserved (dispatcher / meta)
+        const m = list ? list.find((x) => x.id === ov) : null;
+        if (list && !m) warnings.push("module #" + ov + " was requested but the device does not advertise it");
+        const r = done(m, "override"); r.id = ov; return r;
+      }
+      if (list) {
+        const byProto = want ? list.filter((m) => m.protocol === want) : [];
+        if (byProto.length > 1)
+          warnings.push("several modules speak " + want + " (" + byProto.map(label).join(", ") + "); using the first -- add ?module=N to the URL to pick another");
+        if (byProto.length) return done(byProto[0], "protocol");
+        const wantApp = base(ident.app), wantName = norm(ident.name);
+        const byApp = wantApp ? list.find((m) => base(m.app) === wantApp) : null;
+        if (byApp) return done(byApp, "app");
+        const byName = wantName ? list.find((m) => norm(m.name) === wantName) : null;
+        if (byName) return done(byName, "name");
+        warnings.push("the device does not advertise " + (want || ident.name || ident.app) + " (advertised: " + (list.map(label).join(", ") || "none") + "); using the default module #" + ident.fallback);
+      }
+      return { id: ident.fallback, source: "default", protocolVersion: null, warnings, notes };
+    }
+    // The ?module=N query parameter (decimal or 0x..) overrides discovery; the
+    // Device Hub links each console this way. Null when absent or invalid.
+    function moduleOverrideFromQuery(search) {
+      const raw = new URLSearchParams(search || "").get("module");
+      if (raw == null || raw.trim() === "") return null;
+      // the WHOLE token must be a decimal or 0x-hex integer (parseInt would
+      // accept "9oops" as 9); anything else is invalid and ignored
+      const m = /^(?:0x([0-9a-f]+)|([0-9]+))$/i.exec(raw.trim());
+      if (!m) return null;
+      const n = m[1] !== undefined ? Number.parseInt(m[1], 16) : Number.parseInt(m[2], 10);
+      return (Number.isInteger(n) && n >= 0 && n <= 0xEF) ? n : null; // 0xF0..0xFF are reserved
+    }
+    // One log line saying how a module id was chosen.
+    function describeModuleChoice(label, r, ident, info) {
+      const how = r.source === "override" ? "from ?module=" :
+                  r.source === "protocol" ? "advertises " + ident.protocol + (r.protocolVersion ? " v" + r.protocolVersion : "") :
+                  r.source === "app" ? "advertised as app " + ident.app :
+                  r.source === "name" ? "advertised as \"" + ident.name + "\"" :
+                  info ? "default" : "default; the device did not answer discovery";
+      return label + " module: #" + r.id + " (" + how + ")";
+    }
+
+    // --- begin connection helpers (shared; byte-identical in every console + the hub, see web/test/resolve_module_id_test.js) ---
+    // Links may carry, besides ?module=, parameters that make a page connect on
+    // load WITHOUT the browser chooser to a device this origin was already
+    // granted (the Device Hub links its apps this way after releasing the
+    // device):  ?autoconnect=1&transport=usb|serial&vid=0x1209&pid=0x0d32&serial=ABC
+    // vid / pid are hex (0x..) or decimal; `serial` is the USB serial number
+    // (WebUSB only: Web Serial exposes vid / pid alone).
+    function parseConnectParams(search) {
+      const q = new URLSearchParams(search || "");
+      const num = (key) => {
+        const raw = q.get(key);
+        if (raw === null) return null;
+        const s = raw.trim();
+        if (!/^(0x[0-9a-f]+|[0-9]+)$/i.test(s)) return null;
+        const v = Number(s);
+        return Number.isInteger(v) && v >= 0 && v <= 0xFFFF ? v : null;
+      };
+      const transport = (q.get("transport") || "").trim().toLowerCase();
+      const flag = (q.get("autoconnect") || "").trim().toLowerCase();
+      return {
+        autoconnect: flag === "1" || flag === "true" || flag === "yes",
+        transport: transport === "usb" || transport === "serial" ? transport : null,
+        vid: num("vid"),
+        pid: num("pid"),
+        serial: (q.get("serial") || "").trim() || null,
+      };
+    }
+    // The identity of an open connection: enough to find the same device again
+    // (after a reboot it re-enumerates as a NEW USBDevice / SerialPort object
+    // with the same ids) and to build hand-off links.
+    function usbIdentity(device) {
+      return { transport: "usb", vid: device.vendorId, pid: device.productId, serial: device.serialNumber || null };
+    }
+    function serialIdentity(port) {
+      const info = port && typeof port.getInfo === "function" ? (port.getInfo() || {}) : {};
+      return { transport: "serial", vid: info.usbVendorId != null ? info.usbVendorId : null,
+               pid: info.usbProductId != null ? info.usbProductId : null, serial: null };
+    }
+    // Is `got` (the identity of a device that just appeared) the device `want`
+    // names? vid + pid must match; the serial number only when both sides
+    // report one (a serial-port arrival never has one). An arrival with no
+    // usable ids is never a match.
+    function identityMatches(want, got) {
+      if (!want || !got || got.vid == null || got.pid == null) return false;
+      if (want.vid != null && want.vid !== got.vid) return false;
+      if (want.pid != null && want.pid !== got.pid) return false;
+      if (want.serial && got.serial && want.serial !== got.serial) return false;
+      return true;
+    }
+    function describeIdentity(identity) {
+      if (!identity) return "device";
+      const hex = (v) => v == null ? "?" : "0x" + v.toString(16).padStart(4, "0");
+      return (identity.transport === "serial" ? "serial port" : "USB device") + " " + hex(identity.vid) + ":" + hex(identity.pid) +
+             (identity.serial ? " sn " + identity.serial : "");
+    }
+    // Pick, among the devices this origin may already use (navigator.usb
+    // .getDevices() / navigator.serial.getPorts()), the one `want` names: vid
+    // and pid must match when given; a serial number must match when both sides
+    // report one (a device that reports none is accepted only when it is the
+    // sole candidate). Several candidates without a serial -> the first. With no
+    // ids at all only a lone permitted device is accepted.
+    function pickUsbDevice(devices, want) {
+      const list = Array.isArray(devices) ? devices.filter(Boolean) : [];
+      if (!want || (want.vid == null && want.pid == null && !want.serial)) return list.length === 1 ? list[0] : null;
+      const byIds = list.filter(d => (want.vid == null || d.vendorId === want.vid) && (want.pid == null || d.productId === want.pid));
+      if (want.serial) {
+        const exact = byIds.find(d => d.serialNumber === want.serial);
+        if (exact) return exact;
+        const unnamed = byIds.filter(d => !d.serialNumber);
+        return unnamed.length === 1 ? unnamed[0] : null;
+      }
+      return byIds.length ? byIds[0] : null;
+    }
+    function pickSerialPort(ports, want) {
+      const list = Array.isArray(ports) ? ports.filter(Boolean) : [];
+      if (!want || (want.vid == null && want.pid == null)) return list.length === 1 ? list[0] : null;
+      const byIds = list.filter(p => { const id = serialIdentity(p); return (want.vid == null || id.vid === want.vid) && (want.pid == null || id.pid === want.pid); });
+      return byIds.length ? byIds[0] : null;
+    }
+    async function findPermittedUsbDevice(want) {
+      if (typeof navigator === "undefined" || !navigator.usb || typeof navigator.usb.getDevices !== "function") return null;
+      try { return pickUsbDevice(await navigator.usb.getDevices(), want); } catch (_) { return null; }
+    }
+    async function findPermittedSerialPort(want) {
+      if (typeof navigator === "undefined" || !navigator.serial || typeof navigator.serial.getPorts !== "function") return null;
+      try { return pickSerialPort(await navigator.serial.getPorts(), want); } catch (_) { return null; }
+    }
+    // "Auto-reconnect" checkbox preference, shared by every app on this origin
+    // (localStorage; default on; access may throw in private windows).
+    const AUTO_RECONNECT_KEY = "espp.autoReconnect";
+    function loadAutoReconnect() {
+      try { const v = localStorage.getItem(AUTO_RECONNECT_KEY); return v === null ? true : v === "1"; } catch (_) { return true; }
+    }
+    function saveAutoReconnect(on) { try { localStorage.setItem(AUTO_RECONNECT_KEY, on ? "1" : "0"); } catch (_) {} }
+    // One open at a time per page. Every connect entry point — the Connect
+    // button(s), the ?autoconnect path and the reconnect supervisor — runs
+    // through gate.run(fn); while an open is in progress a second entry is
+    // refused (resolves false) instead of racing the first: the later
+    // completion would otherwise overwrite a live transport without closing it
+    // or orphan a claimed USB device. The supervisor consults isBusy() and
+    // waits rather than counting a refused entry as a failed attempt.
+    // opts.connected() is the page's "already holds a device" predicate: the
+    // gate serializes opens but does not know about an adopted connection, so
+    // run() also refuses (opens nothing) while the page is connected — a
+    // reconnect callback whose permitted-device lookup outlived a manual
+    // connect must not open the same device a second time.
+    function createOpenGate(opts) {
+      const connected = opts && typeof opts.connected === "function" ? opts.connected : () => false;
+      const gate = { busy: false };
+      gate.isBusy = () => gate.busy;
+      gate.isConnected = () => !!connected();
+      gate.run = async (fn) => {
+        if (gate.busy || connected()) return false;
+        gate.busy = true;
+        try { return await fn(); } finally { gate.busy = false; }
+      };
+      return gate;
+    }
+    // Reconnect supervisor. After an UNEXPECTED link loss (unplug, reboot) it
+    // retries opts.reconnect(identity, attempt) -> bool on a bounded back-off
+    // until an attempt succeeds, the attempts run out, or stop() is called; a
+    // platform `connect` event (onDeviceAppeared) retries at once. opts.enabled()
+    // (the checkbox) is consulted on every attempt. expectReboot() marks a
+    // reboot the page itself requested (longer window, friendlier log);
+    // suppress() cancels reconnecting until the next successful connect (a
+    // bootloader reboot: the device comes back as a DIFFERENT USB device that
+    // this page cannot drive). opts.log(cls, text) receives progress lines.
+    // Attempts never overlap: one opts.reconnect() call is in flight at a time
+    // (two concurrent opens of the same device would race each other); an
+    // arrival event during an attempt is remembered and retried right after
+    // the current attempt settles. A loss that happens while an older attempt
+    // is still in flight (the device dropped again during the post-open
+    // discovery probe) starts a new generation; when the stale attempt settles
+    // it hands over by scheduling the current generation's pending retry.
+    // opts.gate (createOpenGate) is shared with the page's manual / auto-connect
+    // paths: while one of those holds it the supervisor polls instead of opening.
+    // Cancellation: stop() (the checkbox unticked, a manual disconnect) and a
+    // newer loss cancel the attempt in flight. opts.reconnect(identity, n,
+    // token) may consult token.cancelled(); when a cancelled attempt settles
+    // the supervisor ignores the page's connected() call made while it was
+    // open and runs opts.discard() (the page's close path), so an open that
+    // finished after the user said "stop" is closed instead of adopted.
+    function createReconnectSupervisor(opts) {
+      const delays = opts.delaysMs || [500, 1000, 1500, 2000, 3000, 4000, 5000, 5000, 5000, 5000];
+      const rebootDelays = opts.rebootDelaysMs || delays.concat([5000, 5000, 5000, 5000, 5000, 5000]);
+      const log = typeof opts.log === "function" ? opts.log : () => {};
+      // generations <= cancelBefore are cancelled; inFlightGen is the generation of the attempt in flight
+      const sup = { active: false, identity: null, attempt: 0, expected: false, suppressed: false, timer: null, generation: 0, inFlight: false, retryAfter: false, cancelBefore: 0, inFlightGen: 0 };
+      const cancelled = (gen) => gen <= sup.cancelBefore;
+      const cancelCurrent = () => { sup.cancelBefore = sup.generation; };
+      const clearTimer = () => { if (sup.timer) { clearTimeout(sup.timer); sup.timer = null; } };
+      const schedule = (gen, ms) => { clearTimer(); sup.timer = setTimeout(() => { sup.timer = null; attempt(gen); }, ms); };
+      async function attempt(gen) {
+        if (gen !== sup.generation || !sup.active) return;
+        if (sup.inFlight) { sup.retryAfter = true; return; } // serialized: retry once the current attempt settles
+        if (opts.gate && opts.gate.isBusy()) { schedule(gen, 250); return; } // a manual / auto-connect open is in progress: wait, not an attempt
+        if (!opts.enabled()) { sup.stop("auto-reconnect is off"); return; }
+        const plan = sup.expected ? rebootDelays : delays;
+        sup.attempt++;
+        let ok = false;
+        sup.inFlight = true; sup.inFlightGen = gen; sup.retryAfter = false;
+        const token = { cancelled: () => cancelled(gen) };
+        try { ok = await opts.reconnect(sup.identity, sup.attempt, token); }
+        catch (e) { if (!cancelled(gen)) log("warn", "reconnect attempt " + sup.attempt + " failed: " + (e && e.message ? e.message : e)); }
+        finally { sup.inFlight = false; }
+        if (cancelled(gen) && ok) {
+          // stop() / a newer loss happened while the open was pending and the
+          // open succeeded anyway: it must not stay adopted (the page's
+          // connected() was ignored). An attempt that opened nothing (lookup
+          // failed, returned false) has nothing to discard; running the page's
+          // disconnect then would drop a manual connection made meanwhile.
+          if (typeof opts.discard === "function") { try { await opts.discard(); } catch (_) {} }
+        }
+        if (gen !== sup.generation) {
+          // stale: a newer loss owns the supervisor now. Its timer may already
+          // have fired into our in-flight attempt (retryAfter) and left no timer
+          // behind, so re-arm it here or auto-reconnect would stall for good.
+          const pending = sup.retryAfter; sup.retryAfter = false;
+          if (sup.active && !sup.timer && pending) schedule(sup.generation, 100);
+          return;
+        }
+        if (!sup.active) { sup.retryAfter = false; return; }
+        if (ok) { sup.active = false; sup.expected = false; sup.retryAfter = false; clearTimer(); return; }
+        if (sup.attempt >= plan.length) { sup.stop("gave up reconnecting after " + sup.attempt + " attempts; use Connect"); return; }
+        if (sup.retryAfter) { sup.retryAfter = false; schedule(gen, 100); return; } // the device showed up meanwhile
+        schedule(gen, plan[sup.attempt]);
+      }
+      // the page lost its connection without asking for it
+      sup.onLinkLost = (identity) => {
+        clearTimer();
+        cancelCurrent();
+        sup.generation++;
+        if (sup.suppressed) { sup.suppressed = false; sup.active = false; log("sys", "Not reconnecting: the device was asked to reboot into its bootloader (it enumerates as a different USB device; use Connect once it is back in the application)."); return; }
+        if (!opts.enabled() || !identity) { sup.active = false; return; }
+        sup.active = true; sup.identity = identity; sup.attempt = 0;
+        const plan = sup.expected ? rebootDelays : delays;
+        log("sys", (sup.expected ? "Device is rebooting — reconnecting to " : "Link lost — trying to reconnect to ") + describeIdentity(identity) + " (auto-reconnect; uncheck to stop)…");
+        schedule(sup.generation, plan[0]);
+      };
+      // a permitted device re-appeared (navigator.usb / navigator.serial
+      // "connect"): only the device being recovered wakes the supervisor — an
+      // unrelated arrival would otherwise burn one of the bounded retries
+      sup.onDeviceAppeared = (identity) => {
+        if (!sup.active || !identityMatches(sup.identity, identity)) return;
+        if (sup.inFlight) sup.retryAfter = true; else schedule(sup.generation, 100);
+      };
+      sup.expectReboot = () => { sup.expected = true; sup.suppressed = false; };
+      sup.suppress = () => { sup.suppressed = true; sup.expected = false; };
+      // a connection was established (manually or by a successful attempt)
+      sup.connected = () => {
+        if (sup.inFlight && cancelled(sup.inFlightGen)) return; // a cancelled attempt's open: it is about to be discarded
+        clearTimer(); sup.generation++; sup.active = false; sup.expected = false; sup.suppressed = false; sup.attempt = 0; sup.retryAfter = false; };
+      sup.stop = (reason) => { clearTimer(); cancelCurrent(); sup.generation++; const was = sup.active; sup.active = false; sup.expected = false; sup.retryAfter = false; if (was && reason) log("sys", "Auto-reconnect stopped: " + reason + "."); };
+      sup.isActive = () => sup.active;
+      return sup;
+    }
+    // Forward the platform "a permitted device was (re)attached" events to the
+    // supervisor, with the arriving device's identity, so a reboot is caught
+    // the moment the device enumerates (and other devices are ignored).
+    function watchDeviceArrivals(sup) {
+      if (typeof navigator === "undefined") return;
+      if (navigator.usb && typeof navigator.usb.addEventListener === "function")
+        navigator.usb.addEventListener("connect", (ev) => sup.onDeviceAppeared(ev && ev.device ? usbIdentity(ev.device) : null));
+      if (navigator.serial && typeof navigator.serial.addEventListener === "function")
+        navigator.serial.addEventListener("connect", (ev) => { const port = ev && (ev.port || ev.target); sup.onDeviceAppeared(port ? serialIdentity(port) : null); });
+    }
+    // App -> hub notice that an app released its device (manual disconnect or
+    // page closed), so a hub that handed the device off can offer to reconnect.
+    // Same-origin pages only (BroadcastChannel); best effort everywhere.
+    function openDeviceChannel() {
+      let channel = null;
+      try { channel = typeof BroadcastChannel === "function" ? new BroadcastChannel("espp-device") : null; } catch (_) { return null; }
+      // Close the channel when the page goes away (no late deliveries to a page
+      // that is unloading, no leaked channel across rapid reloads). The listener
+      // is registered on a later task so it runs AFTER the page's own pagehide
+      // handler, which still needs the channel to post its released notice.
+      if (channel && typeof window !== "undefined" && typeof window.addEventListener === "function")
+        setTimeout(() => window.addEventListener("pagehide", () => { try { channel.close(); } catch (_) {} }, { once: true }), 0);
+      return channel;
+    }
+    function postReleased(channel, identity) {
+      if (!channel || !identity) return;
+      try { channel.postMessage({ type: "released", identity: identity, page: (typeof location !== "undefined" ? location.pathname : "").split("/").pop() }); } catch (_) {}
+    }
+    // --- end connection helpers ---
+    // --- begin app navigation (shared; byte-identical in every web app, see web/test/resolve_module_id_test.js) ---
+    // Links back to the Device Hub (primary) and the apps page. The static hrefs
+    // in the HTML are the hosted copies (always valid, also when this script
+    // never runs — a file:// page whose ES-module import is blocked). In the
+    // hosted apps directory (…/apps/ on the documentation site, or a local
+    // server in docs/apps) hub and apps page are siblings of every app, so the
+    // links are rewritten to the sibling files there; anywhere else — file://,
+    // a source tree served from http://localhost (where the haptics console is
+    // example/webapp/index.html itself) — they stay on the hosted copies.
+    const ESPP_APPS_BASE = "https://esp-cpp.github.io/espp/apps/";
+    function inHostedAppsDir(loc) {
+      if (!loc || !/^https?:$/.test(loc.protocol)) return false;
+      const dir = String(loc.pathname || "").replace(/[^/]*$/, "");
+      return /\/apps\/$/.test(dir);
+    }
+    function navHref(file) {
+      return inHostedAppsDir(typeof location !== "undefined" ? location : null) ? file : ESPP_APPS_BASE + file;
+    }
+    // Wire the #navHub / #navApps hrefs (every app). Returns the hub link.
+    function installAppNav() {
+      const hub = typeof document !== "undefined" ? document.getElementById("navHub") : null;
+      const apps = typeof document !== "undefined" ? document.getElementById("navApps") : null;
+      if (apps) apps.href = navHref("index.html");
+      if (hub) hub.href = navHref("dispatcher_hub.html");
+      return hub;
+    }
+    // --- end app navigation ---
+    // --- begin app hand-back (shared; byte-identical in every dispatcher-module console, see web/test/resolve_module_id_test.js) ---
+    // The auto-connect query (no module) a hand-back carries so the hub opens the
+    // device the app just released, without a chooser.
+    function hubConnectQuery(identity) {
+      const q = new URLSearchParams();
+      if (!identity || (identity.transport !== "usb" && identity.transport !== "serial")) return "";
+      q.set("autoconnect", "1");
+      q.set("transport", identity.transport);
+      if (identity.vid != null) q.set("vid", "0x" + identity.vid.toString(16).padStart(4, "0"));
+      if (identity.pid != null) q.set("pid", "0x" + identity.pid.toString(16).padStart(4, "0"));
+      if (identity.serial) q.set("serial", identity.serial);
+      return q.toString();
+    }
+    // A plain left click on "Device Hub" while connected hands the device back.
+    // handover.connected() says whether the page holds a device;
+    // handover.handBack() closes it the way a manual Disconnect does (stop the
+    // supervisor, close, then post the released notice) and resolves the
+    // device's identity; the tab then navigates to the hub with the auto-connect
+    // query. The href stays the plain hub URL, so middle-click / open-in-new-tab
+    // / modified clicks keep working and never close anything. One hand-back at
+    // a time: a second click while the first is closing is swallowed (the guard
+    // is never cleared on success — the page navigates away — and cleared on
+    // failure). The chooser-less pick-up on the hub needs the same origin (the
+    // device grant is per origin); a console on another origin still lands on
+    // the hub with the identity in the URL, and the hub offers Connect.
+    function installAppHandBack(handover) {
+      const hub = typeof document !== "undefined" ? document.getElementById("navHub") : null;
+      if (!hub) return;
+      let handingBack = false;
+      hub.addEventListener("click", (ev) => {
+        if (ev.defaultPrevented || ev.button !== 0 || ev.metaKey || ev.ctrlKey || ev.shiftKey || ev.altKey) return;
+        if (handingBack) { ev.preventDefault(); return; }
+        if (!handover.connected()) return;
+        ev.preventDefault();
+        handingBack = true;
+        const target = hub.href;
+        Promise.resolve().then(() => handover.handBack()).then(
+          (identity) => { const q = hubConnectQuery(identity); location.assign(target + (q ? "?" + q : "")); },
+          () => { handingBack = false; location.assign(target); });
+      });
+    }
+    // --- end app hand-back ---
+    // Adopt the Eyou module id from a discovery reply (null = none) -- every
+    // Eyou frame built / matched from here on uses it.
+    function adoptModule(info) {
+      MODULE_IDENT.override = moduleOverrideFromQuery(location.search);
+      const r = resolveModuleId(info, MODULE_IDENT);
+      moduleEyou = r.id;
+      moduleReady = true;
+      logLine("sys", describeModuleChoice("Eyou motor", r, MODULE_IDENT, info));
+      for (const w of r.warnings) logLine("warn", w + ".");
+      for (const n of r.notes) logLine("sys", n + ".");
+    }
+    // Ask the device which dispatcher modules it serves and adopt the Eyou
+    // module's id from the answer (adoptModule). No discovery reply (older
+    // firmware) -> the default id; the normal STATUS request still surfaces a
+    // genuinely missing module.
+    async function checkModulePresent() {
+      const t = transport;
+      if (!t) return;
+      const payload = await new Promise((resolve) => {
+        let timer = null;
+        // settle guards the shared resolver: only clear it if it is still ours,
+        // so a prior probe's timeout can't cancel a newer probe's resolver.
+        const settle = (p) => { clearTimeout(timer); if (discoveryResolve === settle) discoveryResolve = null; resolve(p); };
+        timer = setTimeout(() => settle(null), DISCOVERY_TIMEOUT_MS);
+        discoveryResolve = settle;
+        t.send(buildFrame(T_LIST_MODULES, null, MODULE_DISCOVERY)).catch(() => settle(null));
+      });
+      // this probe belongs to the transport it sent on: if that connection was
+      // closed or replaced while we waited, its result (a reply or, more
+      // likely, the timeout) must not be adopted into the current one
+      if (t !== transport) return;
+      let info = null;
+      if (payload) { try { info = parseDiscovery(payload); } catch (_) { info = null; } }
+      adoptModule(info);
+    }
+    // ---- request encoders ----
+    function encU8(v) { return new Uint8Array([v & 0xFF]); }
+    function encStream(enable, periodMs) { const b = new Uint8Array(3); b[0] = enable ? 1 : 0; new DataView(b.buffer).setUint16(1, periodMs & 0xFFFF, true); return b; }
+    function encU16(v) { const b = new Uint8Array(2); new DataView(b.buffer).setUint16(0, v & 0xFFFF, true); return b; }
+    function encMove(degrees, immediate) { const b = new Uint8Array(5); new DataView(b.buffer).setFloat32(0, degrees, true); b[4] = immediate ? 1 : 0; return b; }
+    function encZero(mode, degrees) { const b = new Uint8Array(5); b[0] = mode & 0xFF; new DataView(b.buffer).setFloat32(1, degrees, true); return b; }
+    function encProfile(v, a, d) { const b = new Uint8Array(12); const dv = new DataView(b.buffer); dv.setFloat32(0, v, true); dv.setFloat32(4, a, true); dv.setFloat32(8, d, true); return b; }
+    function encLimits(min, max) { const b = new Uint8Array(8); const dv = new DataView(b.buffer); dv.setFloat32(0, min, true); dv.setFloat32(4, max, true); return b; }
+
+    // ===================== Payload decoders =====================
+    // STATUS (72 B): see eyou_protocol::Status.
+    //   [flags u8][node u8][statusword u16][error_code u16][mode i8][res u8]
+    //   [angle f32][velocity f32][torque i16][current i16][torque_limit u16][torque_limit_max u16]
+    //   [target f32][rated_torque_mnm u32][rated_current_ma u32][zero_offset i32]
+    //   [pos_min f32][pos_max f32][prof_vel f32][prof_acc f32][prof_dec f32]
+    //   [timestamp_ms u32][seq u32][stream_period_ms u16][res u16]
+    function parseStatus(p) {
+      if (p.length < 72) return null;
+      const dv = new DataView(p.buffer, p.byteOffset, p.length);
+      const flags = p[0];
+      return { enabled: !!(flags & 1), faulted: !!(flags & 2), zeroSet: !!(flags & 4), streamEnabled: !!(flags & 8),
+        targetReached: !!(flags & 16), commOk: !!(flags & 32), node: p[1], statusword: dv.getUint16(2, true),
+        errorCode: dv.getUint16(4, true), mode: dv.getInt8(6),
+        angle: dv.getFloat32(8, true), velocity: dv.getFloat32(12, true),
+        torque: dv.getInt16(16, true), current: dv.getInt16(18, true), torqueLimit: dv.getUint16(20, true), torqueLimitMax: dv.getUint16(22, true),
+        target: dv.getFloat32(24, true), ratedTorqueMnm: dv.getUint32(28, true), ratedCurrentMa: dv.getUint32(32, true),
+        zeroOffset: dv.getInt32(36, true), posMin: dv.getFloat32(40, true), posMax: dv.getFloat32(44, true),
+        profVel: dv.getFloat32(48, true), profAcc: dv.getFloat32(52, true), profDec: dv.getFloat32(56, true),
+        timeMs: dv.getUint32(60, true), seq: dv.getUint32(64, true), streamPeriodMs: dv.getUint16(68, true) };
+    }
+    // DS402 statusword -> state name (CiA 402 table 8-2 bit masks).
+    function ds402Name(sw) {
+      if ((sw & 0x4F) === 0x00) return "Not ready to switch on";
+      if ((sw & 0x4F) === 0x40) return "Switch on disabled";
+      if ((sw & 0x6F) === 0x21) return "Ready to switch on";
+      if ((sw & 0x6F) === 0x23) return "Switched on";
+      if ((sw & 0x6F) === 0x27) return "Operation enabled";
+      if ((sw & 0x6F) === 0x07) return "Quick stop active";
+      if ((sw & 0x4F) === 0x0F) return "Fault reaction active";
+      if ((sw & 0x4F) === 0x08) return "Fault";
+      return "Unknown (0x" + sw.toString(16).padStart(4, "0") + ")";
+    }
+    const MODE_NAME = { 0: "none", 1: "profile position", 3: "profile velocity", 4: "profile torque", 6: "homing", 7: "interpolated position", 8: "cyclic sync position", 9: "cyclic sync velocity", 10: "cyclic sync torque" };
+    const PULSES_PER_TURN = 524288 * 100; // 2^19 encoder pulses x 100:1 harmonic reduction, per output turn
+
+    // ===================== Units =====================
+    // torque / current arrive as per-thousand of the rated values; with the
+    // rated values known they are shown in Nm / A (the checkbox keeps per-mille)
+    function torqueScale(s) { return (!els.permilleUnits.checked && s && s.ratedTorqueMnm) ? s.ratedTorqueMnm / 1e6 : null; } // permille -> Nm
+    function currentScale(s) { return (!els.permilleUnits.checked && s && s.ratedCurrentMa) ? s.ratedCurrentMa / 1e6 : null; } // permille -> A
+    function fmt(v, digits) { return Number.isFinite(v) ? v.toFixed(digits) : "-"; }
+    function fmtLimit(v) { return Number.isFinite(v) ? v.toFixed(1) : (v > 0 ? "+inf" : v < 0 ? "-inf" : "-"); }
+
+    // ===================== Drive state (STATUS) =====================
+    let lastStatus = null;
+    let streamRequestPending = false;
+    let rxTimes = [];
+    // Reflect a device value in an input only when it CHANGED on the device, and
+    // never under the user's cursor: the status arrives at the stream rate, so
+    // blindly copying it would wipe an edit the user has not applied yet.
+    function reflect(el, value, prev, digits) {
+      if (prev !== undefined && prev === value) return;
+      if (document.activeElement === el) return;
+      el.value = typeof digits === "number" && Number.isFinite(value) ? String(Number(value.toFixed(digits))) : String(value);
+    }
+    function applyStatus(s) {
+      const prev = lastStatus;
+      lastStatus = s;
+      rxTimes.push(performance.now()); while (rxTimes.length && rxTimes[0] < performance.now() - 2000) rxTimes.shift();
+      els.rxRate.textContent = rxTimes.length > 1 ? (rxTimes.length / 2).toFixed(1) + " Hz" : "-";
+      // state
+      const st = !s.commOk ? { name: "no communication", cls: "fault" } : s.faulted ? { name: "FAULT", cls: "fault" } :
+                 s.enabled ? { name: "Operation enabled", cls: "enabled" } : { name: ds402Name(s.statusword), cls: "idle" };
+      els.driveState.textContent = st.name; els.driveState.className = "state-badge " + st.cls;
+      els.devComm.textContent = s.commOk ? "ok" : "no answer";
+      els.devNode.textContent = String(s.node);
+      reflect(els.nodeId, s.node, prev && prev.node);
+      els.devMode.textContent = MODE_NAME[s.mode] || String(s.mode);
+      els.devStatusword.textContent = "0x" + s.statusword.toString(16).padStart(4, "0") + (s.targetReached ? " (target reached)" : "");
+      els.devError.textContent = s.errorCode ? "0x" + s.errorCode.toString(16).padStart(4, "0") : "none";
+      els.devRated.textContent = (s.ratedTorqueMnm || s.ratedCurrentMa) ? (s.ratedTorqueMnm / 1000).toFixed(2) + " Nm / " + (s.ratedCurrentMa / 1000).toFixed(2) + " A" : "unknown";
+      // readouts
+      const tScale = torqueScale(s), cScale = currentScale(s);
+      els.rAngle.textContent = fmt(s.angle, 2);
+      els.rAngleSub.textContent = s.zeroSet ? "zero set (offset " + (s.zeroOffset / PULSES_PER_TURN * 360).toFixed(2) + " deg)" : "zero: not set (absolute encoder angle)";
+      els.rVelocity.textContent = fmt(s.velocity, 1);
+      els.rVelocitySub.textContent = s.enabled ? (s.targetReached ? "target reached" : "moving") : " ";
+      els.rTorque.textContent = tScale ? fmt(s.torque * tScale, 3) : String(s.torque);
+      els.rTorqueUnit.textContent = tScale ? "Nm" : "‰";
+      els.rTorqueSub.textContent = "limit: " + (tScale ? (s.torqueLimit * tScale).toFixed(3) + " Nm (" + s.torqueLimit + " ‰)" : s.torqueLimit + " ‰") +
+        (s.torqueLimit ? " · " + Math.min(999, Math.round(Math.abs(s.torque) / s.torqueLimit * 100)) + "%" : "");
+      els.rCurrent.textContent = cScale ? fmt(s.current * cScale, 3) : String(s.current);
+      els.rCurrentUnit.textContent = cScale ? "A" : "‰";
+      els.rCurrentSub.textContent = cScale ? "(" + s.current + " ‰ of rated)" : " ";
+      els.rTarget.textContent = fmt(s.target, 2);
+      els.rTargetSub.textContent = Number.isFinite(s.target) ? "error " + (s.target - s.angle).toFixed(2) + " deg" : "no move commanded";
+      // settings mirrored into the inputs (only when they change on the device)
+      // the device's ceiling sizes the control (0 = unknown / old firmware: leave the defaults)
+      if (s.torqueLimitMax && (!prev || prev.torqueLimitMax !== s.torqueLimitMax)) {
+        els.torqueLimit.max = String(s.torqueLimitMax); els.torqueLimitSlider.max = String(s.torqueLimitMax);
+        if (Number(els.torqueLimit.value) > s.torqueLimitMax) els.torqueLimit.value = String(s.torqueLimitMax);
+      }
+      reflect(els.torqueLimit, s.torqueLimit, prev && prev.torqueLimit);
+      if (document.activeElement !== els.torqueLimitSlider && (!prev || prev.torqueLimit !== s.torqueLimit)) els.torqueLimitSlider.value = String(Math.min(Number(els.torqueLimitSlider.max), s.torqueLimit));
+      updateTorqueNote();
+      reflect(els.pVel, s.profVel, prev && prev.profVel, 2); reflect(els.pAcc, s.profAcc, prev && prev.profAcc, 2); reflect(els.pDec, s.profDec, prev && prev.profDec, 2);
+      if (Number.isFinite(s.posMin)) reflect(els.lMin, s.posMin, prev && prev.posMin, 2);
+      if (Number.isFinite(s.posMax)) reflect(els.lMax, s.posMax, prev && prev.posMax, 2);
+      els.zOffset.textContent = s.zeroSet ? s.zeroOffset + " pulses (" + (s.zeroOffset / PULSES_PER_TURN * 360).toFixed(3) + " deg)" : "not set";
+      els.zLimits.textContent = fmtLimit(s.posMin) + " .. " + fmtLimit(s.posMax) + " deg";
+      els.zProfile.textContent = fmt(s.profVel, 1) + " deg/s, " + fmt(s.profAcc, 1) + " / " + fmt(s.profDec, 1) + " deg/s²";
+      els.zStream.textContent = s.streamEnabled ? "on, every " + s.streamPeriodMs + " ms (#" + s.seq + ")" : "off";
+      // what may be commanded now
+      const can = s.commOk;
+      els.enableBtn.disabled = !can || s.enabled || s.faulted;
+      els.disableBtn.disabled = !can || !s.enabled;
+      els.resetFaultBtn.disabled = !can || !s.faulted;
+      els.haltBtn.disabled = !can || !s.enabled;
+      const canMove = can && s.enabled && !s.faulted;
+      els.moveToBtn.disabled = els.jogMinusBtn.disabled = els.jogPlusBtn.disabled = !canMove;
+      els.torqueLimitBtn.disabled = els.profileBtn.disabled = els.zeroHereBtn.disabled = els.zeroAtBtn.disabled = !can;
+      els.nodeProgramBtn.disabled = !can; // re-addressing needs the drive answering on its current id
+      els.driveNote.textContent = !can ? "The drive does not answer on CAN: check its power, the bus wiring / termination and the node id." :
+        s.faulted ? "The drive is in FAULT (error 0x" + s.errorCode.toString(16).padStart(4, "0") + "): Reset fault, then Enable." :
+        s.enabled ? "Enabled: moves run under the torque limit (" + s.torqueLimit + " ‰ of rated). Halt stops a move; Disable frees the shaft." :
+        "Disabled: the shaft is free. Enable to hold position and move.";
+      // the device-side stream flag is the truth for the checkbox after a reconnect
+      if (s.streamEnabled !== els.liveStream.checked && !streamRequestPending) els.liveStream.checked = s.streamEnabled;
+      streamRequestPending = false;
+      // the charts
+      pushSample(s);
+    }
+    function updateTorqueNote() {
+      const s = lastStatus, v = Number(els.torqueLimit.value);
+      const max = s && s.torqueLimitMax ? " · device maximum " + s.torqueLimitMax + " ‰" + (s.ratedTorqueMnm ? " (" + (s.torqueLimitMax * s.ratedTorqueMnm / 1e6).toFixed(3) + " Nm)" : "") : "";
+      els.torqueLimitNote.textContent = ((s && s.ratedTorqueMnm) ? "= " + (v * s.ratedTorqueMnm / 1e6).toFixed(3) + " Nm (" + (v / 10).toFixed(1) + "% of the rated " + (s.ratedTorqueMnm / 1000).toFixed(2) + " Nm)" : "= - Nm (rated torque unknown)") + max;
+      els.torqueLimitNote.style.color = (s && s.torqueLimitMax && v > s.torqueLimitMax) ? "var(--danger)" : "var(--text-muted)";
+    }
+
+    // ===================== Strip charts (Canvas 2D) =====================
+    // Two series per chart on their own y axes (left / right), time on x,
+    // optional horizontal guide lines on the left axis (target, limits).
+    const SERIES_COLORS = { angle: "--s-angle", velocity: "--s-velocity", torque: "--s-torque", current: "--s-current", target: "--s-target", limit: "--s-limit" };
+    function cssVar(name) { return getComputedStyle(document.documentElement).getPropertyValue(name).trim() || "#fff"; }
+    class StripChart {
+      constructor(canvas, left, right) {
+        this.canvas = canvas; this.ctx = canvas.getContext("2d");
+        this.left = left; this.right = right; // { key, label, unit() }
+        this.guides = [];                     // [{ value, color, label, dashed }]
+        this.pending = false;
+        const ro = new ResizeObserver(() => this.schedule());
+        ro.observe(canvas);
+      }
+      schedule() { if (this.pending) return; this.pending = true; requestAnimationFrame(() => { this.pending = false; this.draw(); }); }
+      // the y range of a series' samples (+ guide lines for the left axis), padded
+      range(key, values, guides) {
+        let lo = Infinity, hi = -Infinity;
+        for (const v of values) { if (!Number.isFinite(v)) continue; if (v < lo) lo = v; if (v > hi) hi = v; }
+        for (const g of guides || []) { if (!Number.isFinite(g.value)) continue; if (g.value < lo) lo = g.value; if (g.value > hi) hi = g.value; }
+        if (!Number.isFinite(lo)) { lo = -1; hi = 1; }
+        if (hi - lo < 1e-6) { lo -= 1; hi += 1; }
+        const pad = (hi - lo) * 0.08; return [lo - pad, hi + pad];
+      }
+      draw() {
+        const c = this.canvas, ctx = this.ctx, dpr = window.devicePixelRatio || 1;
+        const W = c.clientWidth || 600, H = c.clientHeight || 200;
+        if (c.width !== Math.round(W * dpr) || c.height !== Math.round(H * dpr)) { c.width = Math.round(W * dpr); c.height = Math.round(H * dpr); }
+        ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+        ctx.fillStyle = cssVar("--view-bg"); ctx.fillRect(0, 0, W, H);
+        const samples = visibleSamples(); if (!samples.length) return;
+        const padL = 56, padR = 56, padT = 22, padB = 20;
+        const x0 = padL, x1 = W - padR, y0 = padT, y1 = H - padB;
+        const windowS = Number(els.chartWindow.value) || 30;
+        const tEnd = samples[samples.length - 1].t, tStart = tEnd - windowS;
+        const xOf = (t) => x0 + (t - tStart) / windowS * (x1 - x0);
+        const lv = samples.map((s) => s[this.left.key]), rv = samples.map((s) => s[this.right.key]);
+        const [lLo, lHi] = this.range(this.left.key, lv, this.guides), [rLo, rHi] = this.range(this.right.key, rv);
+        const yL = (v) => y1 - (v - lLo) / (lHi - lLo) * (y1 - y0), yR = (v) => y1 - (v - rLo) / (rHi - rLo) * (y1 - y0);
+        // grid + axes
+        ctx.strokeStyle = cssVar("--view-grid"); ctx.lineWidth = 1; ctx.font = "11px ui-monospace, Menlo, monospace"; ctx.textBaseline = "middle";
+        const leftColor = cssVar(SERIES_COLORS[this.left.key]), rightColor = cssVar(SERIES_COLORS[this.right.key]);
+        for (let i = 0; i <= 4; i++) {
+          const y = y0 + (y1 - y0) * i / 4;
+          ctx.beginPath(); ctx.moveTo(x0, y); ctx.lineTo(x1, y); ctx.stroke();
+          ctx.fillStyle = leftColor; ctx.textAlign = "right"; ctx.fillText(fmtTick(lHi - (lHi - lLo) * i / 4), x0 - 6, y);
+          ctx.fillStyle = rightColor; ctx.textAlign = "left"; ctx.fillText(fmtTick(rHi - (rHi - rLo) * i / 4), x1 + 6, y);
+        }
+        const tick = windowS <= 10 ? 1 : windowS <= 30 ? 5 : windowS <= 60 ? 10 : windowS <= 120 ? 20 : 60;
+        ctx.fillStyle = cssVar("--view-text"); ctx.textAlign = "center"; ctx.textBaseline = "top";
+        for (let t = Math.ceil(tStart / tick) * tick; t <= tEnd + 1e-6; t += tick) {
+          const x = xOf(t); ctx.beginPath(); ctx.moveTo(x, y0); ctx.lineTo(x, y1); ctx.stroke();
+          ctx.fillText("-" + (tEnd - t).toFixed(0) + " s", x, y1 + 4);
+        }
+        // guides (left axis)
+        for (const g of this.guides) {
+          if (!Number.isFinite(g.value)) continue;
+          const y = yL(g.value); if (y < y0 || y > y1) continue;
+          ctx.save(); ctx.strokeStyle = g.color; ctx.setLineDash(g.dashed ? [6, 4] : []); ctx.lineWidth = 1;
+          ctx.beginPath(); ctx.moveTo(x0, y); ctx.lineTo(x1, y); ctx.stroke(); ctx.restore();
+          ctx.fillStyle = g.color; ctx.textAlign = "left"; ctx.textBaseline = "bottom"; ctx.fillText(g.label, x0 + 4, y - 1);
+        }
+        // series
+        const plot = (vals, yOf, color) => {
+          ctx.save(); ctx.beginPath(); ctx.rect(x0, y0, x1 - x0, y1 - y0); ctx.clip();
+          ctx.strokeStyle = color; ctx.lineWidth = 1.6; ctx.lineJoin = "round"; ctx.beginPath();
+          let pen = false;
+          for (let i = 0; i < samples.length; i++) {
+            const v = vals[i]; if (!Number.isFinite(v)) { pen = false; continue; }
+            const x = xOf(samples[i].t), y = yOf(v);
+            if (pen) ctx.lineTo(x, y); else ctx.moveTo(x, y);
+            pen = true;
+          }
+          ctx.stroke();
+          const last = vals[vals.length - 1];
+          if (Number.isFinite(last)) { ctx.fillStyle = color; ctx.beginPath(); ctx.arc(xOf(tEnd), yOf(last), 3, 0, Math.PI * 2); ctx.fill(); }
+          ctx.restore();
+        };
+        plot(rv, yR, rightColor);
+        plot(lv, yL, leftColor);
+        // legend
+        ctx.textBaseline = "top"; ctx.textAlign = "left"; ctx.font = "12px system-ui, sans-serif";
+        const lLast = lv[lv.length - 1], rLast = rv[rv.length - 1];
+        ctx.fillStyle = leftColor; ctx.fillText(this.left.label + " " + fmtTick(lLast) + " " + this.left.unit(), x0 + 4, 4);
+        const rText = this.right.label + " " + fmtTick(rLast) + " " + this.right.unit();
+        ctx.fillStyle = rightColor; ctx.textAlign = "right"; ctx.fillText(rText, x1 - 4, 4);
+      }
+    }
+    function fmtTick(v) { if (!Number.isFinite(v)) return "-"; const a = Math.abs(v); return a >= 1000 ? v.toFixed(0) : a >= 100 ? v.toFixed(1) : a >= 10 ? v.toFixed(2) : v.toFixed(3); }
+    // samples: { t (device seconds), angle, velocity, torque, current (display units) }
+    let samples = [];
+    const MAX_SAMPLES = 12000; // 5 min at 50 ms, bounded whatever the window
+    function visibleSamples() {
+      if (!samples.length) return samples;
+      const windowS = Number(els.chartWindow.value) || 30, tEnd = samples[samples.length - 1].t;
+      let i = 0; while (i < samples.length && samples[i].t < tEnd - windowS) i++;
+      return i ? samples.slice(i) : samples;
+    }
+    const motionChart = new StripChart(els.chartMotion, { key: "angle", label: "angle", unit: () => "deg" }, { key: "velocity", label: "speed", unit: () => "deg/s" });
+    const effortChart = new StripChart(els.chartEffort, { key: "torque", label: "torque", unit: () => torqueScale(lastStatus) ? "Nm" : "‰" }, { key: "current", label: "current", unit: () => currentScale(lastStatus) ? "A" : "‰" });
+    function pushSample(s) {
+      const tScale = torqueScale(s) || 1, cScale = currentScale(s) || 1;
+      samples.push({ t: s.timeMs / 1000, angle: s.angle, velocity: s.velocity, torque: s.torque * tScale, current: s.current * cScale,
+                     torquePermille: s.torque, currentPermille: s.current, target: s.target, limit: s.torqueLimit, seq: s.seq });
+      if (samples.length > MAX_SAMPLES) samples.splice(0, samples.length - MAX_SAMPLES);
+      // a device reboot restarts its clock: start over rather than plot backwards
+      if (samples.length > 1 && samples[samples.length - 1].t < samples[samples.length - 2].t) samples = samples.slice(-1);
+      const limitColor = cssVar(SERIES_COLORS.limit), targetColor = cssVar(SERIES_COLORS.target);
+      motionChart.guides = Number.isFinite(s.target) ? [{ value: s.target, color: targetColor, label: "target", dashed: true }] : [];
+      effortChart.guides = (els.showLimitLines.checked && s.torqueLimit) ? [{ value: s.torqueLimit * tScale, color: limitColor, label: "+limit", dashed: true }, { value: -s.torqueLimit * tScale, color: limitColor, label: "-limit", dashed: true }] : [];
+      els.noDataMotion.hidden = true; els.noDataEffort.hidden = true;
+      motionChart.schedule(); effortChart.schedule();
+    }
+    function redrawCharts() {
+      // the unit checkbox changes the stored display values: rebuild from per-mille
+      const s = lastStatus, tScale = torqueScale(s) || 1, cScale = currentScale(s) || 1;
+      for (const x of samples) { x.torque = x.torquePermille * tScale; x.current = x.currentPermille * cScale; }
+      if (s) { const limitColor = cssVar(SERIES_COLORS.limit); effortChart.guides = (els.showLimitLines.checked && s.torqueLimit) ? [{ value: s.torqueLimit * tScale, color: limitColor, label: "+limit", dashed: true }, { value: -s.torqueLimit * tScale, color: limitColor, label: "-limit", dashed: true }] : []; }
+      motionChart.schedule(); effortChart.schedule();
+    }
+    els.chartWindow.addEventListener("change", redrawCharts);
+    els.permilleUnits.addEventListener("change", () => { if (lastStatus) applyStatus(lastStatus); redrawCharts(); });
+    els.showLimitLines.addEventListener("change", redrawCharts);
+    els.clearChartsBtn.addEventListener("click", () => { samples = []; els.noDataMotion.hidden = false; motionChart.schedule(); effortChart.schedule(); });
+    els.csvBtn.addEventListener("click", () => {
+      const rows = visibleSamples(); if (!rows.length) { logLine("warn", "no samples to download"); return; }
+      const lines = ["device_time_s,seq,angle_deg,velocity_dps,torque_permille,current_permille,torque_limit_permille,target_deg"];
+      for (const x of rows) lines.push([x.t.toFixed(3), x.seq, x.angle.toFixed(4), x.velocity.toFixed(3), x.torquePermille, x.currentPermille, x.limit, Number.isFinite(x.target) ? x.target.toFixed(4) : ""].join(","));
+      const blob = new Blob([lines.join("\n") + "\n"], { type: "text/csv" });
+      const a = document.createElement("a"); a.href = URL.createObjectURL(blob); a.download = "eyou_" + new Date().toISOString().replace(/[:.]/g, "-") + ".csv"; a.click();
+      setTimeout(() => URL.revokeObjectURL(a.href), 1000);
+    });
+    window.matchMedia("(prefers-color-scheme: dark)").addEventListener("change", redrawCharts);
+
+    // ===================== Incoming frame handling =====================
+    function onIncoming(chunk) {
+      let frames; try { frames = parser.feed(chunk); } catch(e) { logLine("err", "parse error: " + (e && e.message ? e.message : e)); return; }
+      for (const f of frames) {
+        // Discovery reply (reserved module 0xFF): hand the TLV to a pending
+        // module probe before the moduleEyou match below ignores it.
+        if (f.module === MODULE_DISCOVERY && f.reply && f.type === T_LIST_MODULES) {
+          if (discoveryResolve) { discoveryResolve(f.payload); discoveryResolve = null; }
+          continue;
+        }
+        if (f.module !== moduleEyou) continue;
+        const dv = new DataView(f.payload.buffer, f.payload.byteOffset, f.payload.length);
+        if (f.type === T_STATUS) {
+          const s = parseStatus(f.payload);
+          if (s) applyStatus(s); else logLine("warn", "short status payload (" + f.payload.length + " bytes)");
+        } else if (f.type === T_OK) {
+          const rt = f.payload.length ? f.payload[0] : 0;
+          logLine("rx", "ok: " + (REQ_NAME[rt] || ("0x" + rt.toString(16))));
+          if (rt !== T_GET_STATUS) send(T_GET_STATUS); // reflect the change
+        } else if (f.type === T_ERROR) {
+          const rt = f.payload.length ? f.payload[0] : 0;
+          const code = f.payload.length >= 5 ? dv.getUint32(1, true) : 0;
+          let msg = ""; try { msg = new TextDecoder().decode(f.payload.subarray(5)); } catch(_){}
+          logLine("err", (REQ_NAME[rt] || ("0x" + rt.toString(16))) + " failed [" + code + "]: " + msg);
+          if (rt === T_SET_STREAM) streamRequestPending = false;
+          if (rt !== T_GET_STATUS) send(T_GET_STATUS);
+        }
+      }
+    }
+
+    // ===================== Connect / disconnect =====================
+    if (!navigator.usb) els.connectUsbBtn.disabled = true;
+    if (!navigator.serial) els.connectSerialBtn.disabled = true;
+    if (!navigator.usb && !navigator.serial) els.unsupported.style.display = "block";
+    els.connectUsbBtn.addEventListener("click", () => connect("usb"));
+    els.connectSerialBtn.addEventListener("click", () => connect("serial"));
+    els.disconnectBtn.addEventListener("click", () => disconnect());
+
+    // `preset`: an already-permitted USBDevice / SerialPort (no chooser).
+    // One open at a time (Connect button(s), auto-connect, reconnect) — see createOpenGate.
+    async function connect(kind, preset) {
+      return openGate.run(() => connectLocked(kind, preset));
+    }
+    async function connectLocked(kind, preset) {
+      if (transport) return;
+      const t = kind === "usb" ? new UsbTransport() : new SerialTransport();
+      try { if (kind === "usb") await t.open(els.anyDevice.checked, preset); else await t.open(preset); }
+      catch (e) { if (e && e.name === "NotFoundError" && !preset) logLine("sys", "Device selection cancelled."); else logLine("err", "Connect failed: " + (e && e.message ? e.message : e)); try { await t.close(); } catch(_){} return; }
+      transport = t; connIdentity = t.identity(); reconnect.connected(); parser.reset(); moduleReady = false;
+      const name = t.describe(); setStatus("connected", "Connected"); els.devInfo.textContent = name; logLine("sys", "Connected: " + name);
+      t.readLoop(onIncoming).catch((e) => { if (transport === t) { logLine("err", "Read loop error: " + (e && e.message ? e.message : e)); onLinkLost(); } });
+      // Resolve the Eyou module id from discovery BEFORE the first request.
+      try { await checkModulePresent(); } catch (_) {}
+      if (transport !== t) return; // the link dropped while probing
+      setConnectedUI(true); // module id resolved: only now enable the controls
+      send(T_GET_STATUS);
+      if (els.liveStream.checked) startStream();
+      startStatusPoll();
+    }
+    async function disconnect() {
+      if (!transport) return; logLine("sys", "Disconnecting..."); stopStatusPoll(); stopStream();
+      const t = transport; transport = null;
+      reconnect.stop(); const released = connIdentity; connIdentity = null; try { await t.close(); } catch(_){}
+      postReleased(deviceChannel, released); // only once the device is closed: the hub may reopen it on this notice
+      setConnectedUI(false); setStatus("", "Disconnected");
+    }
+    function onLinkLost() {
+      if (!transport) return; stopStatusPoll(); const t = transport; transport = null; t.close().catch(()=>{});
+      setConnectedUI(false); setStatus("error", "Disconnected");
+      reconnect.onLinkLost(connIdentity);
+    }
+    if (navigator.usb && navigator.usb.addEventListener) navigator.usb.addEventListener("disconnect", (e) => { if (transport instanceof UsbTransport && e.device === transport.device) { logLine("err", "Device disconnected."); onLinkLost(); } });
+
+    if (navigator.serial && navigator.serial.addEventListener) {
+      navigator.serial.addEventListener("disconnect", (e) => {
+        const eventPort = e.port ?? e.target;
+        if (transport instanceof SerialTransport && eventPort === transport.port) { logLine("err", "Serial device disconnected."); onLinkLost(); }
+      });
+    }
+
+    const COMMAND_BUTTONS = [els.enableBtn, els.disableBtn, els.resetFaultBtn, els.haltBtn, els.torqueLimitBtn, els.moveToBtn, els.jogMinusBtn, els.jogPlusBtn,
+      els.profileBtn, els.limitsBtn, els.zeroHereBtn, els.zeroAtBtn, els.saveZeroBtn, els.loadZeroBtn, els.nodeUseBtn, els.nodeProgramBtn];
+    function setConnectedUI(connected) {
+      els.connectUsbBtn.disabled = connected || !navigator.usb;
+      els.connectSerialBtn.disabled = connected || !navigator.serial;
+      els.disconnectBtn.disabled = !connected; els.anyDevice.disabled = connected;
+      els.refreshBtn.disabled = !connected;
+      // the zero's save / load and the limits live on the device, not the drive: any time connected
+      els.saveZeroBtn.disabled = els.loadZeroBtn.disabled = els.limitsBtn.disabled = els.nodeUseBtn.disabled = !connected;
+      if (!connected) { els.nodeNote.textContent = ""; programArmed = null; }
+      if (!connected) {
+        els.devInfo.textContent = "Not connected. Default WebUSB filter: VID 0x1209 / PID 0x0d32 (espp default).";
+        els.driveState.textContent = "-"; els.driveState.className = "state-badge";
+        for (const id of ["devComm", "devNode", "devMode", "devStatusword", "devError", "devRated", "rxRate", "rAngle", "rVelocity", "rTorque", "rCurrent", "rTarget", "zOffset", "zLimits", "zProfile", "zStream"]) els[id].textContent = "-";
+        for (const b of COMMAND_BUTTONS) b.disabled = true;
+        els.driveNote.textContent = "Connect to a device to drive the motor.";
+        lastStatus = null; rxTimes = [];
+      }
+    }
+
+    // ---- motor controls ----
+    const numOf = (el, lo, hi) => { const v = Number(el.value); if (!Number.isFinite(v)) return null; return Math.min(hi, Math.max(lo, v)); };
+    els.refreshBtn.addEventListener("click", () => send(T_GET_STATUS));
+    // ---- which node the device talks to / re-addressing the drive ----
+    let programArmed = null; // node id a first "Program drive id" click armed (second click sends)
+    const nodeIdOf = () => { const v = numOf(els.nodeId, 1, 127); if (v === null || Math.round(v) !== v) { logLine("err", "node id must be an integer 1..127"); return null; } return v; };
+    els.nodeUseBtn.addEventListener("click", () => {
+      const id = nodeIdOf(); if (id === null) return;
+      programArmed = null; els.nodeNote.textContent = "";
+      logLine("tx", "talk to node " + id); send(T_SET_NODE_ID, encU8(id));
+    });
+    els.nodeId.addEventListener("keydown", (e) => { if (e.key === "Enter" && !els.nodeUseBtn.disabled) els.nodeUseBtn.click(); });
+    els.nodeProgramBtn.addEventListener("click", () => {
+      const id = nodeIdOf(); if (id === null) return;
+      const from = lastStatus ? lastStatus.node : null;
+      if (from === id) { logLine("sys", "the drive already is node " + id); return; }
+      if (programArmed !== id) {
+        programArmed = id;
+        els.nodeNote.textContent = "Re-address the drive " + (from === null ? "" : "(node " + from + ") ") + "to node " + id + "? Click again within 5 s to confirm.";
+        setTimeout(() => { if (programArmed === id) { programArmed = null; els.nodeNote.textContent = ""; } }, 5000);
+        return;
+      }
+      programArmed = null; els.nodeNote.textContent = "";
+      logLine("tx", "program the drive's node id to " + id + " (write 0x26A0, save about 3 s, restart; the status stream pauses meanwhile)");
+      send(T_SET_DRIVE_NODE_ID, encU8(id));
+    });
+    els.enableBtn.addEventListener("click", () => { logLine("tx", "enable drive"); send(T_ENABLE); });
+    els.disableBtn.addEventListener("click", () => { logLine("tx", "disable drive"); send(T_DISABLE); });
+    els.resetFaultBtn.addEventListener("click", () => { logLine("tx", "reset fault"); send(T_RESET_FAULT); });
+    els.haltBtn.addEventListener("click", () => { logLine("tx", "halt"); send(T_HALT); });
+    els.torqueLimitBtn.addEventListener("click", () => {
+      const v = numOf(els.torqueLimit, 0, 3000); if (v === null) { logLine("err", "torque limit must be a number (per-mille of rated)"); return; }
+      const max = lastStatus && lastStatus.torqueLimitMax;
+      if (max && v > max) { logLine("err", "torque limit " + Math.round(v) + " ‰ is above the device's maximum of " + max + " ‰ (set in its menuconfig); not sent"); return; }
+      logLine("tx", "set torque limit " + Math.round(v) + " ‰"); send(T_SET_TORQUE_LIMIT, encU16(Math.round(v)));
+    });
+    els.torqueLimit.addEventListener("input", () => { els.torqueLimitSlider.value = String(Math.min(Number(els.torqueLimitSlider.max), Number(els.torqueLimit.value) || 0)); updateTorqueNote(); });
+    els.torqueLimitSlider.addEventListener("input", () => { els.torqueLimit.value = els.torqueLimitSlider.value; updateTorqueNote(); });
+    els.torqueLimitSlider.addEventListener("change", () => { if (transport && moduleReady && !els.torqueLimitBtn.disabled) els.torqueLimitBtn.click(); });
+    els.torqueLimit.addEventListener("keydown", (e) => { if (e.key === "Enter" && !els.torqueLimitBtn.disabled) els.torqueLimitBtn.click(); });
+    els.moveToBtn.addEventListener("click", () => {
+      const v = numOf(els.targetAngle, -1e6, 1e6); if (v === null) { logLine("err", "target angle must be a number"); return; }
+      logLine("tx", "move to " + v.toFixed(2) + " deg" + (els.immediate.checked ? "" : " (queued)")); send(T_MOVE_TO, encMove(v, els.immediate.checked));
+    });
+    els.targetAngle.addEventListener("keydown", (e) => { if (e.key === "Enter" && !els.moveToBtn.disabled) els.moveToBtn.click(); });
+    const jog = (sign) => {
+      const step = numOf(els.jogStep, 0, 1e6); if (step === null || step <= 0) { logLine("err", "jog step must be positive"); return; }
+      logLine("tx", "move by " + (sign * step).toFixed(2) + " deg"); send(T_MOVE_BY, encMove(sign * step, els.immediate.checked));
+    };
+    els.jogMinusBtn.addEventListener("click", () => jog(-1));
+    els.jogPlusBtn.addEventListener("click", () => jog(+1));
+    els.profileBtn.addEventListener("click", () => {
+      const v = numOf(els.pVel, 0.001, 1e6), a = numOf(els.pAcc, 0.001, 1e7), d = numOf(els.pDec, 0.001, 1e7);
+      if (v === null || a === null || d === null) { logLine("err", "profile values must be positive numbers"); return; }
+      logLine("tx", "set profile " + v + " deg/s, " + a + " / " + d + " deg/s²"); send(T_SET_PROFILE, encProfile(v, a, d));
+    });
+    els.limitsBtn.addEventListener("click", () => {
+      const lo = numOf(els.lMin, -1e7, 1e7), hi = numOf(els.lMax, -1e7, 1e7);
+      if (lo === null || hi === null || lo > hi) { logLine("err", "position limits must be numbers with min <= max"); return; }
+      logLine("tx", "set position limits " + lo + " .. " + hi + " deg"); send(T_SET_POSITION_LIMITS, encLimits(lo, hi));
+    });
+    els.zeroHereBtn.addEventListener("click", () => { logLine("tx", "zero: the current position becomes 0 deg"); send(T_SET_ZERO, encZero(0, 0)); });
+    els.zeroAtBtn.addEventListener("click", () => {
+      const v = numOf(els.zeroAngle, -1e6, 1e6); if (v === null) { logLine("err", "angle must be a number"); return; }
+      logLine("tx", "zero: the current position becomes " + v.toFixed(2) + " deg"); send(T_SET_ZERO, encZero(1, v));
+    });
+    els.saveZeroBtn.addEventListener("click", () => { logLine("tx", "save zero to the device"); send(T_SAVE_ZERO); });
+    els.loadZeroBtn.addEventListener("click", () => { logLine("tx", "load the saved zero"); send(T_LOAD_ZERO); });
+    // keyboard: with a move control focused, the arrow keys jog
+    document.addEventListener("keydown", (e) => {
+      if (e.target !== els.jogStep && e.target !== els.targetAngle) return;
+      if (e.key === "ArrowLeft" && !els.jogMinusBtn.disabled) { e.preventDefault(); jog(-1); }
+      else if (e.key === "ArrowRight" && !els.jogPlusBtn.disabled) { e.preventDefault(); jog(+1); }
+    });
+
+    // ---- device-side status streaming + status polling ----
+    function startStream() { streamRequestPending = true; send(T_SET_STREAM, encStream(true, Number(els.streamPeriod.value) || 100)); }
+    function stopStream() { if (transport) { streamRequestPending = true; send(T_SET_STREAM, encStream(false, Number(els.streamPeriod.value) || 100)); } }
+    els.liveStream.addEventListener("change", () => { if (!transport) return; els.liveStream.checked ? startStream() : stopStream(); });
+    els.streamPeriod.addEventListener("change", () => { if (transport && els.liveStream.checked) startStream(); });
+    let statusTimer = null;
+    function startStatusPoll() { stopStatusPoll(); statusTimer = setInterval(() => { if (transport && moduleReady && !(lastStatus && lastStatus.streamEnabled)) send(T_GET_STATUS); }, STATUS_POLL_MS); }
+    function stopStatusPoll() { if (statusTimer) { clearInterval(statusTimer); statusTimer = null; } }
+
+    // ---- auto-connect (?autoconnect=1&transport=&vid=&pid=&serial=) + auto-reconnect ----
+    const connectParams = parseConnectParams(location.search);
+    let connIdentity = null; // identity of the current (or just lost) device
+    const deviceChannel = openDeviceChannel();
+    els.autoReconnect.checked = loadAutoReconnect();
+    els.autoReconnect.addEventListener("change", () => {
+      saveAutoReconnect(els.autoReconnect.checked);
+      if (!els.autoReconnect.checked) reconnect.stop("auto-reconnect is off");
+    });
+    const openGate = createOpenGate({ connected: () => !!transport });
+    const reconnect = createReconnectSupervisor({ gate: openGate, discard: () => disconnect(), enabled: () => els.autoReconnect.checked, log: logLine, reconnect: reconnectAttempt });
+    watchDeviceArrivals(reconnect);
+    // One reconnect attempt: the device must be back among the permitted ones.
+    // The lookup runs outside the open gate, so re-check afterwards that the
+    // attempt was not cancelled (checkbox unticked) and that no manual connect
+    // completed meanwhile — the gate refuses while connected as well.
+    async function reconnectAttempt(identity, attempt, token) {
+      if (transport) return true;
+      const preset = identity.transport === "usb" ? await findPermittedUsbDevice(identity) : await findPermittedSerialPort(identity);
+      if (token.cancelled() || transport) return false;
+      if (!preset) return false;
+      await connect(identity.transport, preset);
+      return !!transport;
+    }
+    async function autoConnect() {
+      const want = connectParams;
+      for (const kind of want.transport ? [want.transport] : ["usb", "serial"]) {
+        const preset = kind === "usb" ? await findPermittedUsbDevice(want) : await findPermittedSerialPort(want);
+        if (!preset) continue;
+        logLine("sys", "Auto-connecting to " + describeIdentity(kind === "usb" ? usbIdentity(preset) : serialIdentity(preset)) + "…");
+        await connect(kind, preset);
+        return;
+      }
+      logLine("warn", "Auto-connect: no permitted " + describeIdentity(want) + " found — use Connect (the browser only lists devices this page was already granted).");
+    }
+    // pagehide: the browser tears the handle down itself and an await cannot finish here, so the notice goes out before the close (best effort)
+    window.addEventListener("pagehide", () => { if (transport) postReleased(deviceChannel, connIdentity); });
+
+    setConnectedUI(false);
+    updateTorqueNote();
+    motionChart.schedule(); effortChart.schedule();
+    // Device Hub / All apps links; a plain click on Device Hub while connected hands the device back
+    installAppNav();
+    installAppHandBack({ connected: () => !!transport, handBack: async () => { const id = connIdentity; await disconnect(); return id; } });
+    if (connectParams.autoconnect) autoConnect();
+  </script>
+</body>
+</html>
