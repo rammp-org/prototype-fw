@@ -3,7 +3,9 @@
 // Runs on an ESP32-P4 with a CAN transceiver on the TWAI pins (the Waveshare
 // ESP32-P4-ETH as used by the other projects in this repo: TX 17 / RX 16) and
 // exposes ONE Eyou actuator (CANopen DS402, profile position mode) to a browser
-// over USB: the console web app (../web/eyou_console.html) connects on the
+// over USB (on the P4-ETH: the 4-pin MX1.25 "USB" connector carries the chip's
+// USB 2.0 HS signals; the Type-C is a CH343 UART bridge = flashing + this
+// console's log): the web app (../web/eyou_console.html) connects on the
 // vendor (WebUSB) or CDC (Web Serial) interface, sets the torque limit the drive
 // clamps to, commands absolute / relative moves, enables / disables / resets /
 // halts the drive, sets, saves and loads the software zero, and plots the live
@@ -118,11 +120,11 @@ extern "C" void app_main(void) {
   espp::UsbDevice::Config usb_cfg;
   usb_cfg.manufacturer = "rammp";
   usb_cfg.product = "Eyou Motor Console";
-#if CONFIG_EXAMPLE_USB_PORT_FS_USBC
+#if CONFIG_EXAMPLE_USB_PORT_HIGH_SPEED
+  usb_cfg.port = 1; // USB 2.0 HS: the ESP32-P4-ETH's 4-pin MX1.25 "USB" connector
+#elif CONFIG_EXAMPLE_USB_PORT_FS_USBC
   usb_cfg.port = 0;   // the USB-OTG 1.1 full-speed controller ...
-  usb_cfg.fs_phy = 0; // ... on the USB-C pads (GPIO 24 / 25) of the P4 dev kits
-#elif CONFIG_EXAMPLE_USB_PORT_HIGH_SPEED
-  usb_cfg.port = 1;
+  usb_cfg.fs_phy = 0; // ... on the USB-C pads (GPIO 24 / 25) of other P4 dev kits
 #endif
   usb_cfg.log_level = espp::Logger::Verbosity::WARN;
   espp::UsbDevice::VendorFunction vendor;

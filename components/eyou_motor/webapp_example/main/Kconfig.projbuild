@@ -81,20 +81,27 @@ menu "Eyou Console Configuration"
 
     choice EXAMPLE_USB_PORT
         prompt "USB port"
-        default EXAMPLE_USB_PORT_FS_USBC
+        default EXAMPLE_USB_PORT_HIGH_SPEED
         help
-            Which USB-OTG controller TinyUSB drives, and on which pads. The
-            ESP32-P4 dev kits (Espressif, Waveshare) route the USB-Serial-JTAG
-            pad pair (GPIO 24 / 25) to their USB-C: the full-speed controller
-            can be moved there, which is what the console cable wants. The
-            high-speed port goes to a separate connector on boards that have
-            one.
+            Which USB-OTG controller TinyUSB drives, and on which pads.
+
+            Waveshare ESP32-P4-ETH (the default): its Type-C is a CH343
+            USB-to-UART bridge (flashing + this firmware's console), NOT a
+            USB connection to the ESP32-P4. The chip's USB 2.0 high-speed
+            OTG signals are on the 4-pin MX1.25 "USB" connector: wire that to
+            the PC (D+ / D- / GND; VBUS is not needed when the board is
+            powered from the Type-C) and pick the high-speed port.
+
+            ESP32-P4 dev kits with the USB-Serial-JTAG pad pair (GPIO 24 /
+            25) on a USB-C (Espressif, Waveshare WIFI6 kit): the full-speed
+            controller can be moved onto those pads, so the console cable is
+            the USB-C.
+
+        config EXAMPLE_USB_PORT_HIGH_SPEED
+            bool "USB 2.0 high-speed port (ESP32-P4-ETH: the 4-pin USB connector)"
 
         config EXAMPLE_USB_PORT_FS_USBC
             bool "USB 1.1 full-speed port on the USB-C pads (GPIO 24 / 25)"
-
-        config EXAMPLE_USB_PORT_HIGH_SPEED
-            bool "USB 2.0 high-speed port"
 
         config EXAMPLE_USB_PORT_DEFAULT
             bool "TinyUSB's default for the target"

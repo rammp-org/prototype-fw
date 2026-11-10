@@ -26,9 +26,17 @@ exposes a small high-level protocol (`main/eyou_protocol.hpp`, dispatcher
 **module id 0x20**, protocol id `eyou.motor`) through `EyouService`
 (`main/eyou_service.hpp`), so the web app needs no knowledge of CAN. Both the
 vendor (WebUSB) and CDC (Web Serial) interfaces carry the same protocol; the
-system console / logs go to **UART0** (set in `sdkconfig.defaults`): on the P4,
-USB-Serial-JTAG shares the USB-C pads with the USB-OTG full-speed controller,
-which TinyUSB takes over.
+system console / logs go to **UART0** (set in `sdkconfig.defaults`), which on
+the ESP32-P4-ETH is the Type-C port (a CH343 USB-to-UART bridge: flashing and
+the monitor, not a USB connection to the chip).
+
+**Which connector is the console's USB?** On the ESP32-P4-ETH the ESP32-P4's
+USB 2.0 high-speed OTG signals are on the **4-pin MX1.25 "USB" connector**, not
+on the Type-C. Wire D+ / D- / GND of that connector to a USB cable to the PC
+(VBUS is not needed while the board is powered from the Type-C) and keep the
+default *USB port* = high-speed. Dev kits that put the USB-Serial-JTAG pad
+pair (GPIO 24 / 25) on a USB-C (Espressif's, Waveshare's WIFI6 kit) use the
+*full-speed port on the USB-C pads* choice instead.
 
 Like every espp USB example it also serves the standard **system** (module 7:
 device info, reboot, reboot into the bootloader), **monitor** (8: tasks,
@@ -52,7 +60,7 @@ the hub to be opened from it; opening the local file directly works too).
 | torque limit written at boot | = the maximum | `EXAMPLE_BOOT_TORQUE_PERMILLE` |
 | profile velocity / accel / decel at boot | 30 deg/s, 20 / 20 deg/s² | `EXAMPLE_PROFILE_*` |
 | load the saved zero at boot | yes | `EXAMPLE_LOAD_ZERO_AT_BOOT` |
-| USB port | FS controller on the USB-C pads (GPIO 24 / 25) | `EXAMPLE_USB_PORT` |
+| USB port | USB 2.0 high-speed (the P4-ETH's 4-pin "USB" connector) | `EXAMPLE_USB_PORT` |
 
 The defaults are the Waveshare ESP32-P4-ETH as wired for the other projects
 in this repository (same pins as `pear/`). The bus needs a 120 Ω termination
@@ -81,9 +89,13 @@ The espp components (`espp/usb_device`, `espp/dispatcher`, ... ≥ 1.4.2) and
 components of this repository. The 16 MB flash partition table is the dual-OTA
 + core dump layout of `pear/` (`partitions.csv`).
 
-Then open `web/eyou_console.html` in a Chromium browser (file:// works; WebUSB
-needs a secure origin, which file:// is) and *Connect (WebUSB)*, or *Connect
-(Web Serial)* on the CDC port.
+Then, with the 4-pin USB connector cabled to the PC, open
+`web/eyou_console.html` in a Chromium browser (file:// works; WebUSB needs a
+secure origin, which file:// is) and *Connect (WebUSB)*, or *Connect (Web
+Serial)* on the CDC port. If nothing enumerates, the UART0 log at boot says
+which port TinyUSB took (`USB-OTG 1.1 on full-speed PHY ...` means the
+full-speed choice is active: `idf.py menuconfig` → *Eyou Console
+Configuration* → *USB port*; an existing `sdkconfig` keeps the old choice).
 
 ## Protocol (`eyou.motor` v1, module 0x20)
 
