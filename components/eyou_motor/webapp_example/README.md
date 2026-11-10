@@ -54,7 +54,7 @@ the hub to be opened from it; opening the local file directly works too).
 | CAN TX (TWAI TX -> transceiver TXD) | GPIO 17 | `EXAMPLE_CAN_TX_GPIO` |
 | CAN RX (TWAI RX <- transceiver RXD) | GPIO 16 | `EXAMPLE_CAN_RX_GPIO` |
 | CAN bitrate | 1 Mbit/s | `EXAMPLE_CAN_BITRATE` |
-| Eyou CANopen node id | 1 | `EXAMPLE_NODE_ID` |
+| Eyou CANopen node id (default; the console's choice is saved in NVS) | 1 | `EXAMPLE_NODE_ID` |
 | poll period (live readings) | 50 ms | `EXAMPLE_POLL_PERIOD_MS` |
 | maximum torque limit the console may set | 500 ‰ of rated | `EXAMPLE_MAX_TORQUE_PERMILLE` |
 | torque limit written at boot | = the maximum | `EXAMPLE_BOOT_TORQUE_PERMILLE` |
@@ -73,6 +73,19 @@ The console changes the limit at run time (the slider applies on release) but
 never above the menuconfig **maximum**: the device refuses a higher request,
 reports the maximum in every status, and the console sizes its slider to it.
 *Halt* stops a move with the profile deceleration while staying enabled.
+
+**Motor node id.** The *Motor node id* row of the Device panel selects which
+CANopen node the board talks to: *Talk to* switches at once (the receivers
+move with it, the saved zero of that node is loaded and the boot torque
+limit / profile applied once it answers) and the choice is saved on the
+device, so it survives a reboot (menuconfig's `EXAMPLE_NODE_ID` is only the
+default before the first choice). *Program drive id* re-addresses the drive
+that currently answers: the id is written to its Node-ID object (0x26A0),
+its parameters are saved (about 3 s, confirmed by reading 0x1010 back), the
+node is restarted with an NMT reset and the board follows it to the new id.
+A second click within 5 s confirms. If the drive does not come back on the
+new id after the reset, power-cycle it (some firmware only reads the id at
+power-on); the board is already talking to the new id.
 A drive that is powered after the device (or that drops off the bus) is
 commissioned again the moment it answers.
 
@@ -119,6 +132,8 @@ or, for GetStatus, a STATUS.
 | 0x1B | LoadZero | - |
 | 0x1C | SetProfile | `[velocity f32][acceleration f32][deceleration f32]` deg/s, deg/s² |
 | 0x1D | SetPositionLimits | `[min_deg f32][max_deg f32]` |
+| 0x1E | SetNodeId | `[node_id u8]` talk to this node from now on (saved on the device for its next boot) |
+| 0x1F | SetDriveNodeId | `[node_id u8]` re-address the drive: write its Node-ID (0x26A0), save (0x1010:01, ~3 s), NMT reset, follow it |
 
 STATUS (0x90, 72 B): `[flags u8][node u8][statusword u16][error_code u16][mode i8][res u8]
 [angle f32][velocity f32][torque ‰ i16][current ‰ i16][torque_limit ‰ u16][torque_limit_max ‰ u16]

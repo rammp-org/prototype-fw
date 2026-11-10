@@ -38,6 +38,7 @@ constexpr uint16_t kControlwordImmediate = 0x0020;
 constexpr uint16_t kControlwordRelative = 0x0040;
 constexpr uint16_t kStoreParametersIndex = 0x1010;
 constexpr uint32_t kStoreParametersSignature = 0x65766173; // ASCII "save", little-endian
+constexpr uint16_t kNodeIdIndex = 0x26A0;                  // vendor: the drive's own node id (USINT)
 } // namespace
 
 EyouMotor::EyouMotor(CanBus &bus, uint8_t node_id)
@@ -963,4 +964,116 @@ float EyouMotor::minimum_position_degrees() const {
 float EyouMotor::maximum_position_degrees() const {
   std::lock_guard<std::mutex> lock(transaction_mutex_);
   return maximum_position_degrees_;
+}
+
+bool EyouMotor::rebind_receivers_unlocked(uint8_t new_node_id) {
+  if (receive_queue_ == nullptr) {
+    logger_.error("Cannot change the node id: CAN receive queue is not started");
+    return false;
+  }
+  const uint8_t old_node_id = node_id_;
+  bus_.unregister_receiver(receive_queue_);
+  xQueueReset(receive_queue_); // replies of the old node are not ours any more
+  node_id_ = new_node_id;
+  if (!bus_.register_receiver(0x580 + node_id_, receive_queue_) ||
+      !bus_.register_receiver(0x700 + node_id_, receive_queue_)) {
+    logger_.error("Failed to register CANopen receivers for node {} (receiver table full?); "
+                  "staying on node {}",
+                  node_id_, old_node_id);
+    bus_.unregister_receiver(receive_queue_);
+    node_id_ = old_node_id;
+    bus_.register_receiver(0x580 + node_id_, receive_queue_);
+    bus_.register_receiver(0x700 + node_id_, receive_queue_);
+    return false;
+  }
+  return true;
+}
+
+bool EyouMotor::set_node_id(uint8_t new_node_id) {
+  if (new_node_id < 1 || new_node_id > 127) {
+    logger_.error("Invalid CANopen node id {} (1..127)", new_node_id);
+    return false;
+  }
+  std::lock_guard<std::mutex> lock(transaction_mutex_);
+  if (new_node_id == node_id_)
+    return true;
+  if (!rebind_receivers_unlocked(new_node_id))
+    return false;
+  zero_offset_pulses_.reset(); // the software zero belongs to the previous node
+  logger_.info("Now talking to CANopen node {} (software zero cleared: load_zero() restores the "
+               "one saved for it)",
+               node_id_);
+  return true;
+}
+
+bool EyouMotor::set_drive_node_id(uint8_t new_node_id, uint32_t timeout_ms) {
+  if (new_node_id < 1 || new_node_id > 127) {
+    logger_.error("Invalid CANopen node id {} (1..127)", new_node_id);
+    return false;
+  }
+  std::lock_guard<std::mutex> lock(transaction_mutex_);
+  const uint8_t old_node_id = node_id_;
+  if (new_node_id == old_node_id) {
+    logger_.info("The drive already is node {}", old_node_id);
+    return true;
+  }
+  // 1. the new id into the drive's Node-ID object (takes effect after a restart)
+  if (!send_sdo_u8(kNodeIdIndex, new_node_id)) {
+    logger_.error("Failed to write node id {} to 0x26A0 on node {}", new_node_id, old_node_id);
+    return false;
+  }
+  // 2. save it: 0x1010:01 reads 1 while saving and 2 once done (about 3 s)
+  if (!send_sdo_u32(kStoreParametersIndex, kStoreParametersSignature, 1, 1000)) {
+    logger_.error("Node {}: the drive refused the parameter save (0x1010:01); its node id is "
+                  "unchanged until saved",
+                  old_node_id);
+    return false;
+  }
+  const TickType_t start_tick = xTaskGetTickCount();
+  bool saved = false;
+  while (xTaskGetTickCount() - start_tick < pdMS_TO_TICKS(timeout_ms)) {
+    vTaskDelay(pdMS_TO_TICKS(250));
+    uint32_t value = 0;
+    uint8_t size = 0;
+    if (request_sdo_expedited(kStoreParametersIndex, 1, value, size, 200) && value == 2) {
+      saved = true;
+      break;
+    }
+  }
+  if (!saved) {
+    logger_.error("Node {}: the drive did not confirm the parameter save within {} ms. If it "
+                  "stops answering after a power cycle, it did save: select node {}",
+                  old_node_id, timeout_ms, new_node_id);
+    return false;
+  }
+  logger_.info("Node id {} written and saved on node {}; restarting the drive", new_node_id,
+               old_node_id);
+  // 3. restart it so the new id takes effect, and follow it
+  EyouCanFrame frame{};
+  while (xQueueReceive(receive_queue_, &frame, 0) == pdTRUE) {
+  }
+  const std::array<uint8_t, 2> nmt_reset_node{0x81, old_node_id};
+  send_raw(0x000, nmt_reset_node);
+  if (!rebind_receivers_unlocked(new_node_id))
+    return false;
+  zero_offset_pulses_.reset();
+  bool booted = false;
+  const TickType_t boot_timeout = pdMS_TO_TICKS(3000);
+  const TickType_t boot_start = xTaskGetTickCount();
+  while (xTaskGetTickCount() - boot_start < boot_timeout) {
+    const TickType_t elapsed = xTaskGetTickCount() - boot_start;
+    if (xQueueReceive(receive_queue_, &frame, boot_timeout - elapsed) != pdTRUE)
+      break;
+    if (frame.id == 0x700u + node_id_ && frame.dlc >= 1 && frame.data[0] == 0x00) {
+      booted = true;
+      break;
+    }
+  }
+  if (booted)
+    logger_.info("The drive is now node {} (booted with its new id)", node_id_);
+  else
+    logger_.warn("Node id {} saved, but no boot-up on the new id after the NMT reset: power-cycle "
+                 "the drive (this object already talks to node {})",
+                 node_id_, node_id_);
+  return true;
 }

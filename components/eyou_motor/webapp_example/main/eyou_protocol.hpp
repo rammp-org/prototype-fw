@@ -50,6 +50,10 @@ enum class Request : uint8_t {
   LoadZero = 0x1B,          ///< load the software zero from NVS (no payload)
   SetProfile = 0x1C,        ///< [velocity f32][acceleration f32][deceleration f32] deg/s, deg/s^2
   SetPositionLimits = 0x1D, ///< [min_deg f32][max_deg f32]: MoveTo targets are clamped to these
+  SetNodeId = 0x1E,         ///< [node_id u8]: talk to this CANopen node from now on (the device
+                            ///< saves it for its next boot)
+  SetDriveNodeId = 0x1F,    ///< [node_id u8]: re-address the DRIVE (write its Node-ID object,
+                            ///< save, restart it, ~4 s) and talk to it on the new id
 };
 
 /// Device -> host replies / events (0x9X => reply flag set).
@@ -133,6 +137,18 @@ struct SetTorqueLimit {
     put_u16(out, permille);
     return out;
   }
+};
+
+/// SetNodeId / SetDriveNodeId: [node_id u8] (1 B), 1..127.
+struct NodeId {
+  uint8_t node_id{1};
+  static constexpr size_t kSize = 1;
+  static std::optional<NodeId> parse(std::span<const uint8_t> p) {
+    if (p.size() < kSize)
+      return std::nullopt;
+    return NodeId{p[0]};
+  }
+  std::vector<uint8_t> serialize() const { return {node_id}; }
 };
 
 /// MoveTo / MoveBy: [degrees f32][immediate u8] (5 B).

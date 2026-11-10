@@ -70,6 +70,11 @@ public:
     /// above it is refused (the device's configuration bounds what a host may
     /// ask for). Reported in STATUS so the console can size its control.
     uint16_t max_torque_permille{1000};
+    /// Called (on the dispatcher worker) after the node id the motor object
+    /// talks to changed: SetNodeId, or SetDriveNodeId re-addressed the drive
+    /// and followed it. The application persists it and re-commissions the
+    /// (new) drive. Optional.
+    std::function<void(uint8_t node_id)> on_node_changed{nullptr};
     espp::Logger::Verbosity log_level{espp::Logger::Verbosity::WARN};
   };
 
@@ -296,6 +301,27 @@ protected:
       ok = motor_.set_position_limits(req->min_degrees, req->max_degrees);
       shared_.settings_dirty.store(true);
       context = "set position limits";
+      break;
+    }
+    case Request::SetNodeId:
+    case Request::SetDriveNodeId: {
+      const auto req = proto::NodeId::parse(payload);
+      if (!req)
+        return malformed("short payload");
+      if (req->node_id < 1 || req->node_id > 127)
+        return malformed("node id must be 1..127");
+      const bool program = static_cast<Request>(type) == Request::SetDriveNodeId;
+      const uint8_t before = motor_.node_id();
+      ok = program ? motor_.set_drive_node_id(req->node_id) : motor_.set_node_id(req->node_id);
+      if (ok && motor_.node_id() != before) {
+        // a different drive (or the same one re-addressed): the target and the
+        // settings shown were the old node's
+        shared_.target_degrees.store(std::numeric_limits<float>::quiet_NaN());
+        shared_.settings_dirty.store(true);
+        if (config_.on_node_changed)
+          config_.on_node_changed(motor_.node_id());
+      }
+      context = program ? "program the drive's node id" : "set node id";
       break;
     }
     default:

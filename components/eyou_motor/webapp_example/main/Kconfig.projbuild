@@ -26,7 +26,10 @@ menu "Eyou Console Configuration"
         range 1 127
         default 1
         help
-            The node id of the one actuator on the test stand.
+            The node id of the actuator on the test stand, until the console
+            selects another one (that choice is saved in NVS and used at the
+            next boot instead of this default). The console can also
+            re-address the drive itself (its Node-ID object 0x26A0).
 
     config EXAMPLE_POLL_PERIOD_MS
         int "Poll period (ms)"

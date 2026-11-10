@@ -82,6 +82,9 @@ public:
   /// queue. Returns false if the queue did not drain in time (a wedged
   /// controller).
   bool flush_pending();
+  /// Deliver every received frame with CAN id `can_id` to `queue` (a queue of
+  /// CanFrame). Allowed before and after start(): registration and the RX ISR
+  /// share receivers_lock_. False when the 64-slot table is full.
   bool register_receiver(uint32_t can_id, QueueHandle_t queue);
   /// Drop every registration of `queue`, so the RX ISR stops writing to it.
   /// Call it BEFORE deleting the queue; the slot's pointer is cleared with a

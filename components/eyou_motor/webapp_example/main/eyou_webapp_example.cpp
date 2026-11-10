@@ -40,6 +40,7 @@
 #include "eyou_service.hpp"
 #include "logger.hpp"
 #include "monitor_service.hpp"
+#include "nvs.hpp"
 #include "ota.hpp"
 #include "ota_service.hpp"
 #include "system_service.hpp"
@@ -66,12 +67,29 @@ extern "C" void app_main(void) {
                 "the next reset unless the host confirms it (MARK_VALID from the OTA console)");
 
   // --- CAN + the motor -------------------------------------------------------
-  // CanBus(rx_gpio, tx_gpio); the motor registers its CANopen receivers in its
-  // constructor, which must happen before the bus starts.
+  // The node id to talk to: the one the console last selected (NVS), else the
+  // menuconfig default. The console changes it at run time (SetNodeId) and
+  // can re-address the drive itself (SetDriveNodeId).
+  static constexpr char kNvsNamespace[] = "eyou_console";
+  static constexpr char kNvsNodeKey[] = "node_id";
+  uint8_t node_id = CONFIG_EXAMPLE_NODE_ID;
+  {
+    std::error_code ec;
+    espp::Nvs nvs;
+    nvs.init(ec);
+    if (!ec) {
+      uint8_t saved = 0;
+      nvs.get_var(kNvsNamespace, kNvsNodeKey, saved, ec);
+      if (!ec && saved >= 1 && saved <= 127 && saved != node_id) {
+        logger.info("Eyou node id {} (selected from the console; menuconfig default {})", saved,
+                    node_id);
+        node_id = saved;
+      }
+    }
+  }
   static constexpr gpio_num_t can_rx = static_cast<gpio_num_t>(CONFIG_EXAMPLE_CAN_RX_GPIO);
   static constexpr gpio_num_t can_tx = static_cast<gpio_num_t>(CONFIG_EXAMPLE_CAN_TX_GPIO);
-  static constexpr uint8_t node_id = CONFIG_EXAMPLE_NODE_ID;
-  CanBus bus(can_rx, can_tx);
+  CanBus bus(can_rx, can_tx); // CanBus(rx_gpio, tx_gpio)
   EyouMotor motor(bus, node_id);
   const bool can_ok = bus.start(CONFIG_EXAMPLE_CAN_BITRATE);
   if (!can_ok)
@@ -91,30 +109,51 @@ extern "C" void app_main(void) {
   static constexpr uint16_t kMaxTorquePermille = CONFIG_EXAMPLE_MAX_TORQUE_PERMILLE;
   static constexpr uint16_t kBootTorquePermille =
       std::min<uint16_t>(CONFIG_EXAMPLE_BOOT_TORQUE_PERMILLE, kMaxTorquePermille);
-  bool drive_seen = false;
-  if (can_ok) {
-    drive_seen = motor.set_max_torque(kBootTorquePermille);
-    if (drive_seen) {
-      motor.set_profile_position_config(
-          {.velocity_degrees_per_second = static_cast<float>(CONFIG_EXAMPLE_PROFILE_VELOCITY_DPS),
-           .acceleration_degrees_per_second_squared =
-               static_cast<float>(CONFIG_EXAMPLE_PROFILE_ACCEL_DPS2),
-           .deceleration_degrees_per_second_squared =
-               static_cast<float>(CONFIG_EXAMPLE_PROFILE_DECEL_DPS2)});
+  // drive_seen: the node answered and was commissioned (cleared when the node
+  // id changes, so the poll loop commissions the new one when it answers)
+  std::atomic<bool> drive_seen{false};
+  std::atomic<bool> have_rated{false};
+  auto commission = [&]() -> bool {
+    if (!motor.set_max_torque(kBootTorquePermille))
+      return false;
+    motor.set_profile_position_config(
+        {.velocity_degrees_per_second = static_cast<float>(CONFIG_EXAMPLE_PROFILE_VELOCITY_DPS),
+         .acceleration_degrees_per_second_squared =
+             static_cast<float>(CONFIG_EXAMPLE_PROFILE_ACCEL_DPS2),
+         .deceleration_degrees_per_second_squared =
+             static_cast<float>(CONFIG_EXAMPLE_PROFILE_DECEL_DPS2)});
 #if CONFIG_EXAMPLE_LOAD_ZERO_AT_BOOT
-      if (motor.load_zero())
-        logger.info("Software zero loaded from NVS");
-      else
-        logger.warn("No saved software zero for node {}: angles are the encoder's absolute "
-                    "position until one is set",
-                    node_id);
+    if (motor.load_zero())
+      logger.info("Software zero for node {} loaded from NVS", motor.node_id());
+    else
+      logger.warn("No saved software zero for node {}: angles are the encoder's absolute "
+                  "position until one is set",
+                  motor.node_id());
 #endif
-    } else {
-      logger.warn("The Eyou drive (node {}) did not answer: power / wiring / bitrate? The "
-                  "console keeps trying.",
+    return true;
+  };
+  if (can_ok) {
+    drive_seen = commission();
+    if (!drive_seen)
+      logger.warn("The Eyou drive (node {}) did not answer: power / wiring / bitrate / node id? "
+                  "The console keeps trying.",
                   node_id);
-    }
   }
+  // the console selected another node (or re-addressed the drive): remember it
+  // for the next boot and let the poll loop commission it when it answers
+  auto on_node_changed = [&](uint8_t id) {
+    drive_seen = false;
+    have_rated = false;
+    std::error_code ec;
+    espp::Nvs nvs;
+    nvs.init(ec);
+    if (!ec)
+      nvs.set_var(kNvsNamespace, kNvsNodeKey, id, ec);
+    if (ec)
+      logger.error("Failed to save node id {} to NVS: {}", id, ec.message());
+    else
+      logger.info("Now talking to Eyou node {} (saved: used at the next boot)", id);
+  };
 
   // --- USB: vendor (WebUSB) + CDC (Web Serial), both carry the protocol ------
   espp::UsbDevice::Config usb_cfg;
@@ -160,10 +199,12 @@ extern "C" void app_main(void) {
   EyouService vendor_eyou(motor, shared,
                           {.send = vendor_send,
                            .max_torque_permille = kMaxTorquePermille,
+                           .on_node_changed = on_node_changed,
                            .log_level = espp::Logger::Verbosity::INFO});
   EyouService cdc_eyou(motor, shared,
                        {.send = cdc_send,
                         .max_torque_permille = kMaxTorquePermille,
+                        .on_node_changed = on_node_changed,
                         .log_level = espp::Logger::Verbosity::INFO});
 
   // The standard services (system 7 / monitor 8 / OTA 0 / core dump 4).
@@ -227,13 +268,13 @@ extern "C" void app_main(void) {
   status.target_degrees = std::numeric_limits<float>::quiet_NaN();
   const auto t0 = std::chrono::steady_clock::now();
   uint32_t tick = 0;
-  bool have_rated = false;
   auto last_report = std::chrono::steady_clock::now();
   static constexpr uint32_t kSlowEvery =
       std::max<uint32_t>(1, 1000 / std::max<int>(1, CONFIG_EXAMPLE_POLL_PERIOD_MS));
   espp::Task poll_task({
       .callback = [&](std::mutex &m, std::condition_variable &cv) -> bool {
         const auto start = std::chrono::steady_clock::now();
+        status.node_id = motor.node_id();
         if (can_ok) {
           float angle = 0.0f, velocity = 0.0f;
           int16_t torque = 0, current = 0;
@@ -252,10 +293,10 @@ extern "C" void app_main(void) {
             status.faulted = (statusword & 0x0008) != 0;
             status.target_reached = (statusword & 0x0400) != 0;
             if (!drive_seen) {
-              // the drive just appeared (powered on / plugged in after boot):
-              // commission it the same way the boot did
+              // the drive just appeared (powered on / plugged in after boot, or
+              // another node was selected): commission it as the boot did
               drive_seen = true;
-              motor.set_max_torque(kBootTorquePermille);
+              commission();
               shared.settings_dirty.store(true);
             }
           } else {

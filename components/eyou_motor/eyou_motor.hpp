@@ -113,6 +113,19 @@ public:
   // then make the position reached the new set-point and release the halt bit,
   // so the move does not resume. The drive stays enabled.
   bool halt(uint32_t timeout_ms = 2000);
+
+  // --- which node this object talks to ---
+  // Talk to another CANopen node id from now on (the receivers move with it;
+  // the bus may be running). The software zero is per node and is cleared:
+  // load_zero() for the new node's saved zero. 1..127.
+  bool set_node_id(uint8_t new_node_id);
+  // Re-address the DRIVE: write `new_node_id` to its Node-ID object (0x26A0),
+  // save its parameters (0x1010:01, about 3 s, confirmed by reading it back
+  // as 2), restart it (NMT reset node) and follow it to the new id (as
+  // set_node_id). True once the id is written and saved; the log says whether
+  // the drive came back on the new id (some need a power cycle).
+  bool set_drive_node_id(uint8_t new_node_id, uint32_t timeout_ms = 8000);
+
   // The active software zero (encoder pulses), if one was set / loaded.
   std::optional<int32_t> zero_offset_pulses() const;
   // The position limits move_absolute() clamps to (infinite when unset).
@@ -143,6 +156,9 @@ private:
   // ... sign-extended to the size the drive sent (INT8 / INT16 / INT32 objects).
   bool request_sdo_signed(uint16_t index, uint8_t subindex, int32_t &value, uint32_t timeout_ms);
   bool trigger_profile_position(bool relative, bool immediate);
+  // Move the receive queue's registrations to 0x580 / 0x700 + new_node_id and
+  // adopt it (transaction_mutex_ held). Keeps the old id if the bus refuses.
+  bool rebind_receivers_unlocked(uint8_t new_node_id);
   bool degrees_to_pulses(float degrees, int32_t &pulses) const;
   bool degrees_to_profile_units(float degrees, uint32_t &pulses) const;
   static float pulses_to_degrees(int32_t pulses);

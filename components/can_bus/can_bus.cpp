@@ -19,9 +19,12 @@ CanBus::~CanBus() {
 
 bool CanBus::register_receiver(uint32_t can_id, QueueHandle_t queue) {
   std::lock_guard<std::mutex> lock(lifecycle_mutex_);
-  if (node_ != nullptr || queue == nullptr) {
+  if (queue == nullptr) {
     return false;
   }
+  // safe while the bus runs: the slot is written under the same spinlock the
+  // RX ISR holds while fanning a frame out, so the ISR sees the old or the new
+  // registration, never a torn one
   portENTER_CRITICAL(&receivers_lock_);
   const auto free_slot = std::find_if(receivers_.begin(), receivers_.end(),
                                       [](const Receiver &r) { return r.queue == nullptr; });

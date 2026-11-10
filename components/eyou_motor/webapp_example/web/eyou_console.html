@@ -180,6 +180,13 @@
         <span>Rated: <b id="devRated">-</b></span>
         <span>Received: <b id="rxRate">-</b></span>
       </div>
+      <div class="row" style="margin-top:10px;">
+        <span class="muted" title="The CANopen node id of the actuator on the bus (1..127)">Motor node id</span>
+        <input type="number" id="nodeId" class="tiny" value="1" min="1" max="127" step="1">
+        <button id="nodeUseBtn" class="small" disabled title="Talk to the drive with this node id from now on (saved on the device: used at its next boot too). Its saved zero is loaded and the boot torque limit / profile applied once it answers.">Talk to</button>
+        <button id="nodeProgramBtn" class="small" disabled title="Re-address the DRIVE that currently answers: write this id to its Node-ID object (0x26A0), save its parameters (about 3 s), restart it, then talk to it on the new id. Click twice to confirm.">Program drive id</button>
+        <span id="nodeNote" class="muted"></span>
+      </div>
     </div>
 
     <div class="main">
@@ -304,17 +311,18 @@
     // requests (0x1X)
     const T_GET_STATUS = 0x10, T_SET_STREAM = 0x11, T_SET_TORQUE_LIMIT = 0x12, T_MOVE_TO = 0x13, T_MOVE_BY = 0x14,
           T_ENABLE = 0x15, T_DISABLE = 0x16, T_RESET_FAULT = 0x17, T_HALT = 0x18, T_SET_ZERO = 0x19, T_SAVE_ZERO = 0x1A,
-          T_LOAD_ZERO = 0x1B, T_SET_PROFILE = 0x1C, T_SET_POSITION_LIMITS = 0x1D;
+          T_LOAD_ZERO = 0x1B, T_SET_PROFILE = 0x1C, T_SET_POSITION_LIMITS = 0x1D, T_SET_NODE_ID = 0x1E,
+          T_SET_DRIVE_NODE_ID = 0x1F;
     // replies (0x9X)
     const T_STATUS = 0x90, T_OK = 0x91, T_ERROR = 0x92;
     const REQ_NAME = { 0x10:"get status",0x11:"set stream",0x12:"set torque limit",0x13:"move to",0x14:"move by",
       0x15:"enable",0x16:"disable",0x17:"reset fault",0x18:"halt",0x19:"set zero",0x1A:"save zero",0x1B:"load zero",
-      0x1C:"set profile",0x1D:"set position limits" };
+      0x1C:"set profile",0x1D:"set position limits",0x1E:"set node id",0x1F:"program the drive's node id" };
     const STATUS_POLL_MS = 1000;
 
     const els = {};
     for (const id of ["status","connectUsbBtn","connectSerialBtn","disconnectBtn","anyDevice","autoReconnect","devInfo",
-      "liveStream","streamPeriod","refreshBtn","driveState","devComm","devNode","devMode","devStatusword","devError","devRated","rxRate",
+      "liveStream","streamPeriod","refreshBtn","nodeId","nodeUseBtn","nodeProgramBtn","nodeNote","driveState","devComm","devNode","devMode","devStatusword","devError","devRated","rxRate",
       "rAngle","rAngleSub","rVelocity","rVelocitySub","rTorque","rTorqueUnit","rTorqueSub","rCurrent","rCurrentUnit","rCurrentSub","rTarget","rTargetSub",
       "chartWindow","permilleUnits","showLimitLines","clearChartsBtn","csvBtn","chartMotion","noDataMotion","chartEffort","noDataEffort",
       "enableBtn","disableBtn","resetFaultBtn","haltBtn","driveNote",
@@ -922,6 +930,7 @@
       adoptModule(info);
     }
     // ---- request encoders ----
+    function encU8(v) { return new Uint8Array([v & 0xFF]); }
     function encStream(enable, periodMs) { const b = new Uint8Array(3); b[0] = enable ? 1 : 0; new DataView(b.buffer).setUint16(1, periodMs & 0xFFFF, true); return b; }
     function encU16(v) { const b = new Uint8Array(2); new DataView(b.buffer).setUint16(0, v & 0xFFFF, true); return b; }
     function encMove(degrees, immediate) { const b = new Uint8Array(5); new DataView(b.buffer).setFloat32(0, degrees, true); b[4] = immediate ? 1 : 0; return b; }
@@ -996,6 +1005,7 @@
       els.driveState.textContent = st.name; els.driveState.className = "state-badge " + st.cls;
       els.devComm.textContent = s.commOk ? "ok" : "no answer";
       els.devNode.textContent = String(s.node);
+      reflect(els.nodeId, s.node, prev && prev.node);
       els.devMode.textContent = MODE_NAME[s.mode] || String(s.mode);
       els.devStatusword.textContent = "0x" + s.statusword.toString(16).padStart(4, "0") + (s.targetReached ? " (target reached)" : "");
       els.devError.textContent = s.errorCode ? "0x" + s.errorCode.toString(16).padStart(4, "0") : "none";
@@ -1040,6 +1050,7 @@
       const canMove = can && s.enabled && !s.faulted;
       els.moveToBtn.disabled = els.jogMinusBtn.disabled = els.jogPlusBtn.disabled = !canMove;
       els.torqueLimitBtn.disabled = els.profileBtn.disabled = els.zeroHereBtn.disabled = els.zeroAtBtn.disabled = !can;
+      els.nodeProgramBtn.disabled = !can; // re-addressing needs the drive answering on its current id
       els.driveNote.textContent = !can ? "The drive does not answer on CAN: check its power, the bus wiring / termination and the node id." :
         s.faulted ? "The drive is in FAULT (error 0x" + s.errorCode.toString(16).padStart(4, "0") + "): Reset fault, then Enable." :
         s.enabled ? "Enabled: moves run under the torque limit (" + s.torqueLimit + " ‰ of rated). Halt stops a move; Disable frees the shaft." :
@@ -1272,14 +1283,15 @@
     }
 
     const COMMAND_BUTTONS = [els.enableBtn, els.disableBtn, els.resetFaultBtn, els.haltBtn, els.torqueLimitBtn, els.moveToBtn, els.jogMinusBtn, els.jogPlusBtn,
-      els.profileBtn, els.limitsBtn, els.zeroHereBtn, els.zeroAtBtn, els.saveZeroBtn, els.loadZeroBtn];
+      els.profileBtn, els.limitsBtn, els.zeroHereBtn, els.zeroAtBtn, els.saveZeroBtn, els.loadZeroBtn, els.nodeUseBtn, els.nodeProgramBtn];
     function setConnectedUI(connected) {
       els.connectUsbBtn.disabled = connected || !navigator.usb;
       els.connectSerialBtn.disabled = connected || !navigator.serial;
       els.disconnectBtn.disabled = !connected; els.anyDevice.disabled = connected;
       els.refreshBtn.disabled = !connected;
       // the zero's save / load and the limits live on the device, not the drive: any time connected
-      els.saveZeroBtn.disabled = els.loadZeroBtn.disabled = els.limitsBtn.disabled = !connected;
+      els.saveZeroBtn.disabled = els.loadZeroBtn.disabled = els.limitsBtn.disabled = els.nodeUseBtn.disabled = !connected;
+      if (!connected) { els.nodeNote.textContent = ""; programArmed = null; }
       if (!connected) {
         els.devInfo.textContent = "Not connected. Default WebUSB filter: VID 0x1209 / PID 0x0d32 (espp default).";
         els.driveState.textContent = "-"; els.driveState.className = "state-badge";
@@ -1293,6 +1305,29 @@
     // ---- motor controls ----
     const numOf = (el, lo, hi) => { const v = Number(el.value); if (!Number.isFinite(v)) return null; return Math.min(hi, Math.max(lo, v)); };
     els.refreshBtn.addEventListener("click", () => send(T_GET_STATUS));
+    // ---- which node the device talks to / re-addressing the drive ----
+    let programArmed = null; // node id a first "Program drive id" click armed (second click sends)
+    const nodeIdOf = () => { const v = numOf(els.nodeId, 1, 127); if (v === null || Math.round(v) !== v) { logLine("err", "node id must be an integer 1..127"); return null; } return v; };
+    els.nodeUseBtn.addEventListener("click", () => {
+      const id = nodeIdOf(); if (id === null) return;
+      programArmed = null; els.nodeNote.textContent = "";
+      logLine("tx", "talk to node " + id); send(T_SET_NODE_ID, encU8(id));
+    });
+    els.nodeId.addEventListener("keydown", (e) => { if (e.key === "Enter" && !els.nodeUseBtn.disabled) els.nodeUseBtn.click(); });
+    els.nodeProgramBtn.addEventListener("click", () => {
+      const id = nodeIdOf(); if (id === null) return;
+      const from = lastStatus ? lastStatus.node : null;
+      if (from === id) { logLine("sys", "the drive already is node " + id); return; }
+      if (programArmed !== id) {
+        programArmed = id;
+        els.nodeNote.textContent = "Re-address the drive " + (from === null ? "" : "(node " + from + ") ") + "to node " + id + "? Click again within 5 s to confirm.";
+        setTimeout(() => { if (programArmed === id) { programArmed = null; els.nodeNote.textContent = ""; } }, 5000);
+        return;
+      }
+      programArmed = null; els.nodeNote.textContent = "";
+      logLine("tx", "program the drive's node id to " + id + " (write 0x26A0, save about 3 s, restart; the status stream pauses meanwhile)");
+      send(T_SET_DRIVE_NODE_ID, encU8(id));
+    });
     els.enableBtn.addEventListener("click", () => { logLine("tx", "enable drive"); send(T_ENABLE); });
     els.disableBtn.addEventListener("click", () => { logLine("tx", "disable drive"); send(T_DISABLE); });
     els.resetFaultBtn.addEventListener("click", () => { logLine("tx", "reset fault"); send(T_RESET_FAULT); });
