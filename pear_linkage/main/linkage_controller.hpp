@@ -1,0 +1,103 @@
+#pragma once
+
+// LinkageController: ONE 5-bar linkage = two EyouMotor cranks + the
+// kinematics + the settings. The one place that turns end-effector targets
+// into motor commands (settings, limits, the ik reference, the tracked
+// target), shared by the USB service instances. Public methods are serialized
+// by a mutex; the motor transactions themselves are serialized by EyouMotor.
+
+#include <array>
+#include <cstdint>
+#include <mutex>
+#include <optional>
+#include <string>
+
+#include "base_component.hpp"
+#include "eyou_motor.hpp"
+#include "five_bar.hpp"
+#include "linkage_protocol.hpp"
+
+class LinkageController : public espp::BaseComponent {
+public:
+  using Settings = linkage_protocol::Settings;
+  using Status = linkage_protocol::Status;
+  using IkResult = linkage_protocol::IkResult;
+  static constexpr uint8_t kMotorCount = linkage_protocol::kMotorCount;
+  static constexpr uint8_t kAllMotors = linkage_protocol::kAllMotors;
+
+  struct Config {
+    std::array<EyouMotor *, kMotorCount> motors; ///< crank 1 (M1), crank 2 (M2)
+    uint16_t max_torque_permille{500};           ///< ceiling for the settings' torque limits
+    bool can_ok{true};
+    espp::Logger::Verbosity log_level{espp::Logger::Verbosity::INFO};
+  };
+
+  enum class Result : uint8_t {
+    Ok,
+    Unreachable,
+    OutOfLimits,
+    NoMotor,     ///< a crank has no motor configured (node id 0)
+    NotEnabled,  ///< a motor is not Operation enabled (or not answering)
+    MotorFailed, ///< the CANopen command failed
+    NoPose,      ///< a relative move needs a measured pose
+    InvalidArgument,
+  };
+  static const char *to_string(Result result);
+
+  explicit LinkageController(const Config &config);
+
+  /// A copy of the active settings.
+  Settings settings() const;
+  /// Validate and apply new settings: node ids (the motors follow), limits,
+  /// torque limits, profile, the saved zeros of the (new) nodes. The motors
+  /// that answer are commissioned now, the others when they appear. False
+  /// with `why` when the settings are refused (nothing changes).
+  bool apply_settings(const Settings &settings, std::string &why);
+
+  /// Read every motor and build the status snapshot (the poll task's tick).
+  /// Commissions a motor that just started answering.
+  void poll(Status &status);
+
+  /// Inverse kinematics of (x, y) with the active settings and the latest
+  /// measured pose (or home) as the branch reference; no motion.
+  bool solve(float x, float y, IkResult &out) const;
+
+  Result move_to(float x, float y);
+  Result move_by(float dx, float dy);
+  Result home();
+  /// One crank's motor to an absolute motor angle (clears the target).
+  Result set_motor(uint8_t motor, float degrees);
+
+  /// 0xFF = every configured motor. True when every addressed motor succeeded.
+  bool enable(uint8_t motor);
+  bool disable(uint8_t motor);
+  bool reset_fault(uint8_t motor);
+  bool halt(uint8_t motor);
+
+  /// Set a motor's software zero: mode 0 = reads 0 here, 1 = reads `value`
+  /// (motor deg) here, 2 = the crank is at `value` deg (linkage frame) here.
+  Result zero_motor(uint8_t motor, uint8_t mode, float value);
+  bool save_zero(uint8_t motor);
+  bool load_zero(uint8_t motor);
+
+private:
+  bool present_unlocked(uint8_t i) const { return settings_.motors[i].node_id != 0; }
+  /// The ik branch reference: the measured crank angles when the pose is
+  /// valid, else the home angles (mutex_ held).
+  std::array<float, 2> reference_unlocked() const;
+  bool solve_unlocked(float x, float y, IkResult &out) const;
+  /// Both cranks to motor angles (mutex_ held; limits already checked).
+  Result command_unlocked(const std::array<float, kMotorCount> &motor_deg, const char *what);
+  /// torque limit, profile, limits and saved zero of one motor (mutex_ held).
+  bool commission_unlocked(uint8_t i);
+  template <typename Fn> bool for_each_motor(uint8_t motor, const char *what, Fn &&fn);
+
+  Config config_;
+  mutable std::mutex mutex_;
+  Settings settings_{};
+  std::array<bool, kMotorCount> commissioned_{};
+  std::array<bool, kMotorCount> settings_dirty_{};     ///< re-read the slow objects
+  std::optional<std::array<float, 2>> measured_theta_; ///< last valid fk input
+  std::optional<fivebar::Point> target_;
+  uint32_t tick_{0};
+};
