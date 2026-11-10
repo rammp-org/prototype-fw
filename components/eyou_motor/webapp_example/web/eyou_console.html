@@ -224,8 +224,8 @@
         <div class="panel">
           <h2>Torque limit</h2>
           <div class="settings">
-            <span class="k" title="Max torque (object 0x6072): the drive clamps its torque demand to this in every mode, so a move cannot push harder. Per-thousand of the rated torque; 1000 = rated.">Limit (&permil;)</span><input type="number" id="torqueLimit" value="300" min="0" max="3000" step="10"><button class="small" id="torqueLimitBtn" disabled>Apply</button>
-            <input type="range" id="torqueLimitSlider" class="full" min="0" max="1500" step="10" value="300" aria-label="torque limit slider">
+            <span class="k" title="Max torque (object 0x6072): the drive clamps its torque demand to this in every mode, so a move cannot push harder. Per-thousand of the rated torque; 1000 = rated. The device's configuration (menuconfig) caps what can be set here.">Limit (&permil;)</span><input type="number" id="torqueLimit" value="300" min="0" max="3000" step="10"><button class="small" id="torqueLimitBtn" disabled>Apply</button>
+            <input type="range" id="torqueLimitSlider" class="full" min="0" max="1000" step="10" value="300" aria-label="torque limit slider">
             <span class="note" id="torqueLimitNote" style="color: var(--text-muted);">= - Nm (rated torque unknown)</span>
           </div>
         </div>
@@ -932,7 +932,7 @@
     // ===================== Payload decoders =====================
     // STATUS (72 B): see eyou_protocol::Status.
     //   [flags u8][node u8][statusword u16][error_code u16][mode i8][res u8]
-    //   [angle f32][velocity f32][torque i16][current i16][torque_limit u16][res u16]
+    //   [angle f32][velocity f32][torque i16][current i16][torque_limit u16][torque_limit_max u16]
     //   [target f32][rated_torque_mnm u32][rated_current_ma u32][zero_offset i32]
     //   [pos_min f32][pos_max f32][prof_vel f32][prof_acc f32][prof_dec f32]
     //   [timestamp_ms u32][seq u32][stream_period_ms u16][res u16]
@@ -944,7 +944,7 @@
         targetReached: !!(flags & 16), commOk: !!(flags & 32), node: p[1], statusword: dv.getUint16(2, true),
         errorCode: dv.getUint16(4, true), mode: dv.getInt8(6),
         angle: dv.getFloat32(8, true), velocity: dv.getFloat32(12, true),
-        torque: dv.getInt16(16, true), current: dv.getInt16(18, true), torqueLimit: dv.getUint16(20, true),
+        torque: dv.getInt16(16, true), current: dv.getInt16(18, true), torqueLimit: dv.getUint16(20, true), torqueLimitMax: dv.getUint16(22, true),
         target: dv.getFloat32(24, true), ratedTorqueMnm: dv.getUint32(28, true), ratedCurrentMa: dv.getUint32(32, true),
         zeroOffset: dv.getInt32(36, true), posMin: dv.getFloat32(40, true), posMax: dv.getFloat32(44, true),
         profVel: dv.getFloat32(48, true), profAcc: dv.getFloat32(52, true), profDec: dv.getFloat32(56, true),
@@ -1016,6 +1016,11 @@
       els.rTarget.textContent = fmt(s.target, 2);
       els.rTargetSub.textContent = Number.isFinite(s.target) ? "error " + (s.target - s.angle).toFixed(2) + " deg" : "no move commanded";
       // settings mirrored into the inputs (only when they change on the device)
+      // the device's ceiling sizes the control (0 = unknown / old firmware: leave the defaults)
+      if (s.torqueLimitMax && (!prev || prev.torqueLimitMax !== s.torqueLimitMax)) {
+        els.torqueLimit.max = String(s.torqueLimitMax); els.torqueLimitSlider.max = String(s.torqueLimitMax);
+        if (Number(els.torqueLimit.value) > s.torqueLimitMax) els.torqueLimit.value = String(s.torqueLimitMax);
+      }
       reflect(els.torqueLimit, s.torqueLimit, prev && prev.torqueLimit);
       if (document.activeElement !== els.torqueLimitSlider && (!prev || prev.torqueLimit !== s.torqueLimit)) els.torqueLimitSlider.value = String(Math.min(Number(els.torqueLimitSlider.max), s.torqueLimit));
       updateTorqueNote();
@@ -1047,7 +1052,9 @@
     }
     function updateTorqueNote() {
       const s = lastStatus, v = Number(els.torqueLimit.value);
-      els.torqueLimitNote.textContent = (s && s.ratedTorqueMnm) ? "= " + (v * s.ratedTorqueMnm / 1e6).toFixed(3) + " Nm (" + (v / 10).toFixed(1) + "% of the rated " + (s.ratedTorqueMnm / 1000).toFixed(2) + " Nm)" : "= - Nm (rated torque unknown)";
+      const max = s && s.torqueLimitMax ? " · device maximum " + s.torqueLimitMax + " ‰" + (s.ratedTorqueMnm ? " (" + (s.torqueLimitMax * s.ratedTorqueMnm / 1e6).toFixed(3) + " Nm)" : "") : "";
+      els.torqueLimitNote.textContent = ((s && s.ratedTorqueMnm) ? "= " + (v * s.ratedTorqueMnm / 1e6).toFixed(3) + " Nm (" + (v / 10).toFixed(1) + "% of the rated " + (s.ratedTorqueMnm / 1000).toFixed(2) + " Nm)" : "= - Nm (rated torque unknown)") + max;
+      els.torqueLimitNote.style.color = (s && s.torqueLimitMax && v > s.torqueLimitMax) ? "var(--danger)" : "var(--text-muted)";
     }
 
     // ===================== Strip charts (Canvas 2D) =====================
@@ -1292,6 +1299,8 @@
     els.haltBtn.addEventListener("click", () => { logLine("tx", "halt"); send(T_HALT); });
     els.torqueLimitBtn.addEventListener("click", () => {
       const v = numOf(els.torqueLimit, 0, 3000); if (v === null) { logLine("err", "torque limit must be a number (per-mille of rated)"); return; }
+      const max = lastStatus && lastStatus.torqueLimitMax;
+      if (max && v > max) { logLine("err", "torque limit " + Math.round(v) + " ‰ is above the device's maximum of " + max + " ‰ (set in its menuconfig); not sent"); return; }
       logLine("tx", "set torque limit " + Math.round(v) + " ‰"); send(T_SET_TORQUE_LIMIT, encU16(Math.round(v)));
     });
     els.torqueLimit.addEventListener("input", () => { els.torqueLimitSlider.value = String(Math.min(Number(els.torqueLimitSlider.max), Number(els.torqueLimit.value) || 0)); updateTorqueNote(); });

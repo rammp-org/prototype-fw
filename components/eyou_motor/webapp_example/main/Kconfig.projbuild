@@ -37,14 +37,24 @@ menu "Eyou Console Configuration"
             current / statusword from the drive (five SDO reads, a few ms on a
             1 Mbit/s bus) and hands a STATUS snapshot to the console stream.
 
-    config EXAMPLE_DEFAULT_MAX_TORQUE_PERMILLE
+    config EXAMPLE_MAX_TORQUE_PERMILLE
+        int "Maximum torque limit the console may set (per-thousand of rated)"
+        range 0 3000
+        default 500
+        help
+            The CEILING for the torque limit: the console sets the drive's max
+            torque (object 0x6072) at run time, but never above this value (a
+            request above it is refused). 1000 = the rated torque. Pick it for
+            the mechanics on the stand; the console works below it.
+
+    config EXAMPLE_BOOT_TORQUE_PERMILLE
         int "Torque limit written at boot (per-thousand of rated)"
         range 0 3000
-        default 300
+        default EXAMPLE_MAX_TORQUE_PERMILLE
         help
-            Max torque (object 0x6072) written to the drive at boot, before
-            anything can move, and again when a drive appears after boot. The
-            console changes it at run time. 1000 = the rated torque.
+            Max torque written to the drive at boot, before anything can move,
+            and again when a drive appears after boot; clamped to the maximum
+            above. The console changes it at run time (up to the maximum).
 
     config EXAMPLE_PROFILE_VELOCITY_DPS
         int "Profile velocity at boot (deg/s)"

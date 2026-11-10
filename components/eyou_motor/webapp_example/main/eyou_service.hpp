@@ -66,6 +66,10 @@ public:
     uint8_t module{eyou_protocol::kModuleId};
     /// Stream period when the host asks for 0.
     uint16_t default_stream_period_ms{100};
+    /// Ceiling for SetTorqueLimit, per-thousand of the rated torque: a request
+    /// above it is refused (the device's configuration bounds what a host may
+    /// ask for). Reported in STATUS so the console can size its control.
+    uint16_t max_torque_permille{1000};
     espp::Logger::Verbosity log_level{espp::Logger::Verbosity::WARN};
   };
 
@@ -127,6 +131,7 @@ protected:
     s.stream_enabled = stream_enabled_.load();
     s.stream_period_ms = stream_period_ms_.load();
     s.target_degrees = shared_.target_degrees.load();
+    s.torque_limit_max_permille = config_.max_torque_permille;
     return s;
   }
 
@@ -177,6 +182,15 @@ protected:
       const auto req = proto::SetTorqueLimit::parse(payload);
       if (!req)
         return malformed("short payload");
+      if (req->permille > config_.max_torque_permille) {
+        logger_.warn("refusing torque limit {} permille: the device's maximum is {}", req->permille,
+                     config_.max_torque_permille);
+        send_error(type, std::errc::result_out_of_range,
+                   "torque limit " + std::to_string(req->permille) +
+                       " permille exceeds the device's maximum of " +
+                       std::to_string(config_.max_torque_permille) + " permille");
+        return;
+      }
       ok = motor_.set_max_torque(req->permille);
       context = "set torque limit";
       shared_.settings_dirty.store(true);

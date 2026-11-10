@@ -48,7 +48,8 @@ the hub to be opened from it; opening the local file directly works too).
 | CAN bitrate | 1 Mbit/s | `EXAMPLE_CAN_BITRATE` |
 | Eyou CANopen node id | 1 | `EXAMPLE_NODE_ID` |
 | poll period (live readings) | 50 ms | `EXAMPLE_POLL_PERIOD_MS` |
-| torque limit written at boot | 300 ‰ of rated | `EXAMPLE_DEFAULT_MAX_TORQUE_PERMILLE` |
+| maximum torque limit the console may set | 500 ‰ of rated | `EXAMPLE_MAX_TORQUE_PERMILLE` |
+| torque limit written at boot | = the maximum | `EXAMPLE_BOOT_TORQUE_PERMILLE` |
 | profile velocity / accel / decel at boot | 30 deg/s, 20 / 20 deg/s² | `EXAMPLE_PROFILE_*` |
 | load the saved zero at boot | yes | `EXAMPLE_LOAD_ZERO_AT_BOOT` |
 | USB port | FS controller on the USB-C pads (GPIO 24 / 25) | `EXAMPLE_USB_PORT` |
@@ -57,11 +58,13 @@ The defaults are the Waveshare ESP32-P4-ETH as wired for the other projects
 in this repository (same pins as `pear/`). The bus needs a 120 Ω termination
 at each end, and the drive must be set to the configured bitrate and node id.
 
-**Safety.** The drive is NOT enabled at boot: the torque limit from
-menuconfig is written first (before anything can move), then the profile and
-the saved zero, and the drive stays disabled until *Enable* is pressed in the
-console. The limit can be changed at run time (the slider applies on release),
-and *Halt* stops a move with the profile deceleration while staying enabled.
+**Safety.** The drive is NOT enabled at boot: the boot torque limit is
+written first (before anything can move), then the profile and the saved
+zero, and the drive stays disabled until *Enable* is pressed in the console.
+The console changes the limit at run time (the slider applies on release) but
+never above the menuconfig **maximum**: the device refuses a higher request,
+reports the maximum in every status, and the console sizes its slider to it.
+*Halt* stops a move with the profile deceleration while staying enabled.
 A drive that is powered after the device (or that drops off the bus) is
 commissioned again the moment it answers.
 
@@ -92,7 +95,7 @@ or, for GetStatus, a STATUS.
 | --- | --- | --- |
 | 0x10 | GetStatus | - |
 | 0x11 | SetStream | `[enable u8][period_ms u16]` STATUS on this transport at the period (0 = device default) |
-| 0x12 | SetTorqueLimit | `[permille u16]` max torque 0x6072 |
+| 0x12 | SetTorqueLimit | `[permille u16]` max torque 0x6072; refused above the device's `torque_limit_max` |
 | 0x13 | MoveTo | `[angle_deg f32][immediate u8]` |
 | 0x14 | MoveBy | `[delta_deg f32][immediate u8]` |
 | 0x15 | Enable | - |
@@ -106,7 +109,7 @@ or, for GetStatus, a STATUS.
 | 0x1D | SetPositionLimits | `[min_deg f32][max_deg f32]` |
 
 STATUS (0x90, 72 B): `[flags u8][node u8][statusword u16][error_code u16][mode i8][res u8]
-[angle f32][velocity f32][torque ‰ i16][current ‰ i16][torque_limit ‰ u16][res u16]
+[angle f32][velocity f32][torque ‰ i16][current ‰ i16][torque_limit ‰ u16][torque_limit_max ‰ u16]
 [target f32][rated_torque_mNm u32][rated_current_mA u32][zero_offset_pulses i32]
 [pos_min f32][pos_max f32][profile_vel f32][profile_acc f32][profile_dec f32]
 [timestamp_ms u32][sequence u32][stream_period_ms u16][res u16]`; flags: bit 0

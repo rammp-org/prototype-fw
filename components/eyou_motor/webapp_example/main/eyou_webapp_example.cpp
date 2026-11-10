@@ -84,9 +84,14 @@ extern "C" void app_main(void) {
   // until the console enables it. Failures are not fatal: the drive may be off
   // or unplugged, the console shows "no communication" and every call is
   // retried when it is back.
+  // The menuconfig maximum is the ceiling the console may set the limit to;
+  // the boot value is what the drive gets before the console changes it.
+  static constexpr uint16_t kMaxTorquePermille = CONFIG_EXAMPLE_MAX_TORQUE_PERMILLE;
+  static constexpr uint16_t kBootTorquePermille =
+      std::min<uint16_t>(CONFIG_EXAMPLE_BOOT_TORQUE_PERMILLE, kMaxTorquePermille);
   bool drive_seen = false;
   if (can_ok) {
-    drive_seen = motor.set_max_torque(CONFIG_EXAMPLE_DEFAULT_MAX_TORQUE_PERMILLE);
+    drive_seen = motor.set_max_torque(kBootTorquePermille);
     if (drive_seen) {
       motor.set_profile_position_config(
           {.velocity_degrees_per_second = static_cast<float>(CONFIG_EXAMPLE_PROFILE_VELOCITY_DPS),
@@ -151,9 +156,13 @@ extern "C" void app_main(void) {
   // The Eyou service, one per transport, sharing the motor and the target.
   EyouService::Shared shared;
   EyouService vendor_eyou(motor, shared,
-                          {.send = vendor_send, .log_level = espp::Logger::Verbosity::INFO});
+                          {.send = vendor_send,
+                           .max_torque_permille = kMaxTorquePermille,
+                           .log_level = espp::Logger::Verbosity::INFO});
   EyouService cdc_eyou(motor, shared,
-                       {.send = cdc_send, .log_level = espp::Logger::Verbosity::INFO});
+                       {.send = cdc_send,
+                        .max_torque_permille = kMaxTorquePermille,
+                        .log_level = espp::Logger::Verbosity::INFO});
 
   // The standard services (system 7 / monitor 8 / OTA 0 / core dump 4).
   auto reboot_request = [&](espp::SystemService::RebootKind kind) {
@@ -244,7 +253,7 @@ extern "C" void app_main(void) {
               // the drive just appeared (powered on / plugged in after boot):
               // commission it the same way the boot did
               drive_seen = true;
-              motor.set_max_torque(CONFIG_EXAMPLE_DEFAULT_MAX_TORQUE_PERMILLE);
+              motor.set_max_torque(kBootTorquePermille);
               shared.settings_dirty.store(true);
             }
           } else {

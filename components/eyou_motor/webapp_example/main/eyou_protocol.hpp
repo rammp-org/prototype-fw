@@ -215,7 +215,7 @@ struct SetPositionLimits {
 /// STATUS payload (72 B):
 ///   [flags u8][node_id u8][statusword u16][error_code u16][mode i8][reserved u8]
 ///   [angle_deg f32][velocity_dps f32][torque_permille i16][current_permille i16]
-///   [torque_limit_permille u16][reserved u16]
+///   [torque_limit_permille u16][torque_limit_max_permille u16]
 ///   [target_deg f32][rated_torque_mnm u32][rated_current_ma u32][zero_offset_pulses i32]
 ///   [pos_min_deg f32][pos_max_deg f32][profile_velocity f32][profile_accel f32][profile_decel f32]
 ///   [timestamp_ms u32][sequence u32][stream_period_ms u16][reserved u16]
@@ -237,7 +237,8 @@ struct Status {
   int16_t torque_permille{0};
   int16_t current_permille{0};
   uint16_t torque_limit_permille{0};
-  float target_degrees{0.0f}; ///< the last MoveTo target (NaN until one was commanded)
+  uint16_t torque_limit_max_permille{0}; ///< ceiling SetTorqueLimit accepts (device config)
+  float target_degrees{0.0f};            ///< the last MoveTo target (NaN until one was commanded)
   uint32_t rated_torque_mnm{0};
   uint32_t rated_current_ma{0};
   int32_t zero_offset_pulses{0};
@@ -285,7 +286,7 @@ struct Status {
     put_i16(out, torque_permille);
     put_i16(out, current_permille);
     put_u16(out, torque_limit_permille);
-    put_u16(out, 0);
+    put_u16(out, torque_limit_max_permille);
     put_f32(out, target_degrees);
     put_u32(out, rated_torque_mnm);
     put_u32(out, rated_current_ma);
@@ -322,6 +323,7 @@ struct Status {
     s.torque_permille = get_i16(p, 16);
     s.current_permille = get_i16(p, 18);
     s.torque_limit_permille = get_u16(p, 20);
+    s.torque_limit_max_permille = get_u16(p, 22);
     s.target_degrees = get_f32(p, 24);
     s.rated_torque_mnm = get_u32(p, 28);
     s.rated_current_ma = get_u32(p, 32);
