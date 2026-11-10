@@ -1,0 +1,93 @@
+menu "Eyou Console Configuration"
+
+    config EXAMPLE_CAN_TX_GPIO
+        int "CAN (TWAI) TX GPIO"
+        range 0 54
+        default 17
+        help
+            TWAI TX, to the CAN transceiver's TXD. 17 on the Waveshare
+            ESP32-P4-ETH as wired for the other projects in this repository.
+
+    config EXAMPLE_CAN_RX_GPIO
+        int "CAN (TWAI) RX GPIO"
+        range 0 54
+        default 16
+        help
+            TWAI RX, from the CAN transceiver's RXD (16 on the ESP32-P4-ETH).
+
+    config EXAMPLE_CAN_BITRATE
+        int "CAN bitrate (bit/s)"
+        default 1000000
+        help
+            The Eyou actuators run 1 Mbit/s; it must match the drive's setting.
+
+    config EXAMPLE_NODE_ID
+        int "Eyou CANopen node id"
+        range 1 127
+        default 1
+        help
+            The node id of the one actuator on the test stand.
+
+    config EXAMPLE_POLL_PERIOD_MS
+        int "Poll period (ms)"
+        range 10 1000
+        default 50
+        help
+            How often the device reads the live position / velocity / torque /
+            current / statusword from the drive (five SDO reads, a few ms on a
+            1 Mbit/s bus) and hands a STATUS snapshot to the console stream.
+
+    config EXAMPLE_DEFAULT_MAX_TORQUE_PERMILLE
+        int "Torque limit written at boot (per-thousand of rated)"
+        range 0 3000
+        default 300
+        help
+            Max torque (object 0x6072) written to the drive at boot, before
+            anything can move, and again when a drive appears after boot. The
+            console changes it at run time. 1000 = the rated torque.
+
+    config EXAMPLE_PROFILE_VELOCITY_DPS
+        int "Profile velocity at boot (deg/s)"
+        range 1 3600
+        default 30
+
+    config EXAMPLE_PROFILE_ACCEL_DPS2
+        int "Profile acceleration at boot (deg/s^2)"
+        range 1 36000
+        default 20
+
+    config EXAMPLE_PROFILE_DECEL_DPS2
+        int "Profile deceleration at boot (deg/s^2)"
+        range 1 36000
+        default 20
+
+    config EXAMPLE_LOAD_ZERO_AT_BOOT
+        bool "Load the saved software zero at boot"
+        default y
+        help
+            Load the zero saved for this node id from NVS (the console's Save
+            zero) at boot, so angles are relative to it from the start. Off:
+            angles are the encoder's absolute position until a zero is set.
+
+    choice EXAMPLE_USB_PORT
+        prompt "USB port"
+        default EXAMPLE_USB_PORT_FS_USBC
+        help
+            Which USB-OTG controller TinyUSB drives, and on which pads. The
+            ESP32-P4 dev kits (Espressif, Waveshare) route the USB-Serial-JTAG
+            pad pair (GPIO 24 / 25) to their USB-C: the full-speed controller
+            can be moved there, which is what the console cable wants. The
+            high-speed port goes to a separate connector on boards that have
+            one.
+
+        config EXAMPLE_USB_PORT_FS_USBC
+            bool "USB 1.1 full-speed port on the USB-C pads (GPIO 24 / 25)"
+
+        config EXAMPLE_USB_PORT_HIGH_SPEED
+            bool "USB 2.0 high-speed port"
+
+        config EXAMPLE_USB_PORT_DEFAULT
+            bool "TinyUSB's default for the target"
+    endchoice
+
+endmenu

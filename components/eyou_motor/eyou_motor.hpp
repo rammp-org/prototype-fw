@@ -40,7 +40,8 @@ public:
 
   // Reset the CANopen node and configure it for Profile Position mode.
   bool configure_profile_position(const ProfilePositionConfig &config);
-  // Read back the drive's current Profile Position velocity/accel/decel (objects 0x6081/0x6083/0x6084).
+  // Read back the drive's current Profile Position velocity/accel/decel (objects
+  // 0x6081/0x6083/0x6084).
   bool get_profile_position_config(ProfilePositionConfig &config, uint32_t timeout_ms = 100);
   // Reset the software zero reference to the current actual position; set_position
   // (move_absolute) is relative to this reference.
@@ -84,12 +85,48 @@ public:
   // Decode a DS402 statusword's state bits into a human-readable name.
   static const char *ds402_state_name(uint16_t statusword);
 
+  // --- live readings and the torque limit (the test-stand console uses these) ---
+  // Actual velocity (object 0x606C, pulses/s) in degrees per second.
+  bool get_velocity(float &velocity_degrees_per_second, uint32_t timeout_ms = 100);
+  // Actual torque (0x6077) and actual current (0x6078), in per-thousand of the
+  // rated torque / current (see get_rated_torque / get_rated_current).
+  bool get_torque(int16_t &torque_permille, uint32_t timeout_ms = 100);
+  bool get_current(int16_t &current_permille, uint32_t timeout_ms = 100);
+  // Max torque (0x6072): the drive clamps its torque demand to this, in
+  // per-thousand of the rated torque (1000 = rated). Applies to every mode, so a
+  // profile position move cannot push harder than this.
+  bool set_max_torque(uint16_t torque_permille, uint32_t timeout_ms = 100);
+  bool get_max_torque(uint16_t &torque_permille, uint32_t timeout_ms = 100);
+  // Rated torque (0x6076, mNm) and rated current (0x6075, mA): the scale of the
+  // per-thousand values above.
+  bool get_rated_torque(uint32_t &rated_torque_mnm, uint32_t timeout_ms = 100);
+  bool get_rated_current(uint32_t &rated_current_ma, uint32_t timeout_ms = 100);
+  // Set the software zero so that the CURRENT actual position reads as
+  // `current_angle_degrees` (zero() is the special case 0). Volatile until save_zero().
+  bool zero_at(float current_angle_degrees, uint32_t timeout_ms = 1000);
+  // Write the Profile Position velocity / acceleration / deceleration (0x6081 /
+  // 0x6083 / 0x6084) only: no node reset, no mode change (configure_profile_position
+  // does both). Takes effect from the next set-point.
+  bool set_profile_position_config(const ProfilePositionConfig &config, uint32_t timeout_ms = 100);
+  // Stop the move in progress: raise the controlword's halt bit (the drive
+  // decelerates with the profile deceleration), wait for it to come to rest,
+  // then make the position reached the new set-point and release the halt bit,
+  // so the move does not resume. The drive stays enabled.
+  bool halt(uint32_t timeout_ms = 2000);
+  // The active software zero (encoder pulses), if one was set / loaded.
+  std::optional<int32_t> zero_offset_pulses() const;
+  // The position limits move_absolute() clamps to (infinite when unset).
+  float minimum_position_degrees() const;
+  float maximum_position_degrees() const;
+
 private:
   bool send_sdo_u8(uint16_t index, uint8_t value, uint8_t subindex = 0, uint32_t timeout_ms = 100);
-  bool send_sdo_u16(uint16_t index, uint16_t value, uint8_t subindex = 0, uint32_t timeout_ms = 100);
-  bool send_sdo_u32(uint16_t index, uint32_t value, uint8_t subindex = 0, uint32_t timeout_ms = 100);
+  bool send_sdo_u16(uint16_t index, uint16_t value, uint8_t subindex = 0,
+                    uint32_t timeout_ms = 100);
+  bool send_sdo_u32(uint16_t index, uint32_t value, uint8_t subindex = 0,
+                    uint32_t timeout_ms = 100);
   bool send_sdo_download(uint16_t index, uint8_t subindex, uint8_t command, uint32_t value,
-                        uint32_t timeout_ms = 100);
+                         uint32_t timeout_ms = 100);
   bool reset_communication_and_wait_for_bootup(uint32_t timeout_ms);
   bool ensure_operation_enabled(uint32_t timeout_ms);
   bool ensure_profile_position_mode(uint32_t timeout_ms);
@@ -99,6 +136,12 @@ private:
   bool wait_for_operation_enabled(uint32_t timeout_ms);
   bool request_sdo_u32(uint16_t index, uint8_t expected_response_command, uint32_t &value,
                        uint32_t timeout_ms);
+  // Expedited SDO upload of any size: `value` holds the raw little-endian bytes,
+  // `size` (1..4) what the drive sent (from the response command byte).
+  bool request_sdo_expedited(uint16_t index, uint8_t subindex, uint32_t &value, uint8_t &size,
+                             uint32_t timeout_ms);
+  // ... sign-extended to the size the drive sent (INT8 / INT16 / INT32 objects).
+  bool request_sdo_signed(uint16_t index, uint8_t subindex, int32_t &value, uint32_t timeout_ms);
   bool trigger_profile_position(bool relative, bool immediate);
   bool degrees_to_pulses(float degrees, int32_t &pulses) const;
   bool degrees_to_profile_units(float degrees, uint32_t &pulses) const;

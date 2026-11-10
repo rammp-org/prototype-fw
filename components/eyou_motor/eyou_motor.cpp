@@ -22,6 +22,13 @@ constexpr uint16_t kTargetPositionIndex = 0x607A;
 constexpr uint16_t kProfileVelocityIndex = 0x6081;
 constexpr uint16_t kProfileAccelerationIndex = 0x6083;
 constexpr uint16_t kProfileDecelerationIndex = 0x6084;
+constexpr uint16_t kVelocityActualIndex = 0x606C;
+constexpr uint16_t kMaxTorqueIndex = 0x6072;
+constexpr uint16_t kRatedCurrentIndex = 0x6075;
+constexpr uint16_t kRatedTorqueIndex = 0x6076;
+constexpr uint16_t kTorqueActualIndex = 0x6077;
+constexpr uint16_t kCurrentActualIndex = 0x6078;
+constexpr uint16_t kControlwordHalt = 0x0100;
 constexpr uint16_t kControlwordShutdown = 0x0006;
 constexpr uint16_t kControlwordSwitchOn = 0x0007;
 constexpr uint16_t kControlwordEnableOperation = 0x000F;
@@ -711,4 +718,249 @@ bool EyouMotor::send_raw(uint32_t can_id, std::span<const uint8_t> data, bool ex
   frame.dlc = static_cast<uint8_t>(data.size());
   std::copy(data.begin(), data.end(), frame.data.begin());
   return bus_.send(frame);
+}
+
+// --- live readings, the torque limit, zero-at, profile writes, halt ---------------
+
+bool EyouMotor::request_sdo_expedited(uint16_t index, uint8_t subindex, uint32_t &value,
+                                      uint8_t &size, uint32_t timeout_ms) {
+  if (receive_queue_ == nullptr) {
+    logger_.error("Cannot read SDO: CAN receive queue is not started");
+    return false;
+  }
+  EyouCanFrame response{};
+  while (xQueueReceive(receive_queue_, &response, 0) == pdTRUE) {
+  }
+  const std::array<uint8_t, 8> request{0x40,
+                                       static_cast<uint8_t>(index),
+                                       static_cast<uint8_t>(index >> 8),
+                                       subindex,
+                                       0x00,
+                                       0x00,
+                                       0x00,
+                                       0x00};
+  if (!send_raw(0x600 + node_id_, request)) {
+    return false;
+  }
+  const TickType_t timeout_ticks = pdMS_TO_TICKS(timeout_ms);
+  const TickType_t start_tick = xTaskGetTickCount();
+  while (xTaskGetTickCount() - start_tick < timeout_ticks) {
+    const TickType_t elapsed = xTaskGetTickCount() - start_tick;
+    if (xQueueReceive(receive_queue_, &response, timeout_ticks - elapsed) != pdTRUE) {
+      break;
+    }
+    if (response.id != 0x580 + node_id_ || response.dlc != 8 ||
+        response.data[1] != static_cast<uint8_t>(index) ||
+        response.data[2] != static_cast<uint8_t>(index >> 8) || response.data[3] != subindex) {
+      continue;
+    }
+    if (response.data[0] == 0x80) {
+      logger_.error("SDO read 0x{:04X}.{} aborted: 0x{:02X}{:02X}{:02X}{:02X}", index, subindex,
+                    response.data[7], response.data[6], response.data[5], response.data[4]);
+      return false;
+    }
+    // expedited upload response: 0x4F / 0x4B / 0x47 / 0x43 = 1 / 2 / 3 / 4 bytes
+    switch (response.data[0]) {
+    case 0x4F:
+      size = 1;
+      break;
+    case 0x4B:
+      size = 2;
+      break;
+    case 0x47:
+      size = 3;
+      break;
+    case 0x43:
+      size = 4;
+      break;
+    default:
+      logger_.error("SDO read 0x{:04X}.{} returned unsupported response 0x{:02X}", index, subindex,
+                    response.data[0]);
+      return false;
+    }
+    value = static_cast<uint32_t>(response.data[4]) | static_cast<uint32_t>(response.data[5]) << 8 |
+            static_cast<uint32_t>(response.data[6]) << 16 |
+            static_cast<uint32_t>(response.data[7]) << 24;
+    return true;
+  }
+  logger_.error("Timed out reading SDO 0x{:04X}.{}", index, subindex);
+  return false;
+}
+
+bool EyouMotor::request_sdo_signed(uint16_t index, uint8_t subindex, int32_t &value,
+                                   uint32_t timeout_ms) {
+  uint32_t raw = 0;
+  uint8_t size = 0;
+  if (!request_sdo_expedited(index, subindex, raw, size, timeout_ms)) {
+    return false;
+  }
+  switch (size) {
+  case 1:
+    value = static_cast<int8_t>(raw & 0xFF);
+    break;
+  case 2:
+    value = static_cast<int16_t>(raw & 0xFFFF);
+    break;
+  default:
+    value = static_cast<int32_t>(raw);
+    break;
+  }
+  return true;
+}
+
+bool EyouMotor::get_velocity(float &velocity_degrees_per_second, uint32_t timeout_ms) {
+  std::lock_guard<std::mutex> lock(transaction_mutex_);
+  int32_t pulses_per_second = 0;
+  if (!request_sdo_signed(kVelocityActualIndex, 0, pulses_per_second, timeout_ms)) {
+    return false;
+  }
+  velocity_degrees_per_second = pulses_to_degrees(pulses_per_second);
+  return true;
+}
+
+bool EyouMotor::get_torque(int16_t &torque_permille, uint32_t timeout_ms) {
+  std::lock_guard<std::mutex> lock(transaction_mutex_);
+  int32_t value = 0;
+  if (!request_sdo_signed(kTorqueActualIndex, 0, value, timeout_ms)) {
+    return false;
+  }
+  torque_permille = static_cast<int16_t>(std::clamp<int32_t>(value, INT16_MIN, INT16_MAX));
+  return true;
+}
+
+bool EyouMotor::get_current(int16_t &current_permille, uint32_t timeout_ms) {
+  std::lock_guard<std::mutex> lock(transaction_mutex_);
+  int32_t value = 0;
+  if (!request_sdo_signed(kCurrentActualIndex, 0, value, timeout_ms)) {
+    return false;
+  }
+  current_permille = static_cast<int16_t>(std::clamp<int32_t>(value, INT16_MIN, INT16_MAX));
+  return true;
+}
+
+bool EyouMotor::set_max_torque(uint16_t torque_permille, uint32_t timeout_ms) {
+  std::lock_guard<std::mutex> lock(transaction_mutex_);
+  if (!send_sdo_u16(kMaxTorqueIndex, torque_permille, 0, timeout_ms)) {
+    logger_.error("Failed to set the max torque to {} permille", torque_permille);
+    return false;
+  }
+  logger_.info("Max torque set to {} permille of rated", torque_permille);
+  return true;
+}
+
+bool EyouMotor::get_max_torque(uint16_t &torque_permille, uint32_t timeout_ms) {
+  std::lock_guard<std::mutex> lock(transaction_mutex_);
+  uint32_t raw = 0;
+  uint8_t size = 0;
+  if (!request_sdo_expedited(kMaxTorqueIndex, 0, raw, size, timeout_ms)) {
+    return false;
+  }
+  torque_permille = static_cast<uint16_t>(raw & 0xFFFF);
+  return true;
+}
+
+bool EyouMotor::get_rated_torque(uint32_t &rated_torque_mnm, uint32_t timeout_ms) {
+  std::lock_guard<std::mutex> lock(transaction_mutex_);
+  uint8_t size = 0;
+  return request_sdo_expedited(kRatedTorqueIndex, 0, rated_torque_mnm, size, timeout_ms);
+}
+
+bool EyouMotor::get_rated_current(uint32_t &rated_current_ma, uint32_t timeout_ms) {
+  std::lock_guard<std::mutex> lock(transaction_mutex_);
+  uint8_t size = 0;
+  return request_sdo_expedited(kRatedCurrentIndex, 0, rated_current_ma, size, timeout_ms);
+}
+
+bool EyouMotor::zero_at(float current_angle_degrees, uint32_t timeout_ms) {
+  std::lock_guard<std::mutex> lock(transaction_mutex_);
+  int32_t angle_pulses = 0;
+  if (!degrees_to_pulses(current_angle_degrees, angle_pulses)) {
+    return false;
+  }
+  uint32_t raw_position = 0;
+  if (!request_sdo_u32(kPositionActualIndex, 0x43, raw_position, timeout_ms)) {
+    logger_.error("Failed to read actual position while setting software zero");
+    return false;
+  }
+  // offset such that (raw - offset) == angle_pulses
+  const int64_t offset =
+      static_cast<int64_t>(static_cast<int32_t>(raw_position)) - static_cast<int64_t>(angle_pulses);
+  if (offset < std::numeric_limits<int32_t>::min() ||
+      offset > std::numeric_limits<int32_t>::max()) {
+    logger_.error("Zero at {} degrees puts the offset outside the 32-bit encoder range",
+                  current_angle_degrees);
+    return false;
+  }
+  zero_offset_pulses_ = static_cast<int32_t>(offset);
+  logger_.info("Software zero set: actual position {} pulses now reads {} degrees (offset {})",
+               static_cast<int32_t>(raw_position), current_angle_degrees, *zero_offset_pulses_);
+  return true;
+}
+
+bool EyouMotor::set_profile_position_config(const ProfilePositionConfig &config,
+                                            uint32_t timeout_ms) {
+  std::lock_guard<std::mutex> lock(transaction_mutex_);
+  uint32_t velocity = 0, acceleration = 0, deceleration = 0;
+  if (!degrees_to_profile_units(config.velocity_degrees_per_second, velocity) ||
+      !degrees_to_profile_units(config.acceleration_degrees_per_second_squared, acceleration) ||
+      !degrees_to_profile_units(config.deceleration_degrees_per_second_squared, deceleration)) {
+    return false;
+  }
+  if (!send_sdo_u32(kProfileVelocityIndex, velocity, 0, timeout_ms) ||
+      !send_sdo_u32(kProfileAccelerationIndex, acceleration, 0, timeout_ms) ||
+      !send_sdo_u32(kProfileDecelerationIndex, deceleration, 0, timeout_ms)) {
+    logger_.error("Failed to write the profile velocity / acceleration / deceleration");
+    return false;
+  }
+  logger_.info("Profile set: {} deg/s, {} / {} deg/s^2", config.velocity_degrees_per_second,
+               config.acceleration_degrees_per_second_squared,
+               config.deceleration_degrees_per_second_squared);
+  return true;
+}
+
+bool EyouMotor::halt(uint32_t timeout_ms) {
+  std::lock_guard<std::mutex> lock(transaction_mutex_);
+  // halt bit set, operation stays enabled: the drive decelerates
+  if (!send_sdo_u16(kControlwordIndex, kControlwordEnableOperation | kControlwordHalt)) {
+    return false;
+  }
+  // wait until it has come to rest (or give up waiting, the halt is in effect)
+  const TickType_t timeout_ticks = pdMS_TO_TICKS(timeout_ms);
+  const TickType_t start_tick = xTaskGetTickCount();
+  while (xTaskGetTickCount() - start_tick < timeout_ticks) {
+    int32_t pulses_per_second = 0;
+    if (request_sdo_signed(kVelocityActualIndex, 0, pulses_per_second, 100) &&
+        std::abs(pulses_to_degrees(pulses_per_second)) < 0.5f) {
+      break;
+    }
+    vTaskDelay(pdMS_TO_TICKS(20));
+  }
+  // the position reached becomes the set-point, so releasing the halt bit does
+  // not resume the interrupted move
+  uint32_t raw_position = 0;
+  const bool have_position = request_sdo_u32(kPositionActualIndex, 0x43, raw_position, 100);
+  if (have_position) {
+    send_sdo_u32(kTargetPositionIndex, raw_position);
+    // new set-point (absolute, immediate) with the halt bit still raised
+    send_sdo_u16(kControlwordIndex, kControlwordEnableOperation | kControlwordHalt |
+                                        kControlwordNewSetpoint | kControlwordImmediate);
+  }
+  const bool released = send_sdo_u16(kControlwordIndex, kControlwordEnableOperation);
+  logger_.info("Halted{}", have_position ? "" : " (position not re-targeted)");
+  return have_position && released;
+}
+
+std::optional<int32_t> EyouMotor::zero_offset_pulses() const {
+  std::lock_guard<std::mutex> lock(transaction_mutex_);
+  return zero_offset_pulses_;
+}
+
+float EyouMotor::minimum_position_degrees() const {
+  std::lock_guard<std::mutex> lock(transaction_mutex_);
+  return minimum_position_degrees_;
+}
+
+float EyouMotor::maximum_position_degrees() const {
+  std::lock_guard<std::mutex> lock(transaction_mutex_);
+  return maximum_position_degrees_;
 }
