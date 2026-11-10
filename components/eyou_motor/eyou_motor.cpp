@@ -38,7 +38,7 @@ constexpr uint16_t kControlwordImmediate = 0x0020;
 constexpr uint16_t kControlwordRelative = 0x0040;
 constexpr uint16_t kStoreParametersIndex = 0x1010;
 constexpr uint32_t kStoreParametersSignature = 0x65766173; // ASCII "save", little-endian
-constexpr uint16_t kNodeIdIndex = 0x26A0;                  // vendor: the drive's own node id (USINT)
+constexpr uint16_t kNodeIdIndex = 0x26A0; // vendor: the drive's own node id (USINT)
 } // namespace
 
 EyouMotor::EyouMotor(CanBus &bus, uint8_t node_id)
