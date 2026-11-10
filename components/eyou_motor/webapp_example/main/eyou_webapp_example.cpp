@@ -123,6 +123,10 @@ extern "C" void app_main(void) {
   espp::UsbDevice::VendorFunction vendor;
   vendor.interface_name = "Eyou Motor Console (WebUSB)";
   vendor.webusb = true;
+  // the WebUSB landing page the OS offers on plug-in: the hosted espp Device
+  // Hub (it lists this device's modules; the Eyou console itself is the local
+  // web/eyou_console.html, not hosted there)
+  vendor.landing_page_url = "esp-cpp.github.io/espp/apps/dispatcher_hub.html";
   usb_cfg.vendor = vendor;
   espp::UsbDevice::CdcFunction cdc;
   cdc.interface_name = "Eyou Motor Console (CDC)";
