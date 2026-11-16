@@ -168,6 +168,53 @@ void test_classic_round_trip(fivebar::CouplerSide side) {
 
 // With an offset end effector the ik still lands on the point and the fk
 // agrees (exercises the gamma rotation of the bar direction).
+// Assembly::Open means the whole loop stays a simple polygon, not only that
+// the cranks are apart: over the classic 5-bar's grid, every Open solution
+// passes loop_is_open(), and Open refuses points whose only candidates fold the
+// bar or the coupler back across a crank (which Any accepts) - the poses that
+// collided on the real linkage with the crank-only test.
+void test_open_rejects_folded_loops() {
+  fivebar::Geometry g{};
+  g.m2_x = 200.0f;
+  g.m2_y = 0.0f;
+  g.crank1 = g.crank2 = 150.0f;
+  g.bar = g.coupler = 250.0f;
+  g.coupler_side = fivebar::CouplerSide::Ccw;
+  const fivebar::Point m1 = {0.0f, 0.0f}, m2 = {g.m2_x, g.m2_y};
+  const float ref1 = -90.0f, ref2 = -90.0f;
+  int open_solved = 0, any_only = 0, any_folded = 0;
+  for (float x = -300.0f; x <= 500.0f; x += 25.0f) {
+    for (float y = -450.0f; y <= 250.0f; y += 25.0f) {
+      fivebar::Pose any{}, open{};
+      g.assembly = fivebar::Assembly::Any;
+      const bool any_ok = fivebar::solve_ik(x, y, g, ref1, ref2, any);
+      g.assembly = fivebar::Assembly::Open;
+      const bool open_ok = fivebar::solve_ik(x, y, g, ref1, ref2, open);
+      if (open_ok) {
+        ++open_solved;
+        char what[96];
+        std::snprintf(what, sizeof(what), "open ik (%.0f, %.0f) is a simple loop", x, y);
+        check(fivebar::loop_is_open(g, m1, m2, open.j1, open.j2, open.j3), what);
+        // and fk of it, under Open, agrees (fk applies the same test)
+        fivebar::Pose fk{};
+        std::snprintf(what, sizeof(what), "open fk (%.0f, %.0f) accepts the ik pose", x, y);
+        check(fivebar::solve_fk(open.theta1_deg, open.theta2_deg, g, fk), what);
+      }
+      if (any_ok && !open_ok) {
+        ++any_only;
+        if (!fivebar::loop_is_open(g, m1, m2, any.j1, any.j2, any.j3))
+          ++any_folded;
+      }
+    }
+  }
+  std::printf("open loop: %d points solved; %d points Any solves but Open refuses (%d of them with "
+              "a folded loop)\n",
+              open_solved, any_only, any_folded);
+  check(open_solved > 100, "open: a reasonable share of the grid is reachable");
+  check(any_only > 0 && any_folded == any_only,
+        "open refuses exactly the points whose Any pose folds the loop");
+}
+
 void test_offset_end_effector() {
   fivebar::Geometry g;
   g.m2_x = 150.0f;
@@ -213,6 +260,7 @@ void test_normalize() {
 int main() {
   test_normalize();
   test_stem_edge_poses();
+  test_open_rejects_folded_loops();
   test_classic_round_trip(fivebar::CouplerSide::Ccw);
   test_classic_round_trip(fivebar::CouplerSide::Cw);
   test_offset_end_effector();

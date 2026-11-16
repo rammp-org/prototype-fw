@@ -260,7 +260,7 @@
               <span class="k" title="M1 -> J2 and M2 -> J1">cranks 1 / 2</span><span class="pair"><input type="number" id="gCrank1" step="1" min="0.1"><input type="number" id="gCrank2" step="1" min="0.1"></span><span class="u">mm</span>
               <span class="k" title="bar: J2 -> J3 (the end effector rides on this link); coupler: J1 -> J3">bar / coupler</span><span class="pair"><input type="number" id="gBar" step="1" min="0.1"><input type="number" id="gCoupler" step="1" min="0.1"></span><span class="u">mm</span>
               <span class="k" title="The end effector M3 past J3 along the bar (0 = M3 is J3), and its perpendicular offset (90 deg CCW of J2 -> J3)">M3 extension / offset</span><span class="pair"><input type="number" id="gExt" step="1"><input type="number" id="gOff" step="1"></span><span class="u">mm</span>
-              <span class="k" title="Which crank assembly the machine is built in. Any: the candidate closest to the measured pose (continuity). Crossed: the cranks cross (STEM). Open: the crank segments never intersect.">assembly</span><select id="gAssembly"><option value="0">any (closest to the current pose)</option><option value="1">crossed cranks (STEM)</option><option value="2">open (cranks never cross)</option></select><span></span>
+              <span class="k" title="Which crank assembly the machine is built in. Any: the candidate closest to the measured pose (continuity). Crossed: the cranks cross (STEM). Open: the whole loop M1-J2-J3-J1-M2 stays a simple polygon - cranks apart, bar and coupler never folded back across a crank or the ground, the end-effector arm likewise; poses that fold are refused by both the preview and the device.">assembly</span><select id="gAssembly"><option value="0">any (closest to the current pose)</option><option value="1">crossed cranks (STEM)</option><option value="2">open (cranks never cross)</option></select><span></span>
               <span class="k" title="On which side of the J1 -> J2 line the joint J3 folds: a fixed property of the machine">J3 side of J1→J2</span><select id="gSide"><option value="0">counter-clockwise</option><option value="1">clockwise</option></select><span></span>
               <span class="k" title="The Home pose, and the ik's branch reference while no pose is measured">home θ1 / θ2</span><span class="pair"><input type="number" id="hTheta1" step="1"><input type="number" id="hTheta2" step="1"></span><button class="small" id="hUseCurrentBtn" title="Copy the measured crank angles">use current</button>
               <h3>Motor 1 (crank 1, M1)</h3>
@@ -972,9 +972,29 @@
       if (Math.abs(d4) < 1e-6 && on(a, b, d)) return true;
       return false;
     }
-    function assemblyOk(g, m1, m2, j1, j2) {
+    // Assembly "open" (port of fivebar::loop_is_open): the loop M1 -> J2 -> J3 -> J1 -> M2 is a simple
+    // polygon - no two non-adjacent links touch - and the end-effector arm past J3 crosses neither crank
+    // nor the ground. Testing the cranks alone let through poses where the bar or the coupler folded
+    // back across a crank, or the loop turned inside out, with the cranks still apart.
+    function loopIsOpen(g, m1, m2, j1, j2, j3) {
+      if (segmentsIntersect(m1, j2, m2, j1)) return false; // crank 1 - crank 2
+      if (segmentsIntersect(m1, j2, j3, j1)) return false; // crank 1 - coupler
+      if (segmentsIntersect(j2, j3, m2, j1)) return false; // bar - crank 2
+      if (segmentsIntersect(j2, j3, m2, m1)) return false; // bar - ground (between the motor mounts)
+      if (segmentsIntersect(j3, j1, m2, m1)) return false; // coupler - ground
+      if (g.ee_extension !== 0 || g.ee_offset !== 0) {
+        const bx = j3[0] - j2[0], by = j3[1] - j2[1], b = Math.hypot(bx, by);
+        if (b > 1e-9) {
+          const ux = bx / b, uy = by / b;
+          const m3 = [j2[0] + (g.bar + g.ee_extension) * ux - g.ee_offset * uy, j2[1] + (g.bar + g.ee_extension) * uy + g.ee_offset * ux];
+          if (segmentsIntersect(j3, m3, m1, j2) || segmentsIntersect(j3, m3, m2, j1) || segmentsIntersect(j3, m3, m2, m1)) return false;
+        }
+      }
+      return true;
+    }
+    function assemblyOk(g, m1, m2, j1, j2, j3) {
       if (g.assembly === 1) return cross(m1, j2, j1) > 0 && cross(m2, j1, j2) < 0;
-      if (g.assembly === 2) return !segmentsIntersect(m1, j2, m2, j1);
+      if (g.assembly === 2) return loopIsOpen(g, m1, m2, j1, j2, j3);
       return true;
     }
     function couplerSideOk(g, j1, j2, j3) { const c = cross(j1, j2, j3); return g.coupler_side === 0 ? c > 0 : c < 0; }
@@ -995,13 +1015,14 @@
       const m1 = [0, 0], m2 = [g.m2_x, g.m2_y];
       const j2 = [g.crank1*Math.cos(rad(t1)), g.crank1*Math.sin(rad(t1))];
       const j1 = [m2[0] + g.crank2*Math.cos(rad(t2)), m2[1] + g.crank2*Math.sin(rad(t2))];
-      if (!assemblyOk(g, m1, m2, j1, j2)) return null;
       const dx = j2[0]-j1[0], dy = j2[1]-j1[1], d = Math.hypot(dx, dy);
       if (d < 1e-9 || d > g.coupler + g.bar + 1e-3 || d < Math.abs(g.coupler - g.bar) - 1e-3) return null;
       const a = (d*d + g.coupler*g.coupler - g.bar*g.bar) / (2*d), h = Math.sqrt(Math.max(g.coupler*g.coupler - a*a, 0));
       const vx = dx/d, vy = dy/d, side = g.coupler_side === 0 ? 1 : -1;
       if (h < 1e-6) return null;
-      return complete(g, m1, m2, j1, j2, [j1[0] + a*vx - side*h*vy, j1[1] + a*vy + side*h*vx]);
+      const j3 = [j1[0] + a*vx - side*h*vy, j1[1] + a*vy + side*h*vx];
+      if (!assemblyOk(g, m1, m2, j1, j2, j3)) return null;
+      return complete(g, m1, m2, j1, j2, j3);
     }
     function solveIk(x, y, g, ref1, ref2) {
       if (!isValidGeometry(g) || !Number.isFinite(x) || !Number.isFinite(y)) return null;
@@ -1023,7 +1044,7 @@
         const h = Math.sqrt(Math.max(hsq, 0)), vx = dx/d, vy = dy/d;
         for (const s of [1, -1]) {
           const j1 = [m2[0] + a*vx - s*h*vy, m2[1] + a*vy + s*h*vx];
-          if (!assemblyOk(g, m1, m2, j1, j2) || !couplerSideOk(g, j1, j2, j3)) continue;
+          if (!assemblyOk(g, m1, m2, j1, j2, j3) || !couplerSideOk(g, j1, j2, j3)) continue;
           const c = complete(g, m1, m2, j1, j2, j3); if (!c) continue;
           const score = Math.abs(normDeg(c.theta1 - ref1)) + Math.abs(normDeg(c.theta2 - ref2));
           if (score < bestScore) { best = c; bestScore = score; }

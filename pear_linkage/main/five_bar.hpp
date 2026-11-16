@@ -42,7 +42,9 @@ using Point = std::array<float, 2>;
 enum class Assembly : uint8_t {
   Any = 0,     ///< whichever candidate is closest to the reference pose (continuity)
   Crossed = 1, ///< the cranks cross (STEM): J1 left of M1->J2 and J2 right of M2->J1
-  Open = 2,    ///< the crank segments M1-J2 and M2-J1 never intersect
+  Open = 2,    ///< the loop M1-J2-J3-J1-M2 is a simple polygon: no two non-adjacent links
+               ///< touch (cranks apart, bar and coupler not folded back across a crank
+               ///< or the ground, the end-effector arm likewise); see loop_is_open()
 };
 
 /// On which side of the J1->J2 line the bar/coupler joint J3 folds.
@@ -77,6 +79,14 @@ struct Pose {
 
 /// (-180, 180]
 float normalize_angle_deg(float angle_deg);
+
+/// The Assembly::Open test on the loop points: the pentagon M1 -> J2 -> J3 ->
+/// J1 -> M2 is a simple polygon (no two non-adjacent links intersect: crank 1
+/// vs crank 2 and vs the coupler, the bar vs crank 2 and vs the ground segment
+/// between the motor mounts, the coupler vs the ground), and the end-effector
+/// arm past J3 (when there is one) crosses neither crank nor the ground.
+bool loop_is_open(const Geometry &geometry, const Point &m1, const Point &m2, const Point &j1,
+                  const Point &j2, const Point &j3);
 
 /// Every length positive and the loop closable at all (crank1 + bar and
 /// crank2 + coupler can meet somewhere).

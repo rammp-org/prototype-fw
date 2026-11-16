@@ -94,9 +94,12 @@ measured counter-clockwise from +x (so a crank hanging straight down is at
 0 / 0). `main/five_bar.{hpp,cpp}` solves the forward kinematics (crank angles
 → pose) and the inverse (M3 → crank angles); among the assemblies that reach
 a point it returns the one closest to a reference — the measured pose, or the
-home angles while none is measured — optionally restricted to crossed or open
-cranks, and the fold of J3 (which side of J1→J2) is a fixed property set in
-the settings. The host test checks it against STEM's documented edge poses and
+home angles while none is measured — optionally restricted to the crossed
+assembly (STEM) or the **open** one, which means the whole loop M1→J2→J3→J1→M2
+stays a simple polygon: cranks apart, and neither the bar, the coupler nor the
+end-effector arm folded back across a crank or the ground segment between the
+motor mounts (the crank-only test let the links collide); the fold of J3
+(which side of J1→J2) is a fixed property set in the settings. The host test checks it against STEM's documented edge poses and
 round-trips a classic 5-bar over its workspace; the page's JavaScript is a
 line-by-line port.
 

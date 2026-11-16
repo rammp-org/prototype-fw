@@ -40,9 +40,46 @@ bool segments_intersect(const Point &a, const Point &b, const Point &c, const Po
   return false;
 }
 
-/// The configured crank assembly, for the loop points.
+} // namespace
+
+bool loop_is_open(const Geometry &g, const Point &m1, const Point &m2, const Point &j1,
+                  const Point &j2, const Point &j3) {
+  // The loop M1 -> J2 -> J3 -> J1 -> M2 -> M1 is a simple polygon: no two
+  // non-adjacent links touch. Testing the cranks alone let through poses where
+  // the bar or the coupler folded back across a crank, or the loop turned
+  // inside out, with the cranks still apart.
+  if (segments_intersect(m1, j2, m2, j1)) // crank 1 - crank 2
+    return false;
+  if (segments_intersect(m1, j2, j3, j1)) // crank 1 - coupler
+    return false;
+  if (segments_intersect(j2, j3, m2, j1)) // bar - crank 2
+    return false;
+  if (segments_intersect(j2, j3, m2, m1)) // bar - ground (between the motor mounts)
+    return false;
+  if (segments_intersect(j3, j1, m2, m1)) // coupler - ground
+    return false;
+  // The end effector's arm past J3 (bar extension / offset) is part of the
+  // bar: it must not reach back across a crank or the ground either.
+  if (g.ee_extension != 0.0f || g.ee_offset != 0.0f) {
+    const float bx = j3[0] - j2[0], by = j3[1] - j2[1];
+    const float b = std::hypot(bx, by);
+    if (b > 1e-9f) {
+      const float ux = bx / b, uy = by / b;
+      const Point m3 = {j2[0] + (g.bar + g.ee_extension) * ux - g.ee_offset * uy,
+                        j2[1] + (g.bar + g.ee_extension) * uy + g.ee_offset * ux};
+      if (segments_intersect(j3, m3, m1, j2) || segments_intersect(j3, m3, m2, j1) ||
+          segments_intersect(j3, m3, m2, m1))
+        return false;
+    }
+  }
+  return true;
+}
+
+namespace {
+
+/// The configured crank assembly, for the loop points (J3 closes the loop).
 bool assembly_ok(const Geometry &g, const Point &m1, const Point &m2, const Point &j1,
-                 const Point &j2) {
+                 const Point &j2, const Point &j3) {
   switch (g.assembly) {
   case Assembly::Crossed:
     // the STEM pin invariant (Geometry.md section 6): a sign condition, not a
@@ -50,7 +87,7 @@ bool assembly_ok(const Geometry &g, const Point &m1, const Point &m2, const Poin
     // motor axes at the travel extremes
     return cross2d(m1, j2, j1) > 0.0f && cross2d(m2, j1, j2) < 0.0f;
   case Assembly::Open:
-    return !segments_intersect(m1, j2, m2, j1);
+    return loop_is_open(g, m1, m2, j1, j2, j3);
   case Assembly::Any:
   default:
     return true;
@@ -115,8 +152,6 @@ bool solve_fk(float theta1_deg, float theta2_deg, const Geometry &g, Pose &pose)
   const float t1 = radians(theta1_deg), t2 = radians(theta2_deg);
   const Point j2 = {m1[0] + g.crank1 * std::cos(t1), m1[1] + g.crank1 * std::sin(t1)};
   const Point j1 = {m2[0] + g.crank2 * std::cos(t2), m2[1] + g.crank2 * std::sin(t2)};
-  if (!assembly_ok(g, m1, m2, j1, j2))
-    return false;
   // J3 closes the loop: |J3 - J1| = coupler and |J3 - J2| = bar
   const float dx = j2[0] - j1[0], dy = j2[1] - j1[1];
   const float d = std::hypot(dx, dy);
@@ -130,6 +165,8 @@ bool solve_fk(float theta1_deg, float theta2_deg, const Geometry &g, Pose &pose)
   const Point j3 = {j1[0] + a * vx - side * h * vy, j1[1] + a * vy + side * h * vx};
   if (h < 1e-6f)
     return false; // the dyad is folded flat onto J1-J2 (singular): no defined side
+  if (!assembly_ok(g, m1, m2, j1, j2, j3))
+    return false;
   return complete(g, m1, m2, j1, j2, j3, pose);
 }
 
@@ -186,7 +223,7 @@ bool solve_ik(float x, float y, const Geometry &g, float reference_theta1_deg,
     const float vx = dx / d, vy = dy / d;
     for (const float s : {1.0f, -1.0f}) {
       const Point j1 = {m2[0] + a * vx - s * h * vy, m2[1] + a * vy + s * h * vx};
-      if (!assembly_ok(g, m1, m2, j1, j2) || !coupler_side_ok(g, j1, j2, j3))
+      if (!assembly_ok(g, m1, m2, j1, j2, j3) || !coupler_side_ok(g, j1, j2, j3))
         continue;
       Pose candidate{};
       if (!complete(g, m1, m2, j1, j2, j3, candidate))
