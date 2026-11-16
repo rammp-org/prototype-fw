@@ -31,7 +31,8 @@ swaps the actuator layer for `EyouMotor`/`PairedEyouActuator`.
 - **Console CLI** (USB-Serial-JTAG / UART0): `move <x_rel> <y_rel>`, `home`,
   `stop`, `set <pair> <deg>`, `get`, `status`, `release`, `zero <pair|all>`,
   `zero_align <pair|all>`, `ik <x> <y>`, `ik_ref <x_rel> <y_rel>`,
-  `torque_limit <permille>`, `set_node_id <old> <new>`, `can`, `can_recover`.
+  `torque_limit <Nm>`, `torque_limit_permille <n>`, `reset_fault`,
+  `set_node_id <old> <new>`, `can`, `can_recover`.
 - **Safety, from the single-actuator test stand and the PEAR base**
   (`main/stem_controller.*`, `main/Kconfig.projbuild`):
   - every motor's **torque limit** (CANopen Max torque 0x6072, per-thousand
@@ -48,7 +49,11 @@ swaps the actuator layer for `EyouMotor`/`PairedEyouActuator`.
     acknowledged, stuck in the TWAI queue, is flushed first so the halt does
     not queue behind it;
   - the drives are put in profile-position mode **before** the DS402 enable
-    sequence (a fresh Eyou drive refuses the enable otherwise);
+    sequence (a fresh Eyou drive refuses the enable otherwise), and a drive in
+    **Fault** gets its fault reset on the way (a drive in Fault ignores
+    Shutdown, so the enable used to time out); `reset_fault` (CLI) and the
+    console's *Reset fault* button clear every faulted motor and re-enable its
+    pair - a fault that comes straight back has its cause still present;
   - the **CAN controller's** error state and counters (TWAI; wiring /
     bitrate diagnosis) are in the telemetry and the CLI `can`; bus-off
     recovers automatically (`can_recover` by hand). The CAN driver retries a

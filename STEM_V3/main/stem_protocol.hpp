@@ -42,7 +42,7 @@ namespace stream = espp::stream_frame;
 /// Dispatcher module id owned by the STEM protocol (the frame `module` byte).
 static constexpr uint8_t kModule = 7;
 
-/// Protocol version reported in the INFO reply. v2 (2026-11): SET_TORQUE_LIMIT,
+/// Protocol version reported in the INFO reply. v2 (2026-11): SET_TORQUE_LIMIT, RESET_FAULT,
 /// the torque limit + ceiling in INFO, torque / velocity per motor and a CAN
 /// controller block appended to STATE / TELEMETRY (a v1 host that stops reading
 /// after the motor records still decodes everything it knew).
@@ -76,7 +76,9 @@ enum class Msg : uint8_t {
   SetSeatTilt =
       0x1A, ///< f32 tilt deg (seat-pair offset on the IK level angle), f32 rpm -> Ok(0) | Error
   SetTorqueLimit = 0x1B, ///< u16 permille of rated torque, every motor (<= the INFO ceiling) ->
-                         ///< Ok(permille) | Error
+  ResetFault = 0x1C, ///< no payload: clear the DS402 fault of every faulted motor and re-enable its
+                     ///< pair -> Ok(0) | Error
+                     ///< Ok(permille) | Error
   // --- Generic replies (device -> host) --------------------------------------
   Ok = 0x81,    ///< u8 request type, u32 value
   Error = 0x82, ///< u8 request type, u32 code (std::errc), utf8 message

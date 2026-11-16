@@ -61,6 +61,8 @@ public:
   // Move by a relative position increment (degrees) from the current position.
   bool move_incremental(float increment_degrees, bool immediate = true);
   // Drive the DS402 state machine to Operation Enabled.
+  // Enable the drive (DS402 sequence to Operation Enabled, profile position
+  // mode prepared first). A drive in Fault gets its fault reset on the way.
   bool enable_drive(uint32_t timeout_ms = 1000);
   // Drive the DS402 state machine to Ready to Switch On (power stage off).
   bool disable_drive(uint32_t timeout_ms = 1000);
@@ -161,6 +163,7 @@ private:
   bool ensure_profile_position_mode(uint32_t timeout_ms);
   // Same check as is_faulted(), but assumes transaction_mutex_ is already held.
   bool is_faulted_unlocked(uint32_t timeout_ms);
+  bool reset_fault_unlocked(uint32_t timeout_ms);
   bool wait_for_ds402_state(uint16_t expected_state, uint32_t timeout_ms);
   bool wait_for_operation_enabled(uint32_t timeout_ms);
   bool request_sdo_u32(uint16_t index, uint8_t expected_response_command, uint32_t &value,

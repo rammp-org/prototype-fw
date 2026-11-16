@@ -342,6 +342,32 @@ bool StemController::release_brakes() {
   return right_ok && left_ok && seat_ok;
 }
 
+bool StemController::reset_fault() {
+  std::lock_guard<std::mutex> lock(mutex_);
+  bool ok = true;
+  size_t faulted = 0;
+  for (uint8_t i = 0; i < kPairCount; ++i) {
+    auto &pair = actuator(static_cast<Pair>(i));
+    if (!pair.is_faulted()) {
+      continue;
+    }
+    ++faulted;
+    // reset, then re-enable (a reset lands in Switch On Disabled, holding nothing)
+    const bool reset_ok = pair.reset_fault();
+    const bool enable_ok = reset_ok && pair.enable_drive();
+    logger_.warn("{} pair fault reset: {}{}", stem::to_string(static_cast<Pair>(i)),
+                 reset_ok ? "cleared" : "NOT cleared (its cause is still there?)",
+                 reset_ok ? (enable_ok ? ", drive enabled" : ", drive NOT re-enabled") : "");
+    ok = ok && reset_ok && enable_ok;
+  }
+  if (faulted == 0) {
+    logger_.info("fault reset: no pair reports a fault");
+  }
+  // a fault interrupted whatever move was in progress
+  target_valid_ = false;
+  return ok;
+}
+
 bool StemController::zero(std::optional<Pair> pair, bool align) {
   std::lock_guard<std::mutex> lock(mutex_);
   // EyouMotor::zero() always reads the absolute CANopen encoder, so there is no

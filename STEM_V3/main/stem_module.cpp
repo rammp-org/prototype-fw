@@ -302,6 +302,11 @@ void StemModule::handle_frame(const espp::stream_frame::Frame &frame, Transport 
     reply_result(controller.release_brakes() ? Result::Ok : Result::ActuatorFailed, "release");
     break;
 
+  case Msg::ResetFault:
+    reply_result(controller.reset_fault() ? Result::Ok : Result::ActuatorFailed,
+                 "fault reset (a fault that comes straight back has its cause still present)");
+    break;
+
   case Msg::Zero: {
     const auto index = proto::get_u8_at(payload, 0);
     const auto align = proto::get_u8_at(payload, 1);

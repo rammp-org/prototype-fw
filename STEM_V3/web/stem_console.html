@@ -147,6 +147,7 @@
           <button id="zeroAllBtn" disabled>Zero all (no align)</button>
           <button id="zeroAlignAllBtn" disabled>Zero-align all</button>
           <button id="releaseBtn" class="danger" disabled>Release brakes</button>
+          <button id="resetFaultBtn" disabled title="Clear the DS402 fault of every faulted motor and re-enable its pair (CLI reset_fault). Enabled while a motor reports Fault.">Reset fault</button>
         </div>
         <div class="row" style="margin-top:10px">
           <label class="inline">seat tilt ° <input id="tiltInput" type="number" step="1" value="0" style="width:80px" /></label>
@@ -161,7 +162,7 @@
         <p class="hint">Positions are read live from each Eyou motor's CANopen encoder (object 0x6064, relative to the saved zero); the pose above is the FK of the live pair positions. "moving" follows the DS402 target-reached bit.
           <b>Zero</b> marks the current position as 0 without moving (CLI <code>zero</code>); <b>Zero-align</b> first drives each motor to its encoder zero (the motors move), then zeros (CLI <code>zero_align</code>) — do this once per power-up after reaching the calibration pose.
           <b>Seat tilt</b> is an offset the firmware adds to the IK's level seat angle on every move, so it persists as the linkage moves (positive = positive seat-pair rotation).
-          <b>Torque limit</b> is every motor's Max torque (CANopen 0x6072), set here in Nm through the rated torque the firmware reads from the motors (the drive stores it as per-thousand of rated; the console falls back to ‰ until a motor has answered): no move pushes harder than this, which is how mechanical limits are found without breaking a linkage. The firmware refuses a value above the ceiling it was built with (menuconfig). <b>STOP</b> halts the drives with the profile deceleration and holds the linkage there (drives stay enabled); a pair that does not confirm the halt is disabled and coasts.</p>
+          <b>Torque limit</b> is every motor's Max torque (CANopen 0x6072), set here in Nm through the rated torque the firmware reads from the motors (the drive stores it as per-thousand of rated; the console falls back to ‰ until a motor has answered): no move pushes harder than this, which is how mechanical limits are found without breaking a linkage. The firmware refuses a value above the ceiling it was built with (menuconfig). <b>STOP</b> halts the drives with the profile deceleration and holds the linkage there (drives stay enabled); a pair that does not confirm the halt is disabled and coasts. <b>Reset fault</b> clears a motor's DS402 fault and re-enables its pair; a fault that comes straight back has its cause still present (overload, a hard stop, the limit): see the motor's error code below.</p>
       </div>
 
       <div class="panel">
@@ -214,7 +215,7 @@
     // ======================= STEM protocol (main/stem_protocol.hpp) =======================
     const MODULE = 7, PROTOCOL_VERSION = 2;
     const T = { GET_INFO: 0x10, GET_STATE: 0x11, MOVE_TO: 0x12, SET_PAIR: 0x13, HOME: 0x14, STOP: 0x15,
-                RELEASE: 0x16, ZERO: 0x17, SET_STREAMING: 0x18, SOLVE_IK: 0x19, SET_SEAT_TILT: 0x1A, SET_TORQUE_LIMIT: 0x1B,
+                RELEASE: 0x16, ZERO: 0x17, SET_STREAMING: 0x18, SOLVE_IK: 0x19, SET_SEAT_TILT: 0x1A, SET_TORQUE_LIMIT: 0x1B, RESET_FAULT: 0x1C,
                 OK: 0x81, ERROR: 0x82, INFO: 0x90, STATE: 0x91, MOVED: 0x92, IK_RESULT: 0x93, TELEMETRY: 0x94 };
     const REQ_NAME = {}; for (const [k, v] of Object.entries(T)) REQ_NAME[v] = k;
     const FLAG = { STREAMING: 1, TARGET_VALID: 2, POSE_VALID: 4, MOTORS_OK: 8, CAN_OK: 16, CAN_BUS_OFF: 32 };
@@ -226,7 +227,7 @@
     const els = {};
     for (const id of ["status","connectUsbBtn","connectSerialBtn","disconnectBtn","anyDevice","unsupported","canvas",
       "poseRel","posePlate","targetRel","targetStatus","thetas","motion","log","xInput","yInput","rpmInput","moveBtn",
-      "homeBtn","stopBtn","moveOnRelease","liveDrag","pairs","zeroAllBtn","zeroAlignAllBtn","releaseBtn","tiltInput","tiltBtn","tiltNow","motors","stream","periodInput",
+      "homeBtn","stopBtn","moveOnRelease","liveDrag","pairs","zeroAllBtn","zeroAlignAllBtn","releaseBtn","resetFaultBtn","tiltInput","tiltBtn","tiltNow","motors","stream","periodInput",
       "telemAge","devName","devFw","devBuild","devIdf","devModules","torqueInput","torqueBtn","torqueNow","torqueUnit","canState","canCounters"]) els[id] = document.getElementById(id);
 
     function logLine(cls, text) {
@@ -666,6 +667,9 @@
       const moving = s.motors.some(m => m.ok && (m.statusword & 0x0400) === 0 && (m.statusword & 0x0004) !== 0);
       els.motion.className = moving ? "good" : ""; els.motion.textContent = (moving ? "moving" : "idle") + (s.flags & FLAG.CAN_OK ? "" : " · CAN DOWN") + (s.flags & FLAG.CAN_BUS_OFF ? " · CAN BUS OFF" : "") + (s.flags & FLAG.MOTORS_OK ? "" : " · motor status missing");
       renderPairs(); renderMotors(s.motors); renderCan(s);
+      // DS402 statusword bit 3 = Fault: offer the reset while any motor reports one
+      const anyFault = s.motors.some(m => m.ok && (m.statusword & 0x0008) !== 0);
+      els.resetFaultBtn.disabled = !transport || !anyFault; els.resetFaultBtn.className = anyFault ? "danger" : "";
       if (!isTelemetry) logLine("sys", "state: pairs " + s.pairs.map(v => v.toFixed(2)).join(" / ") + "° · uptime " + (s.uptime / 1000).toFixed(0) + " s");
     }
     function renderPairs() {
@@ -787,6 +791,7 @@
       els.connectSerialBtn.disabled = on || !navigator.serial;
       els.disconnectBtn.disabled = !on;
       for (const b of [els.homeBtn, els.stopBtn, els.zeroAllBtn, els.zeroAlignAllBtn, els.releaseBtn, els.tiltBtn]) b.disabled = !on;
+      if (!on) { els.resetFaultBtn.disabled = true; els.resetFaultBtn.className = ""; }
       els.moveBtn.disabled = !on || !targetOk;
       if (!on) { torqueLimit = null; torqueCeiling = null; ratedTorqueMnm = 0; els.torqueInput.value = ""; els.canState.textContent = "–"; els.canCounters.textContent = "–"; els.canState.className = ""; els.canCounters.className = ""; }
       renderTorque();
@@ -815,6 +820,7 @@
     });
     els.torqueInput.addEventListener("keydown", (ev) => { if (ev.key === "Enter") els.torqueBtn.click(); });
     els.releaseBtn.addEventListener("click", () => { if (window.confirm("Release all motor brakes? The seat will be free to move.")) send(T.RELEASE); });
+    els.resetFaultBtn.addEventListener("click", () => { logLine("tx", "reset fault on every faulted motor, then re-enable"); send(T.RESET_FAULT); });
     if (!navigator.usb) els.connectUsbBtn.disabled = true;
     if (!navigator.serial) els.connectSerialBtn.disabled = true;
     if (!navigator.usb && !navigator.serial) els.unsupported.style.display = "block";

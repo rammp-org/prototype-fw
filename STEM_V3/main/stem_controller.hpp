@@ -163,6 +163,11 @@ public:
   /// own weight (found on the single-actuator stand - the drive has a halt).
   bool stop();
   bool release_brakes();
+  /// Clear the DS402 Fault on every motor that reports one (controlword fault
+  /// reset) and bring its pair back to Operation Enabled. A fault that comes
+  /// straight back (its cause still present - an overload, a limit) leaves the
+  /// motor faulted and returns false. Also run by release_brakes()' enable.
+  bool reset_fault();
   /// Write the torque limit (0x6072, per-thousand of rated) to every motor.
   /// Refused above Config::max_torque_permille (Result::OutOfLimits); a motor
   /// that did not confirm makes it ActuatorFailed (the others keep the new

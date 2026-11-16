@@ -393,6 +393,16 @@ std::unique_ptr<cli::Menu> make_cli_menu(stem::StemController &controller,
       },
       "Release brakes for all actuator pairs: release");
   menu->Insert(
+      "reset_fault",
+      [&controller](std::ostream &out) {
+        out << (controller.reset_fault()
+                    ? "Faults cleared, drives enabled (see `status`).\n"
+                    : "A fault did not clear or a drive did not re-enable: its cause is still "
+                      "there (overload, a hard stop, the limit) - see `status` for the error "
+                      "code, fix the cause, try again.\n");
+      },
+      "Clear the DS402 fault of every faulted motor and re-enable its pair: reset_fault");
+  menu->Insert(
       "zero",
       [&controller](std::ostream &out, const std::string &pair_name) {
         const auto pair = stem::pair_from_name(pair_name);
@@ -1065,7 +1075,7 @@ extern "C" void app_main(void) {
     input.Start();
   }).detach();
   logger.info("CLI ready: set <pair> <deg>, move <x> <y>, home, tilt <deg>, stop, get, status, "
-              "release, zero <pair|all>, zero_align <pair|all>, save_zero, read_zero, "
+              "release, reset_fault, zero <pair|all>, zero_align <pair|all>, save_zero, read_zero, "
               "load_zero, check_zero, ik <x> <y>, ik_ref <x> <y>, set_base <deg>, "
               "set_seat_swivel <deg>, get_base, get_seat_swivel, torque_limit <Nm>, "
               "torque_limit_permille <n>, "

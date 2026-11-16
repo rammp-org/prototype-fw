@@ -215,7 +215,18 @@ bool EyouMotor::ensure_operation_enabled(uint32_t timeout_ms) {
            wait_for_operation_enabled(timeout_ms);
   }
 
-  logger_.warn("Drive state 0x{:04X}; applying DS402 enable sequence", state);
+  if ((state & 0x0008) != 0) {
+    // Fault (or Fault reaction active): a drive in Fault ignores Shutdown, so
+    // the generic sequence below would only time out. Reset the fault first
+    // (controlword 0x80), which lands in Switch On Disabled, then enable.
+    logger_.warn("Drive is in Fault (statusword 0x{:04X}); resetting the fault before enabling",
+                 static_cast<uint16_t>(raw_statusword));
+    if (!reset_fault_unlocked(timeout_ms)) {
+      return false;
+    }
+  } else {
+    logger_.warn("Drive state 0x{:04X}; applying DS402 enable sequence", state);
+  }
   return send_sdo_u16(kControlwordIndex, kControlwordShutdown) &&
          wait_for_ds402_state(0x0021, timeout_ms) &&
          send_sdo_u16(kControlwordIndex, kControlwordSwitchOn) &&
@@ -315,6 +326,10 @@ bool EyouMotor::disable_drive(uint32_t timeout_ms) {
 
 bool EyouMotor::reset_fault(uint32_t timeout_ms) {
   std::lock_guard<std::mutex> lock(transaction_mutex_);
+  return reset_fault_unlocked(timeout_ms);
+}
+
+bool EyouMotor::reset_fault_unlocked(uint32_t timeout_ms) {
   if (!send_sdo_u16(kControlwordIndex, 0x0000) ||
       !send_sdo_u16(kControlwordIndex, kControlwordFaultReset)) {
     return false;
