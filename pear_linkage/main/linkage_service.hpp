@@ -269,6 +269,36 @@ protected:
       send(Reply::IkResult, result.serialize());
       return;
     }
+    case Request::RecoverCan:
+      finish_bool(controller_.recover_can(), "CAN bus-off recovery");
+      return;
+    case Request::SetDriveNodeId: {
+      if (payload.size() < 2)
+        return malformed("needs [motor u8][new node id u8]");
+      const uint8_t motor = payload[0], new_id = payload[1];
+      if (motor >= proto::kMotorCount)
+        return malformed("motor must be 0 or 1");
+      if (new_id < 1 || new_id > 127)
+        return malformed("node id must be 1..127");
+      switch (controller_.set_drive_node_id(motor, new_id)) {
+      case EyouMotor::NodeIdResult::Applied:
+        // the settings' node id followed the drive: persist them like SET_SETTINGS
+        if (config_.on_settings_changed)
+          config_.on_settings_changed(controller_.settings());
+        send_ok(type);
+        return;
+      case EyouMotor::NodeIdResult::SavedNeedsPowerCycle:
+        send_error(type, std::errc::operation_in_progress,
+                   "saved in the drive: it keeps its old node id until power-cycled; set the "
+                   "settings' node id to the new one after that");
+        return;
+      case EyouMotor::NodeIdResult::Failed:
+        send_error(type, std::errc::io_error,
+                   "re-addressing failed, nothing changed (see the device log)");
+        return;
+      }
+      return;
+    }
     default:
       send_error(type, std::errc::not_supported, "unknown linkage message");
       return;

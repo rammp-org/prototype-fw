@@ -13,6 +13,7 @@
 #include <string>
 
 #include "base_component.hpp"
+#include "can_bus.hpp"
 #include "eyou_motor.hpp"
 #include "five_bar.hpp"
 #include "linkage_protocol.hpp"
@@ -28,6 +29,10 @@ public:
   struct Config {
     std::array<EyouMotor *, kMotorCount> motors; ///< crank 1 (M1), crank 2 (M2)
     uint16_t max_torque_permille{500};           ///< ceiling for the settings' torque limits
+    /// The CAN bus the motors are on (optional): its error state and counters
+    /// go into Status::can, a halt / disable flushes a set-point stuck in its
+    /// TX queue first (CanBus::flush_pending), recover_can() restarts it.
+    CanBus *can_bus{nullptr};
     bool can_ok{true};
     espp::Logger::Verbosity log_level{espp::Logger::Verbosity::INFO};
   };
@@ -73,6 +78,14 @@ public:
   bool disable(uint8_t motor);
   bool reset_fault(uint8_t motor);
   bool halt(uint8_t motor);
+  /// Start the CAN bus-off recovery (false without a bus or if not started).
+  bool recover_can();
+  /// Re-address the DRIVE on crank `motor` (0 / 1) to `new_id`
+  /// (EyouMotor::set_drive_node_id: both Node-ID objects, saved, communication
+  /// reset). Applied: the settings' node id follows it (persist them through
+  /// settings()); SavedNeedsPowerCycle: the drive keeps its old id until
+  /// power-cycled, the settings are unchanged; Failed: nothing changed.
+  EyouMotor::NodeIdResult set_drive_node_id(uint8_t motor, uint8_t new_id);
 
   /// Set a motor's software zero: mode 0 = reads 0 here, 1 = reads `value`
   /// (motor deg) here, 2 = the crank is at `value` deg (linkage frame) here.
@@ -90,6 +103,7 @@ private:
   Result command_unlocked(const std::array<float, kMotorCount> &motor_deg, const char *what);
   /// torque limit, profile, limits and saved zero of one motor (mutex_ held).
   bool commission_unlocked(uint8_t i);
+  void flush_pending_unlocked();
   template <typename Fn> bool for_each_motor(uint8_t motor, const char *what, Fn &&fn);
 
   Config config_;

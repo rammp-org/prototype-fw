@@ -142,6 +142,7 @@
 
       <div class="panel">
         <h2>Actuator pairs <span class="muted" style="text-transform:none;letter-spacing:0">— measured position, deg</span></h2>
+        <p class="hint" style="margin-top:0">Per pair: the measured angle, then <b>Set &lt;pair&gt;</b> drives that pair alone to the typed angle (no IK, same as the CLI <code>set &lt;pair&gt; &lt;deg&gt;</code>) — the way to bring the linkage into the calibration pose before <b>Zero</b>; <b>Zero</b> marks the current position as 0 without moving; <b>Zero-align</b> moves to the encoder zero first.</p>
         <div class="pairs" id="pairs"></div>
         <div class="row" style="margin-top:10px">
           <button id="zeroAllBtn" disabled>Zero all (no align)</button>
@@ -678,9 +679,12 @@
         const meta = motorsMeta[i];
         const n = document.createElement("div"); n.className = "name"; n.textContent = name + (meta ? " (" + meta.primary + "/" + meta.secondary + ")" : ""); els.pairs.appendChild(n);
         const v = document.createElement("div"); v.textContent = currentPairs ? currentPairs[i].toFixed(2) + "°" : "–"; els.pairs.appendChild(v);
-        const inp = document.createElement("input"); inp.type = "number"; inp.step = "1"; inp.value = "0"; inp.style.width = "80px"; inp.min = limits.min; inp.max = limits.max; els.pairs.appendChild(inp);
-        const setBtn = document.createElement("button"); setBtn.textContent = "Set"; setBtn.disabled = !transport;
+        const inp = document.createElement("input"); inp.type = "number"; inp.step = "1"; inp.value = "0"; inp.placeholder = "deg"; inp.style.width = "80px"; inp.min = limits.min; inp.max = limits.max;
+        inp.title = "Pair position in degrees for Set (CLI: set " + name + " <deg>)"; els.pairs.appendChild(inp);
+        const setBtn = document.createElement("button"); setBtn.textContent = "Set " + name; setBtn.disabled = !transport;
+        setBtn.title = "Drive this pair alone to the angle on the left, no IK (CLI: set " + name + " <deg>) - e.g. to bring the linkage to the calibration pose before Zero";
         setBtn.addEventListener("click", () => send(T.SET_PAIR, enc.setPair(i, Number(inp.value) || 0, 0))); els.pairs.appendChild(setBtn);
+        inp.addEventListener("keydown", (ev) => { if (ev.key === "Enter") setBtn.click(); });
         const zeroBtn = document.createElement("button"); zeroBtn.textContent = "Zero"; zeroBtn.disabled = !transport;
         zeroBtn.addEventListener("click", () => send(T.ZERO, enc.zero(i, false))); els.pairs.appendChild(zeroBtn);
         const alignBtn = document.createElement("button"); alignBtn.textContent = "Zero-align"; alignBtn.disabled = !transport;

@@ -131,6 +131,16 @@ request is answered with OK `[request u8]` or ERROR `[request u8][code u32]
 | 0x1F | ZeroMotor | `[motor u8][mode u8][value f32]` mode 0: reads 0 here; 1: reads `value` here; 2: the crank is at `value`° here |
 | 0x20 / 0x21 | SaveZero / LoadZero | `[motor u8]` |
 | 0x22 | SolveIk | `[x f32][y f32]` → IK_RESULT (no motion) |
+| 0x23 | RecoverCan | start the CAN bus-off recovery (it is automatic too) |
+| 0x24 | SetDriveNodeId | `[motor u8][new_id u8]` re-address the drive on that crank (both Node-ID objects, saved, communication reset, ~5 s); on success the settings' node id follows it and is saved; "saved, needs a power cycle" and failure come back as ERROR text |
+
+Protocol v2 (2026-11): STATUS ends with the CAN controller block
+`[state u8][TEC u16][REC u16][bus errors u32][bus-off count u32][stuff+form+bit u32][ack u32]`
+(state 1 error active, 2 warning, 3 passive, 4 bus off) and each motor's record
+carries the drive's rated torque (0.01 Nm) in its last word, so the console sets
+and shows torque in Nm. The halt / disable requests flush a set-point stuck in the
+CAN TX queue first; enabling a drive in DS402 Fault resets the fault on the way
+(before, the enable timed out and only a power cycle recovered the drive).
 
 SETTINGS (95 B): `[version u8 = 1]` geometry `[m2_x][m2_y][crank1][crank2]
 [bar][coupler][ee_extension][ee_offset]` (f32) `[assembly u8][coupler_side u8]`

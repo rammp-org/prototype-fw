@@ -9,6 +9,7 @@
 #include <cstdio>
 #include <cstdlib>
 #include <limits>
+#include <span>
 #include <string>
 
 #include "linkage_protocol.hpp"
@@ -190,14 +191,39 @@ void test_status_round_trip() {
                  .velocity_dps = 0.0f,
                  .torque_permille = 0,
                  .current_permille = 0,
-                 .torque_limit_permille = 300};
+                 .torque_limit_permille = 300,
+                 .rated_torque_cnm = 1250};
+  s.can = {.state = proto::CanStatus::kErrorWarning,
+           .tx_error_count = 97,
+           .rx_error_count = 3,
+           .bus_error_count = 1000,
+           .bus_off_count = 2,
+           .signal_errors = 7,
+           .ack_errors = 123456};
   const auto bytes = s.serialize();
   check(bytes.size() == proto::Status::kSize, "status size matches kSize");
+  check(proto::Status::kSize == proto::Status::kSizeV1 + proto::CanStatus::kSize &&
+            proto::Status::kSizeV1 == 87,
+        "v2 status is the v1 layout (87 B) plus the CAN block");
+  // a v1 device sends 87 bytes: still parses, the CAN block stays zero
+  {
+    const auto v1 =
+        proto::Status::parse(std::span<const uint8_t>(bytes).first(proto::Status::kSizeV1));
+    check(v1.has_value() && v1->can.state == proto::CanStatus::kNotStarted &&
+              v1->can.ack_errors == 0 && v1->motors[1].rated_torque_cnm == 1250,
+          "a v1-length status parses with an empty CAN block");
+  }
   const auto back = proto::Status::parse(bytes);
   check(back.has_value(), "status parse");
   if (!back)
     return;
   const auto &b = *back;
+  check(b.can.state == proto::CanStatus::kErrorWarning && b.can.tx_error_count == 97 &&
+            b.can.rx_error_count == 3 && b.can.bus_error_count == 1000 &&
+            b.can.bus_off_count == 2 && b.can.signal_errors == 7 && b.can.ack_errors == 123456,
+        "CAN block round-trips");
+  check(b.motors[1].rated_torque_cnm == 1250 && b.motors[0].rated_torque_cnm == 0,
+        "rated torque round-trips (0 = not read yet)");
   check(b.stream_enabled && b.can_ok && b.pose_valid && !b.target_valid && b.comm_ok &&
             !b.enabled && b.faulted && b.moving,
         "status flags");

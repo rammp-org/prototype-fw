@@ -72,6 +72,9 @@ other).
     move). `Apply tilt` re-commands the seat immediately; the device's current
     value is shown next to it and the drag preview's limit check includes it.
     Same as the CLI's `tilt <deg>`.
+- **Set a pair**: per pair, type an angle and *Set left / right / seat* drives
+  that pair alone, no IK (the CLI's `set <pair> <deg>`) - the way to bring the
+  linkage into the calibration pose before *Zero*.
 - **Torque limit**: every motor's Max torque (0x6072, per-thousand of the
   rated torque); the device reports the limit in force and the ceiling its
   firmware allows, and refuses more.

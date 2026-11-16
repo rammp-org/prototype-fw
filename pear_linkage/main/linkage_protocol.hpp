@@ -36,7 +36,11 @@ namespace linkage_protocol {
 
 static constexpr uint8_t kModuleId = 0x21;
 static constexpr const char *kProtocol = "pear.linkage";
-static constexpr uint16_t kProtocolVersion = 1;
+// v2 (2026-11): STATUS carries the CAN controller's error state and counters
+// after the motors (a v1 host that stops at 87 bytes still decodes everything
+// it knew), rated_torque_cnm in the per-motor word that was reserved,
+// RECOVER_CAN and SET_DRIVE_NODE_ID.
+static constexpr uint16_t kProtocolVersion = 2;
 static constexpr uint8_t kMotorCount = 2; ///< crank 1 (M1) and crank 2 (M2)
 static constexpr uint8_t kAllMotors = 0xFF;
 
@@ -62,6 +66,11 @@ enum class Request : uint8_t {
   SaveZero = 0x20,      ///< [motor u8 | 0xFF]: persist the software zero(s) on the device
   LoadZero = 0x21,      ///< [motor u8 | 0xFF]
   SolveIk = 0x22,       ///< [x f32][y f32] -> IkResult (no motion)
+  RecoverCan = 0x23,    ///< start the CAN bus-off recovery (automatic too; this is the by-hand way)
+  SetDriveNodeId =
+      0x24, ///< [motor u8][new_id u8]: re-address the DRIVE on that crank (both Node-ID
+            ///< objects, saved, communication reset); on success the settings' node id
+            ///< follows it and is persisted. Ok, or Error with the outcome in the text.
 };
 
 /// Device -> host replies / events (0x9X => reply flag set).
@@ -433,10 +442,30 @@ struct MotorStatus {
   uint16_t rated_torque_cnm{0}; ///< 0x6076 in 0.01 Nm (saturates at 655.35 Nm); 0 = unknown
 };
 
-/// STATUS (87 B):
+/// The CAN controller (CanBus::get_status) inside STATUS, 21 B, v2:
+///   [state u8][tec u16][rec u16][bus_errors u32][bus_off_count u32]
+///   [signal_errors u32 (stuff+form+bit)][ack_errors u32]
+/// state: 0 not started, 1 error active, 2 error warning, 3 error passive,
+/// 4 bus off, 255 unknown. Stuff/form/bit errors are signal integrity
+/// (termination, isolated ground, a node at another bitrate); ACK errors mean
+/// nobody heard a frame we sent.
+struct CanStatus {
+  static constexpr size_t kSize = 21;
+  static constexpr uint8_t kNotStarted = 0, kErrorActive = 1, kErrorWarning = 2, kErrorPassive = 3,
+                           kBusOff = 4, kUnknown = 255;
+  uint8_t state{kNotStarted};
+  uint16_t tx_error_count{0};
+  uint16_t rx_error_count{0};
+  uint32_t bus_error_count{0};
+  uint32_t bus_off_count{0};
+  uint32_t signal_errors{0};
+  uint32_t ack_errors{0};
+};
+
+/// STATUS (87 B, v2: 108 B):
 ///   [flags u8][sequence u32][timestamp_ms u32][stream_period_ms u16]
 ///   [x f32][y f32][theta1 f32][theta2 f32][bar_angle f32][target_x f32][target_y f32]
-///   then kMotorCount x MotorStatus.
+///   then kMotorCount x MotorStatus, then (v2) CanStatus.
 /// x / y / thetas are NaN while the pose is not valid (a motor missing or no
 /// fk solution); target_* are NaN until a move was accepted.
 struct Status {
@@ -448,7 +477,8 @@ struct Status {
   static constexpr uint8_t kFlagEnabled = 0x20; ///< every present motor Operation enabled
   static constexpr uint8_t kFlagFaulted = 0x40; ///< any motor faulted (or not answering)
   static constexpr uint8_t kFlagMoving = 0x80;  ///< some enabled motor has not reached its target
-  static constexpr size_t kSize = 11 + 28 + kMotorCount * MotorStatus::kSize;
+  static constexpr size_t kSizeV1 = 11 + 28 + kMotorCount * MotorStatus::kSize;
+  static constexpr size_t kSize = kSizeV1 + CanStatus::kSize;
 
   bool stream_enabled{false};
   bool can_ok{false};
@@ -469,6 +499,7 @@ struct Status {
   float target_x{0.0f};
   float target_y{0.0f};
   std::array<MotorStatus, kMotorCount> motors{};
+  CanStatus can{}; ///< v2
 
   std::vector<uint8_t> serialize() const {
     std::vector<uint8_t> out;
@@ -527,11 +558,18 @@ struct Status {
       put_u16(out, m.torque_limit_permille);
       put_u16(out, m.rated_torque_cnm);
     }
+    out.push_back(can.state);
+    put_u16(out, can.tx_error_count);
+    put_u16(out, can.rx_error_count);
+    put_u32(out, can.bus_error_count);
+    put_u32(out, can.bus_off_count);
+    put_u32(out, can.signal_errors);
+    put_u32(out, can.ack_errors);
     return out;
   }
 
   static std::optional<Status> parse(std::span<const uint8_t> p) {
-    if (p.size() < kSize)
+    if (p.size() < kSizeV1)
       return std::nullopt;
     Status s;
     const uint8_t flags = p[0];
@@ -572,6 +610,15 @@ struct Status {
       m.torque_limit_permille = get_u16(p, i + 20);
       m.rated_torque_cnm = get_u16(p, i + 22);
       i += MotorStatus::kSize;
+    }
+    if (p.size() >= i + CanStatus::kSize) { // v2
+      s.can.state = p[i];
+      s.can.tx_error_count = get_u16(p, i + 1);
+      s.can.rx_error_count = get_u16(p, i + 3);
+      s.can.bus_error_count = get_u32(p, i + 5);
+      s.can.bus_off_count = get_u32(p, i + 9);
+      s.can.signal_errors = get_u32(p, i + 13);
+      s.can.ack_errors = get_u32(p, i + 17);
     }
     return s;
   }

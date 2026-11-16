@@ -177,7 +177,8 @@
       <p id="devInfo" class="muted" style="margin: 10px 0 0;">Not connected. Default WebUSB filter: VID 0x1209 (espp default).</p>
       <div class="statusline" style="margin-top:8px;">
         <span>Linkage: <span id="linkState" class="state-badge">-</span></span>
-        <span>CAN: <b id="devCan">-</b></span>
+        <span title="The CAN controller's TWAI error state and counters (bitrate / wiring check): stuff/form/bit errors are signal integrity - 120 ohm termination at both ends only, every node's isolated CAN ground tied to the bus ground, short stubs, a node at another bitrate; ACK errors mean nobody heard a frame we sent (bus open / nodes off); no errors and a silent motor = off, at another id or not on this bus">CAN: <b id="devCan">-</b> <span id="devCanErrors" class="muted"></span></span>
+        <button id="canRecoverBtn" class="small danger" disabled title="Start the CAN bus-off recovery (it also happens automatically)" style="display:none">Recover CAN</button>
         <span>Firmware: <b id="devFw">-</b></span>
         <span>Torque ceiling: <b id="devMaxTorque">-</b></span>
         <span>Received: <b id="rxRate">-</b></span>
@@ -262,13 +263,13 @@
               <span class="k" title="On which side of the J1 -> J2 line the joint J3 folds: a fixed property of the machine">J3 side of J1→J2</span><select id="gSide"><option value="0">counter-clockwise</option><option value="1">clockwise</option></select><span></span>
               <span class="k" title="The Home pose, and the ik's branch reference while no pose is measured">home θ1 / θ2</span><span class="pair"><input type="number" id="hTheta1" step="1"><input type="number" id="hTheta2" step="1"></span><button class="small" id="hUseCurrentBtn" title="Copy the measured crank angles">use current</button>
               <h3>Motor 1 (crank 1, M1)</h3>
-              <span class="k" title="CANopen node id; 0 = no motor on this crank">node id</span><input type="number" id="mNode1" min="0" max="127" step="1"><span></span>
+              <span class="k" title="CANopen node id; 0 = no motor on this crank">node id</span><input type="number" id="mNode1" min="0" max="127" step="1"><button class="small" id="mProgram1" disabled title="Re-address the DRIVE currently on this crank to the node id typed here (writes both of its Node-ID objects, saves, resets its communication, ~5 s); the settings follow it on success">Program drive</button>
               <span class="k" title="+1: a positive motor angle turns the crank counter-clockwise; -1: clockwise">direction</span><select id="mDir1"><option value="1">+1 (motor + = crank CCW)</option><option value="-1">-1 (motor + = crank CW)</option></select><span></span>
               <span class="k" title="Motor angle limits (motor degrees from its zero); moves outside are refused">limits min / max</span><span class="pair"><input type="number" id="mMin1" step="1"><input type="number" id="mMax1" step="1"></span><span class="u">deg</span>
               <span class="k" title="The crank's angle in the linkage frame when the motor reads 0">crank angle at zero</span><input type="number" id="mZeroTheta1" step="1"><span class="u">deg</span>
               <span class="k" title="Max torque (object 0x6072): set in Nm once the drive has reported its rated torque (stored and sent as per-thousand of rated); the device's ceiling caps it">torque limit</span><input type="number" id="mTorque1" min="0" max="3000" step="10"><span class="u" id="mTorqueUnit1">‰</span>
               <h3>Motor 2 (crank 2, M2)</h3>
-              <span class="k">node id</span><input type="number" id="mNode2" min="0" max="127" step="1"><span></span>
+              <span class="k">node id</span><input type="number" id="mNode2" min="0" max="127" step="1"><button class="small" id="mProgram2" disabled title="Re-address the DRIVE currently on this crank to the node id typed here (writes both of its Node-ID objects, saves, resets its communication, ~5 s); the settings follow it on success">Program drive</button>
               <span class="k">direction</span><select id="mDir2"><option value="1">+1 (motor + = crank CCW)</option><option value="-1">-1 (motor + = crank CW)</option></select><span></span>
               <span class="k">limits min / max</span><span class="pair"><input type="number" id="mMin2" step="1"><input type="number" id="mMax2" step="1"></span><span class="u">deg</span>
               <span class="k">crank angle at zero</span><input type="number" id="mZeroTheta2" step="1"><span class="u">deg</span>
@@ -331,7 +332,9 @@
     const T_GET_INFO = 0x10, T_GET_STATUS = 0x11, T_SET_STREAM = 0x12, T_GET_SETTINGS = 0x13, T_SET_SETTINGS = 0x14,
           T_RESET_SETTINGS = 0x15, T_MOVE_TO = 0x16, T_MOVE_BY = 0x17, T_HOME = 0x18, T_SET_MOTOR = 0x19,
           T_ENABLE = 0x1B, T_DISABLE = 0x1C, T_RESET_FAULT = 0x1D, T_HALT = 0x1E, T_ZERO_MOTOR = 0x1F,
-          T_SAVE_ZERO = 0x20, T_LOAD_ZERO = 0x21, T_SOLVE_IK = 0x22;
+          T_SAVE_ZERO = 0x20, T_LOAD_ZERO = 0x21, T_SOLVE_IK = 0x22, T_RECOVER_CAN = 0x23, T_SET_DRIVE_NODE_ID = 0x24;
+    const CONSOLE_PROTOCOL_VERSION = 2;
+    const CAN_STATE = { 0: "not started", 1: "error active", 2: "error warning", 3: "error passive", 4: "BUS OFF", 255: "?" };
     // replies
     const T_INFO = 0x90, T_STATUS = 0x91, T_SETTINGS = 0x92, T_IK_RESULT = 0x93, T_OK = 0x94, T_ERROR = 0x95;
     const REQ_NAME = { 0x10:"get info",0x11:"get status",0x12:"set stream",0x13:"get settings",0x14:"set settings",
@@ -342,12 +345,12 @@
 
     const els = {};
     for (const id of ["status","connectUsbBtn","connectSerialBtn","disconnectBtn","anyDevice","autoReconnect","devInfo",
-      "liveStream","streamPeriod","refreshBtn","linkState","devCan","devFw","devMaxTorque","rxRate",
+      "liveStream","streamPeriod","refreshBtn","linkState","devCan","devCanErrors","canRecoverBtn","devFw","devMaxTorque","rxRate",
       "enableAllBtn","disableAllBtn","resetAllBtn","haltAllBtn","canvas",
       "poseXY","poseThetas","poseMotors","poseBar","targetXY","targetStatus","deviceTarget","motion",
       "targetX","targetY","moveToBtn","homeBtn","moveOnRelease","liveDrag","jogUp","jogDown","jogLeft","jogRight","jogStep","jogStepLabel",
       "motors","settings","gM2x","gM2y","gCrank1","gCrank2","gBar","gCoupler","gExt","gOff","gAssembly","gSide","hTheta1","hTheta2","hUseCurrentBtn",
-      "mNode1","mDir1","mMin1","mMax1","mZeroTheta1","mTorque1","mNode2","mDir2","mMin2","mMax2","mZeroTheta2","mTorque2","mTorqueUnit1","mTorqueUnit2",
+      "mNode1","mDir1","mMin1","mMax1","mZeroTheta1","mTorque1","mNode2","mDir2","mMin2","mMax2","mZeroTheta2","mTorque2","mTorqueUnit1","mTorqueUnit2","mProgram1","mProgram2",
       "pVel","pAcc","pDec","settingsNote","settingsApplyBtn","settingsReloadBtn","settingsResetBtn",
       "clearLogBtn","log","unsupported"]) els[id] = document.getElementById(id);
 
@@ -1139,6 +1142,9 @@
           statusword: dv.getUint16(i + 2, true), errorCode: dv.getUint16(i + 4, true), angle: dv.getFloat32(i + 8, true), velocity: dv.getFloat32(i + 12, true),
           torque: dv.getInt16(i + 16, true), current: dv.getInt16(i + 18, true), torqueLimit: dv.getUint16(i + 20, true), ratedTorqueCnm: dv.getUint16(i + 22, true) });
       }
+      // v2: the CAN controller block (21 B) after the motors; a v1 device sends nothing there
+      if (p.length >= i + 21) s.can = { state: p[i], tec: dv.getUint16(i + 1, true), rec: dv.getUint16(i + 3, true), busErrors: dv.getUint32(i + 5, true),
+        busOffCount: dv.getUint32(i + 9, true), signalErrors: dv.getUint32(i + 13, true), ackErrors: dv.getUint32(i + 17, true) };
       return s;
     }
     function parseInfo(p) {
@@ -1400,7 +1406,14 @@
       els.rxRate.textContent = rxTimes.length > 1 ? (rxTimes.length / 2).toFixed(1) + " Hz" : "-";
       const state = !st.canOk ? { t: "CAN down", c: "fault" } : !st.commOk ? { t: "a motor is not answering", c: "fault" } : st.faulted ? { t: "FAULT", c: "fault" } : st.enabled ? { t: "enabled", c: "enabled" } : { t: "disabled", c: "idle" };
       els.linkState.textContent = state.t; els.linkState.className = "state-badge " + state.c;
-      els.devCan.textContent = st.canOk ? "up" : "DOWN";
+      if (st.can) {
+        const c = st.can, busOff = c.state === 4;
+        els.devCan.textContent = !st.canOk ? "DOWN" : (CAN_STATE[c.state] || "?") + (c.busOffCount ? " · bus-off " + c.busOffCount + "×" : "");
+        els.devCan.style.color = busOff || !st.canOk ? "var(--danger)" : (c.state === 2 || c.state === 3) ? "var(--warn, #d29922)" : "";
+        const hints = []; if (c.signalErrors) hints.push("signal integrity"); if (c.ackErrors) hints.push("not acknowledged");
+        els.devCanErrors.textContent = "(TEC " + c.tec + " REC " + c.rec + " · bus errors " + c.busErrors + " · stuff/form/bit " + c.signalErrors + " · ack " + c.ackErrors + (hints.length ? " — " + hints.join(", ") : "") + ")";
+        els.canRecoverBtn.style.display = busOff ? "" : "none"; els.canRecoverBtn.disabled = !busOff;
+      } else { els.devCan.textContent = st.canOk ? "up" : "DOWN"; els.devCanErrors.textContent = ""; els.canRecoverBtn.style.display = "none"; }
       els.motion.textContent = st.moving ? "moving" : "idle"; els.motion.className = "v " + (st.moving ? "good" : "");
       els.deviceTarget.textContent = st.targetValid ? st.targetX.toFixed(1) + " / " + st.targetY.toFixed(1) + " mm" : "none";
       // the shaded workspace follows the measured pose's branch; recompute when it moved far from the reference it was shaded with
@@ -1451,6 +1464,8 @@
       els.devMaxTorque.textContent = i.maxTorque + " ‰" + (ratedCnm[0] ? " (" + (i.maxTorque * ratedCnm[0] / 1e5).toFixed(2) + " Nm)" : "");
       for (const k of [1, 2]) els["mTorque" + k].max = torqueNm(k) ? String(Number((i.maxTorque * ratedCnm[k - 1] / 1e5).toFixed(2))) : String(i.maxTorque);
       logLine("sys", "info: " + i.project + " " + i.version + " (" + i.build + ") · protocol v" + i.protocolVersion + " · torque ceiling " + i.maxTorque + " ‰ · poll " + i.pollMs + " ms");
+      if (i.protocolVersion < CONSOLE_PROTOCOL_VERSION) logLine("warn", "device protocol v" + i.protocolVersion + " is older than this console (v" + CONSOLE_PROTOCOL_VERSION + "): no CAN counters, Nm torque, bus-off recovery or drive re-addressing");
+      for (const k of [1, 2]) els["mProgram" + k].disabled = i.protocolVersion < 2;
     }
 
     // ===================== Incoming frame handling =====================
@@ -1544,6 +1559,7 @@
         els.devInfo.textContent = "Not connected. Default WebUSB filter: VID 0x1209 (espp default).";
         els.linkState.textContent = "-"; els.linkState.className = "state-badge";
         for (const id of ["devCan", "devFw", "devMaxTorque", "rxRate", "deviceTarget", "motion"]) els[id].textContent = "-";
+        els.devCanErrors.textContent = ""; els.canRecoverBtn.style.display = "none";
         for (const b of [els.enableAllBtn, els.disableAllBtn, els.resetAllBtn, els.haltAllBtn, els.homeBtn, els.moveToBtn, els.jogUp, els.jogDown, els.jogLeft, els.jogRight]) b.disabled = true;
         lastStatus = null; rxTimes = []; info = null; deviceSettings = null; resetArmed = false;
         renderMotors(null); refreshCurrent();
@@ -1563,6 +1579,14 @@
     els.enableAllBtn.addEventListener("click", () => { logLine("tx", "enable both motors"); send(T_ENABLE, encU8(ALL_MOTORS)); });
     els.disableAllBtn.addEventListener("click", () => { logLine("tx", "disable both motors"); send(T_DISABLE, encU8(ALL_MOTORS)); });
     els.resetAllBtn.addEventListener("click", () => { logLine("tx", "reset faults"); send(T_RESET_FAULT, encU8(ALL_MOTORS)); });
+    els.canRecoverBtn.addEventListener("click", () => { logLine("tx", "CAN bus-off recovery"); send(T_RECOVER_CAN); });
+    for (const k of [1, 2]) els["mProgram" + k].addEventListener("click", () => {
+      const cur = lastStatus && lastStatus.motors[k - 1] ? lastStatus.motors[k - 1].node : null, id = Math.round(num(els["mNode" + k]));
+      if (!(id >= 1 && id <= 127)) { logLine("err", "node id must be 1..127"); return; }
+      if (cur === id) { logLine("warn", "the drive on crank " + k + " already is node " + id); return; }
+      if (!window.confirm("Re-address the drive on crank " + k + " from node " + cur + " to " + id + "? It writes the drive's Node-ID objects and saves them (~5 s); the settings follow on success.")) return;
+      logLine("tx", "program drive on crank " + k + ": node " + cur + " -> " + id); send(T_SET_DRIVE_NODE_ID, new Uint8Array([k - 1, id]));
+    });
     els.haltAllBtn.addEventListener("click", () => { logLine("tx", "HALT"); send(T_HALT, encU8(ALL_MOTORS)); });
 
     // ---- device-side status streaming + status polling ----

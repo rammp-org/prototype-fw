@@ -3,6 +3,7 @@
 #include <algorithm>
 #include <cmath>
 #include <limits>
+#include <string_view>
 
 namespace {
 constexpr float kNaN = std::numeric_limits<float>::quiet_NaN();
@@ -108,6 +109,22 @@ void LinkageController::poll(Status &status) {
   std::lock_guard<std::mutex> lock(mutex_);
   ++tick_;
   status.can_ok = config_.can_ok;
+  if (config_.can_bus != nullptr && config_.can_ok) {
+    const auto c = config_.can_bus->get_status();
+    const std::string_view state{c.state != nullptr ? c.state : ""};
+    using Can = linkage_protocol::CanStatus;
+    status.can.state = c.bus_off                                         ? Can::kBusOff
+                       : state.find("passive") != std::string_view::npos ? Can::kErrorPassive
+                       : state.find("warning") != std::string_view::npos ? Can::kErrorWarning
+                       : state.find("active") != std::string_view::npos  ? Can::kErrorActive
+                                                                         : Can::kUnknown;
+    status.can.tx_error_count = c.tx_error_count;
+    status.can.rx_error_count = c.rx_error_count;
+    status.can.bus_error_count = c.bus_error_count;
+    status.can.bus_off_count = c.bus_off_count;
+    status.can.signal_errors = c.stuff_errors + c.form_errors + c.bit_errors;
+    status.can.ack_errors = c.ack_errors;
+  }
   bool all_comm = true, all_enabled = true, any_fault = false, any_moving = false;
   std::array<float, 2> theta{};
   bool have_theta = true;
@@ -378,7 +395,57 @@ bool LinkageController::enable(uint8_t motor) {
   return for_each_motor(motor, "enable", [](uint8_t, EyouMotor &m) { return m.enable_drive(); });
 }
 
+void LinkageController::flush_pending_unlocked() {
+  // A set-point nobody acknowledged, stuck in the TWAI queue, would delay the
+  // halt / disable frames behind it until the driver gave up on it.
+  if (config_.can_bus != nullptr && config_.can_ok) {
+    config_.can_bus->flush_pending();
+  }
+}
+
+bool LinkageController::recover_can() {
+  if (config_.can_bus == nullptr || !config_.can_ok) {
+    return false;
+  }
+  return config_.can_bus->recover();
+}
+
+EyouMotor::NodeIdResult LinkageController::set_drive_node_id(uint8_t motor, uint8_t new_id) {
+  if (motor >= kMotorCount || new_id < 1 || new_id > 127) {
+    return EyouMotor::NodeIdResult::Failed;
+  }
+  std::lock_guard<std::mutex> lock(mutex_);
+  if (!present_unlocked(motor)) {
+    logger_.error("re-address: no motor configured on crank {}", motor + 1);
+    return EyouMotor::NodeIdResult::Failed;
+  }
+  auto &m = *config_.motors[motor];
+  const uint8_t old_id = m.node_id();
+  const auto result = m.set_drive_node_id(new_id);
+  switch (result) {
+  case EyouMotor::NodeIdResult::Applied:
+    // the motor object follows the drive; so do the settings (the caller
+    // persists them), and the drive is commissioned again as a newcomer
+    settings_.motors[motor].node_id = new_id;
+    commissioned_[motor] = false;
+    rated_torque_cnm_[motor] = 0;
+    target_.reset();
+    logger_.warn("crank {}: drive re-addressed {} -> {} and followed", motor + 1, old_id, new_id);
+    break;
+  case EyouMotor::NodeIdResult::SavedNeedsPowerCycle:
+    logger_.warn("crank {}: new node id {} saved in the drive; it keeps {} until power-cycled",
+                 motor + 1, new_id, old_id);
+    break;
+  case EyouMotor::NodeIdResult::Failed:
+    logger_.error("crank {}: re-addressing {} -> {} failed, nothing changed", motor + 1, old_id,
+                  new_id);
+    break;
+  }
+  return result;
+}
+
 bool LinkageController::disable(uint8_t motor) {
+  flush_pending_unlocked();
   const bool ok =
       for_each_motor(motor, "disable", [](uint8_t, EyouMotor &m) { return m.disable_drive(); });
   std::lock_guard<std::mutex> lock(mutex_);
@@ -392,6 +459,7 @@ bool LinkageController::reset_fault(uint8_t motor) {
 }
 
 bool LinkageController::halt(uint8_t motor) {
+  flush_pending_unlocked();
   const bool ok = for_each_motor(motor, "halt", [](uint8_t, EyouMotor &m) { return m.halt(); });
   std::lock_guard<std::mutex> lock(mutex_);
   target_.reset();

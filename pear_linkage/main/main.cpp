@@ -176,6 +176,7 @@ extern "C" void app_main(void) {
 
   LinkageController controller({.motors = {&motor1, &motor2},
                                 .max_torque_permille = CONFIG_LINKAGE_MAX_TORQUE_PERMILLE,
+                                .can_bus = &bus,
                                 .can_ok = can_ok,
                                 .log_level = espp::Logger::Verbosity::INFO});
   {
