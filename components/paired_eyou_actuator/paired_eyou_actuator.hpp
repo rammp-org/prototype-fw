@@ -2,6 +2,7 @@
 
 #include <array>
 #include <cstdint>
+#include <string_view>
 
 #include "base_component.hpp"
 #include "eyou_motor.hpp"
@@ -15,7 +16,11 @@ public:
     std::array<uint16_t, 2> error_code{};
   };
 
-  PairedEyouActuator(EyouMotor &primary, EyouMotor &secondary);
+  /// `tag` names the pair in its log lines; it must outlive the object (the
+  /// logger keeps a view of it): a string literal such as
+  /// "PairedEyouActuator-left" is the intended use.
+  PairedEyouActuator(EyouMotor &primary, EyouMotor &secondary,
+                     std::string_view tag = "PairedEyouActuator");
 
   PairedEyouActuator(const PairedEyouActuator &) = delete;
   PairedEyouActuator &operator=(const PairedEyouActuator &) = delete;

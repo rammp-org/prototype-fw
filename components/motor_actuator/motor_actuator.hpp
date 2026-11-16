@@ -6,6 +6,7 @@
 #include <limits>
 #include <memory>
 #include <mutex>
+#include <string_view>
 #include <utility>
 
 #include "base_component.hpp"
@@ -83,6 +84,9 @@ public:
   };
 
   MotorActuator(CommunicationFunction communication, uint8_t motor_id);
+  /// The log tag of the actuator with this id ("MotorActuator-<id>"), a
+  /// compile-time string in flash (the logger keeps only a view of its tag).
+  static std::string_view log_tag_for(uint8_t motor_id);
 
   MotorActuator(const MotorActuator &) = delete;
   MotorActuator &operator=(const MotorActuator &) = delete;

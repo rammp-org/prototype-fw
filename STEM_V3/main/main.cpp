@@ -564,9 +564,11 @@ extern "C" void app_main(void) {
     logger.error("CAN bus failed to start; motor commands will fail until reboot");
   }
   // Reversed pairs (front / back plane of each axis): 1-2 left, 3-4 right, 5-6 seat
-  PairedEyouActuator right_pair(actuators[3], actuators[2]);
-  PairedEyouActuator left_pair(actuators[1], actuators[0]);
-  PairedEyouActuator seat_pair(actuators[5], actuators[4]);
+  // The tags are literals: the logger keeps a view of its tag, and a tag set
+  // after construction would need the mutable-tag logger option (RAM).
+  PairedEyouActuator right_pair(actuators[3], actuators[2], "PairedEyouActuator-right");
+  PairedEyouActuator left_pair(actuators[1], actuators[0], "PairedEyouActuator-left");
+  PairedEyouActuator seat_pair(actuators[5], actuators[4], "PairedEyouActuator-seat");
   logger.info("Six motor actuators (IDs 101-106) in three reversed pairs: left 102-101, right "
               "104-103, seat 106-105");
 

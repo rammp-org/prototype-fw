@@ -1,5 +1,9 @@
 #include "motor_actuator.hpp"
 
+#include <string_view>
+
+#include <array>
+
 #include <algorithm>
 #include <cmath>
 #include <mutex>
@@ -150,12 +154,48 @@ bool MotorCanBus::request(const MotorPacket &command, MotorPacket &response, uin
   return false;
 }
 
-MotorActuator::MotorActuator(CommunicationFunction communication, uint8_t motor_id)
-    : espp::BaseComponent("MotorActuator", espp::Logger::Verbosity::INFO)
-    , communication_(std::move(communication))
-    , motor_id_(motor_id) {
-  set_log_tag("MotorActuator-" + std::to_string(motor_id_));
+namespace {
+// One log tag per possible motor id, built at compile time into flash
+// ("MotorActuator-0" .. "MotorActuator-255"): the logger keeps a string_view
+// of its tag, so the tag must outlive the component without a heap string
+// per instance and without the mutable-tag logger option (which costs RAM).
+struct MotorTag {
+  std::array<char, 18> text{}; // "MotorActuator-255" + NUL
+};
+constexpr std::array<MotorTag, 256> make_motor_tags() {
+  std::array<MotorTag, 256> tags{};
+  constexpr std::string_view prefix = "MotorActuator-";
+  for (size_t id = 0; id < tags.size(); ++id) {
+    auto &t = tags[id].text;
+    size_t n = 0;
+    for (const char c : prefix) {
+      t[n++] = c;
+    }
+    char digits[3]{};
+    size_t count = 0;
+    size_t value = id;
+    do {
+      digits[count++] = static_cast<char>('0' + value % 10);
+      value /= 10;
+    } while (value != 0);
+    while (count > 0) {
+      t[n++] = digits[--count];
+    }
+    t[n] = '\0';
+  }
+  return tags;
 }
+constexpr auto kMotorTags = make_motor_tags();
+} // namespace
+
+std::string_view MotorActuator::log_tag_for(uint8_t motor_id) {
+  return std::string_view{kMotorTags[motor_id].text.data()};
+}
+
+MotorActuator::MotorActuator(CommunicationFunction communication, uint8_t motor_id)
+    : espp::BaseComponent(log_tag_for(motor_id), espp::Logger::Verbosity::INFO)
+    , communication_(std::move(communication))
+    , motor_id_(motor_id) {}
 
 bool MotorActuator::send_command(const std::array<uint8_t, packet_length_> &command) {
   MotorPacket packet{};

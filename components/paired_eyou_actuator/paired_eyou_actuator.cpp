@@ -2,13 +2,11 @@
 
 #include <cmath>
 
-PairedEyouActuator::PairedEyouActuator(EyouMotor &primary, EyouMotor &secondary)
-    : espp::BaseComponent("PairedEyouActuator", espp::Logger::Verbosity::INFO)
+PairedEyouActuator::PairedEyouActuator(EyouMotor &primary, EyouMotor &secondary,
+                                       std::string_view tag)
+    : espp::BaseComponent(tag, espp::Logger::Verbosity::INFO)
     , primary_(primary)
-    , secondary_(secondary) {
-  set_log_tag("PairedEyouActuator-" + std::to_string(primary_.node_id()) + "-" +
-              std::to_string(secondary_.node_id()));
-}
+    , secondary_(secondary) {}
 
 bool PairedEyouActuator::configure_profile_position(
     const EyouMotor::ProfilePositionConfig &config) {

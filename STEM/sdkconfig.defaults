@@ -8,7 +8,12 @@ CONFIG_ESP_DEFAULT_CPU_FREQ_MHZ_360=y
 
 # Common ESP-related
 CONFIG_ESP_SYSTEM_EVENT_TASK_STACK_SIZE=4096
-CONFIG_ESP_MAIN_TASK_STACK_SIZE=8192
+# app_main holds every object of the firmware (bus, motors, pairs, controller,
+# USB device, dispatchers, the task lambdas) on its own stack, and that frame
+# alone is close to 8 KB: the first call out of app_main overflowed an 8 KB
+# stack (stack protection fault in heap_caps_malloc on boot). The sibling
+# projects with the same structure run 24 KB.
+CONFIG_ESP_MAIN_TASK_STACK_SIZE=24576
 
 # ---------------------------------------------------------------------------
 # Native USB (ESP32-P4 USB-OTG HS): one composite device with a vendor /
