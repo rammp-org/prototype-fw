@@ -807,6 +807,13 @@ bool EyouMotor::request_sdo_expedited(uint16_t index, uint8_t subindex, uint32_t
     value = static_cast<uint32_t>(response.data[4]) | static_cast<uint32_t>(response.data[5]) << 8 |
             static_cast<uint32_t>(response.data[6]) << 16 |
             static_cast<uint32_t>(response.data[7]) << 24;
+    // Only `size` bytes are the object; CiA 301 leaves the rest "don't care"
+    // and a drive may leave them non-zero. A 16-bit object read as 32 bits
+    // then came back with garbage in its upper half (a torque limit of
+    // thousands of per-mille on the console after a reconnect).
+    if (size < 4) {
+      value &= (uint32_t{1} << (8 * size)) - 1;
+    }
     return true;
   }
   logger_.error("Timed out reading SDO 0x{:04X}.{}", index, subindex);

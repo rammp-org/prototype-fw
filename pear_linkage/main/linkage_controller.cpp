@@ -153,7 +153,16 @@ void LinkageController::poll(Status &status) {
       // the drive just appeared (powered after boot, node changed, came back)
       commissioned_[i] = commission_unlocked(i);
       settings_dirty_[i] = true;
+      rated_torque_cnm_[i] = 0; // another drive may be on this node now
     }
+    if (rated_torque_cnm_[i] == 0) {
+      // the scale of the per-mille torque figures: read once per drive
+      uint32_t rated_mnm = 0;
+      if (motor.get_rated_torque(rated_mnm, kReadTimeoutMs) && rated_mnm != 0) {
+        rated_torque_cnm_[i] = static_cast<uint16_t>(std::min<uint32_t>(rated_mnm / 10, 0xFFFF));
+      }
+    }
+    ms.rated_torque_cnm = rated_torque_cnm_[i];
     ms.angle_deg = angle;
     ms.velocity_dps = velocity;
     ms.torque_permille = torque;

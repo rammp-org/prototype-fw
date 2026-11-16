@@ -231,9 +231,9 @@
         <div class="panel">
           <h2>Torque limit</h2>
           <div class="settings">
-            <span class="k" title="Max torque (object 0x6072): the drive clamps its torque demand to this in every mode, so a move cannot push harder. Per-thousand of the rated torque; 1000 = rated. The device's configuration (menuconfig) caps what can be set here.">Limit (&permil;)</span><input type="number" id="torqueLimit" value="300" min="0" max="3000" step="10"><button class="small" id="torqueLimitBtn" disabled>Apply</button>
+            <span class="k" id="torqueLimitLabel" title="Max torque (object 0x6072): the drive clamps its torque demand to this in every mode, so a move cannot push harder. Set in Nm; the drive stores it as per-thousand of its rated torque (1000 = rated), which the device reads from the drive. The device's configuration (menuconfig) caps what can be set here.">Limit (Nm)</span><input type="number" id="torqueLimit" value="" min="0" step="0.1" placeholder="waiting for the drive"><button class="small" id="torqueLimitBtn" disabled>Apply</button>
             <input type="range" id="torqueLimitSlider" class="full" min="0" max="1000" step="10" value="300" aria-label="torque limit slider">
-            <span class="note" id="torqueLimitNote" style="color: var(--text-muted);">= - Nm (rated torque unknown)</span>
+            <span class="note" id="torqueLimitNote" style="color: var(--text-muted);">rated torque not read yet: the limit is set in Nm once it is (or in &permil; of rated before)</span>
           </div>
         </div>
 
@@ -326,7 +326,7 @@
       "rAngle","rAngleSub","rVelocity","rVelocitySub","rTorque","rTorqueUnit","rTorqueSub","rCurrent","rCurrentUnit","rCurrentSub","rTarget","rTargetSub",
       "chartWindow","permilleUnits","showLimitLines","clearChartsBtn","csvBtn","chartMotion","noDataMotion","chartEffort","noDataEffort",
       "enableBtn","disableBtn","resetFaultBtn","haltBtn","driveNote",
-      "torqueLimit","torqueLimitBtn","torqueLimitSlider","torqueLimitNote",
+      "torqueLimit","torqueLimitBtn","torqueLimitSlider","torqueLimitNote","torqueLimitLabel",
       "targetAngle","moveToBtn","jogMinusBtn","jogStep","jogPlusBtn","immediate","pVel","pAcc","pDec","profileBtn","lMin","lMax","limitsBtn",
       "zeroHereBtn","zeroAngle","zeroAtBtn","saveZeroBtn","loadZeroBtn","zOffset","zLimits","zProfile","zStream",
       "clearLogBtn","log","unsupported"]) els[id] = document.getElementById(id);
@@ -1018,8 +1018,9 @@
       els.rVelocitySub.textContent = s.enabled ? (s.targetReached ? "target reached" : "moving") : " ";
       els.rTorque.textContent = tScale ? fmt(s.torque * tScale, 3) : String(s.torque);
       els.rTorqueUnit.textContent = tScale ? "Nm" : "‰";
-      els.rTorqueSub.textContent = "limit: " + (tScale ? (s.torqueLimit * tScale).toFixed(3) + " Nm (" + s.torqueLimit + " ‰)" : s.torqueLimit + " ‰") +
-        (s.torqueLimit ? " · " + Math.min(999, Math.round(Math.abs(s.torque) / s.torqueLimit * 100)) + "%" : "");
+      els.rTorqueSub.textContent = !limitOkOf(s) ? "limit: unreadable (" + s.torqueLimit + " ‰ reported)" :
+        "limit: " + (tScale ? (s.torqueLimit * tScale).toFixed(3) + " Nm (" + s.torqueLimit + " ‰)" : s.torqueLimit + " ‰") +
+        (s.torqueLimit ? " · " + Math.min(999, Math.round(Math.abs(s.torque) / s.torqueLimit * 100)) + "% of the limit" : "");
       els.rCurrent.textContent = cScale ? fmt(s.current * cScale, 3) : String(s.current);
       els.rCurrentUnit.textContent = cScale ? "A" : "‰";
       els.rCurrentSub.textContent = cScale ? "(" + s.current + " ‰ of rated)" : " ";
@@ -1031,8 +1032,20 @@
         els.torqueLimit.max = String(s.torqueLimitMax); els.torqueLimitSlider.max = String(s.torqueLimitMax);
         if (Number(els.torqueLimit.value) > s.torqueLimitMax) els.torqueLimit.value = String(s.torqueLimitMax);
       }
-      reflect(els.torqueLimit, s.torqueLimit, prev && prev.torqueLimit);
-      if (document.activeElement !== els.torqueLimitSlider && (!prev || prev.torqueLimit !== s.torqueLimit)) els.torqueLimitSlider.value = String(Math.min(Number(els.torqueLimitSlider.max), s.torqueLimit));
+      // The limit is mirrored into the input in Nm once the rated torque is known
+      // (per-mille before that). A reported limit above the ceiling or above
+      // 3000 ‰ is not a value the device can have set: shown as unreadable, not
+      // copied into the input (an earlier firmware read the 16-bit object as 32
+      // bits and the upper half came back with garbage after a reconnect).
+      const limitOk = Number.isFinite(s.torqueLimit) && s.torqueLimit <= 3000 && (!s.torqueLimitMax || s.torqueLimit <= s.torqueLimitMax);
+      const unitChanged = !prev || torqueUnitIsNm(prev) !== torqueUnitIsNm(s);
+      if (unitChanged) { els.torqueLimitLabel.textContent = torqueUnitIsNm(s) ? "Limit (Nm)" : "Limit (‰)"; els.torqueLimit.step = torqueUnitIsNm(s) ? "0.1" : "10"; els.torqueLimit.placeholder = ""; }
+      if (limitOk) {
+        const shown = torqueUnitIsNm(s) ? Number((s.torqueLimit * s.ratedTorqueMnm / 1e6).toFixed(3)) : s.torqueLimit;
+        const prevShown = prev && limitOkOf(prev) ? (torqueUnitIsNm(prev) ? Number((prev.torqueLimit * prev.ratedTorqueMnm / 1e6).toFixed(3)) : prev.torqueLimit) : undefined;
+        reflect(els.torqueLimit, shown, unitChanged ? undefined : prevShown);
+        if (document.activeElement !== els.torqueLimitSlider && (!prev || prev.torqueLimit !== s.torqueLimit)) els.torqueLimitSlider.value = String(Math.min(Number(els.torqueLimitSlider.max), s.torqueLimit));
+      }
       updateTorqueNote();
       reflect(els.pVel, s.profVel, prev && prev.profVel, 2); reflect(els.pAcc, s.profAcc, prev && prev.profAcc, 2); reflect(els.pDec, s.profDec, prev && prev.profDec, 2);
       if (Number.isFinite(s.posMin)) reflect(els.lMin, s.posMin, prev && prev.posMin, 2);
@@ -1061,11 +1074,23 @@
       // the charts
       pushSample(s);
     }
-    function updateTorqueNote() {
+    // The torque limit control is in Nm once the drive's rated torque (0x6076) is
+    // known, in per-mille of rated before; the wire is always per-mille.
+    function torqueUnitIsNm(s) { return !!(s && s.ratedTorqueMnm > 0); }
+    function limitOkOf(s) { return Number.isFinite(s.torqueLimit) && s.torqueLimit <= 3000 && (!s.torqueLimitMax || s.torqueLimit <= s.torqueLimitMax); }
+    function torqueInputPermille() {
       const s = lastStatus, v = Number(els.torqueLimit.value);
-      const max = s && s.torqueLimitMax ? " · device maximum " + s.torqueLimitMax + " ‰" + (s.ratedTorqueMnm ? " (" + (s.torqueLimitMax * s.ratedTorqueMnm / 1e6).toFixed(3) + " Nm)" : "") : "";
-      els.torqueLimitNote.textContent = ((s && s.ratedTorqueMnm) ? "= " + (v * s.ratedTorqueMnm / 1e6).toFixed(3) + " Nm (" + (v / 10).toFixed(1) + "% of the rated " + (s.ratedTorqueMnm / 1000).toFixed(2) + " Nm)" : "= - Nm (rated torque unknown)") + max;
-      els.torqueLimitNote.style.color = (s && s.torqueLimitMax && v > s.torqueLimitMax) ? "var(--danger)" : "var(--text-muted)";
+      if (!Number.isFinite(v) || v < 0) return null;
+      return torqueUnitIsNm(s) ? Math.round(v * 1e6 / s.ratedTorqueMnm) : Math.round(v);
+    }
+    function updateTorqueNote() {
+      const s = lastStatus, pm = torqueInputPermille();
+      const nm = torqueUnitIsNm(s);
+      const max = s && s.torqueLimitMax ? " · device maximum " + (nm ? (s.torqueLimitMax * s.ratedTorqueMnm / 1e6).toFixed(2) + " Nm (" + s.torqueLimitMax + " ‰)" : s.torqueLimitMax + " ‰") : "";
+      if (pm === null) els.torqueLimitNote.textContent = "enter a number" + max;
+      else if (nm) els.torqueLimitNote.textContent = "= " + pm + " ‰ (" + (pm / 10).toFixed(1) + "% of the rated " + (s.ratedTorqueMnm / 1000).toFixed(2) + " Nm)" + max;
+      else els.torqueLimitNote.textContent = (s ? "rated torque not read yet: per-mille of rated (" + (pm / 10).toFixed(1) + "%)" : "rated torque unknown until the drive answers") + max;
+      els.torqueLimitNote.style.color = (pm !== null && s && s.torqueLimitMax && pm > s.torqueLimitMax) ? "var(--danger)" : "var(--text-muted)";
     }
 
     // ===================== Strip charts (Canvas 2D) =====================
@@ -1333,13 +1358,15 @@
     els.resetFaultBtn.addEventListener("click", () => { logLine("tx", "reset fault"); send(T_RESET_FAULT); });
     els.haltBtn.addEventListener("click", () => { logLine("tx", "halt"); send(T_HALT); });
     els.torqueLimitBtn.addEventListener("click", () => {
-      const v = numOf(els.torqueLimit, 0, 3000); if (v === null) { logLine("err", "torque limit must be a number (per-mille of rated)"); return; }
+      const pm = torqueInputPermille();
+      if (pm === null || pm > 3000) { logLine("err", "torque limit must be a number" + (torqueUnitIsNm(lastStatus) ? " in Nm" : " in per-mille of the rated torque")); return; }
       const max = lastStatus && lastStatus.torqueLimitMax;
-      if (max && v > max) { logLine("err", "torque limit " + Math.round(v) + " ‰ is above the device's maximum of " + max + " ‰ (set in its menuconfig); not sent"); return; }
-      logLine("tx", "set torque limit " + Math.round(v) + " ‰"); send(T_SET_TORQUE_LIMIT, encU16(Math.round(v)));
+      if (max && pm > max) { logLine("err", "torque limit " + describePermille(pm) + " is above the device's maximum of " + describePermille(max) + " (set in its menuconfig); not sent"); return; }
+      logLine("tx", "set torque limit " + describePermille(pm)); send(T_SET_TORQUE_LIMIT, encU16(pm));
     });
-    els.torqueLimit.addEventListener("input", () => { els.torqueLimitSlider.value = String(Math.min(Number(els.torqueLimitSlider.max), Number(els.torqueLimit.value) || 0)); updateTorqueNote(); });
-    els.torqueLimitSlider.addEventListener("input", () => { els.torqueLimit.value = els.torqueLimitSlider.value; updateTorqueNote(); });
+    function describePermille(pm) { const s = lastStatus; return torqueUnitIsNm(s) ? (pm * s.ratedTorqueMnm / 1e6).toFixed(2) + " Nm (" + pm + " ‰)" : pm + " ‰"; }
+    els.torqueLimit.addEventListener("input", () => { const pm = torqueInputPermille(); if (pm !== null) els.torqueLimitSlider.value = String(Math.min(Number(els.torqueLimitSlider.max), pm)); updateTorqueNote(); });
+    els.torqueLimitSlider.addEventListener("input", () => { const pm = Number(els.torqueLimitSlider.value); els.torqueLimit.value = torqueUnitIsNm(lastStatus) ? String(Number((pm * lastStatus.ratedTorqueMnm / 1e6).toFixed(2))) : String(pm); updateTorqueNote(); });
     els.torqueLimitSlider.addEventListener("change", () => { if (transport && moduleReady && !els.torqueLimitBtn.disabled) els.torqueLimitBtn.click(); });
     els.torqueLimit.addEventListener("keydown", (e) => { if (e.key === "Enter" && !els.torqueLimitBtn.disabled) els.torqueLimitBtn.click(); });
     els.moveToBtn.addEventListener("click", () => {

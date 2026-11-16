@@ -266,13 +266,13 @@
               <span class="k" title="+1: a positive motor angle turns the crank counter-clockwise; -1: clockwise">direction</span><select id="mDir1"><option value="1">+1 (motor + = crank CCW)</option><option value="-1">-1 (motor + = crank CW)</option></select><span></span>
               <span class="k" title="Motor angle limits (motor degrees from its zero); moves outside are refused">limits min / max</span><span class="pair"><input type="number" id="mMin1" step="1"><input type="number" id="mMax1" step="1"></span><span class="u">deg</span>
               <span class="k" title="The crank's angle in the linkage frame when the motor reads 0">crank angle at zero</span><input type="number" id="mZeroTheta1" step="1"><span class="u">deg</span>
-              <span class="k" title="Max torque (object 0x6072) in per-thousand of rated; the device's ceiling caps it">torque limit</span><input type="number" id="mTorque1" min="0" max="3000" step="10"><span class="u">‰</span>
+              <span class="k" title="Max torque (object 0x6072): set in Nm once the drive has reported its rated torque (stored and sent as per-thousand of rated); the device's ceiling caps it">torque limit</span><input type="number" id="mTorque1" min="0" max="3000" step="10"><span class="u" id="mTorqueUnit1">‰</span>
               <h3>Motor 2 (crank 2, M2)</h3>
               <span class="k">node id</span><input type="number" id="mNode2" min="0" max="127" step="1"><span></span>
               <span class="k">direction</span><select id="mDir2"><option value="1">+1 (motor + = crank CCW)</option><option value="-1">-1 (motor + = crank CW)</option></select><span></span>
               <span class="k">limits min / max</span><span class="pair"><input type="number" id="mMin2" step="1"><input type="number" id="mMax2" step="1"></span><span class="u">deg</span>
               <span class="k">crank angle at zero</span><input type="number" id="mZeroTheta2" step="1"><span class="u">deg</span>
-              <span class="k">torque limit</span><input type="number" id="mTorque2" min="0" max="3000" step="10"><span class="u">‰</span>
+              <span class="k">torque limit</span><input type="number" id="mTorque2" min="0" max="3000" step="10"><span class="u" id="mTorqueUnit2">‰</span>
               <h3>Profile (both motors)</h3>
               <span class="k" title="Profile position velocity / acceleration / deceleration (each motor moves on its own profile: the end effector path between two poses is not a straight line)">vel / acc / dec</span><span class="triple"><input type="number" id="pVel" step="1" min="0.1"><input type="number" id="pAcc" step="1" min="0.1"><input type="number" id="pDec" step="1" min="0.1"></span><span class="u">deg/s, deg/s²</span>
               <span class="note" id="settingsNote" style="color: var(--text-muted);">Edits preview in the drawing at once; Apply sends them to the device, which validates and stores them.</span>
@@ -347,7 +347,7 @@
       "poseXY","poseThetas","poseMotors","poseBar","targetXY","targetStatus","deviceTarget","motion",
       "targetX","targetY","moveToBtn","homeBtn","moveOnRelease","liveDrag","jogUp","jogDown","jogLeft","jogRight","jogStep","jogStepLabel",
       "motors","settings","gM2x","gM2y","gCrank1","gCrank2","gBar","gCoupler","gExt","gOff","gAssembly","gSide","hTheta1","hTheta2","hUseCurrentBtn",
-      "mNode1","mDir1","mMin1","mMax1","mZeroTheta1","mTorque1","mNode2","mDir2","mMin2","mMax2","mZeroTheta2","mTorque2",
+      "mNode1","mDir1","mMin1","mMax1","mZeroTheta1","mTorque1","mNode2","mDir2","mMin2","mMax2","mZeroTheta2","mTorque2","mTorqueUnit1","mTorqueUnit2",
       "pVel","pAcc","pDec","settingsNote","settingsApplyBtn","settingsReloadBtn","settingsResetBtn",
       "clearLogBtn","log","unsupported"]) els[id] = document.getElementById(id);
 
@@ -1078,7 +1078,7 @@
                            ee_extension: num(els.gExt), ee_offset: num(els.gOff), assembly: Number(els.gAssembly.value), coupler_side: Number(els.gSide.value) },
                home_theta1: num(els.hTheta1), home_theta2: num(els.hTheta2),
                motors: [1, 2].map((k) => ({ node_id: Math.round(num(els["mNode" + k])), direction: Number(els["mDir" + k].value), min: num(els["mMin" + k]), max: num(els["mMax" + k]),
-                                             theta_at_zero: num(els["mZeroTheta" + k]), torque_limit: Math.round(num(els["mTorque" + k])) })),
+                                             theta_at_zero: num(els["mZeroTheta" + k]), torque_limit: torqueInputPermille(k) })),
                profile: { velocity: num(els.pVel), accel: num(els.pAcc), decel: num(els.pDec) } };
     }
     function settingsToForm(s) {
@@ -1086,7 +1086,7 @@
       set(els.gM2x, g.m2_x, 2); set(els.gM2y, g.m2_y, 2); set(els.gCrank1, g.crank1, 2); set(els.gCrank2, g.crank2, 2); set(els.gBar, g.bar, 2); set(els.gCoupler, g.coupler, 2);
       set(els.gExt, g.ee_extension, 2); set(els.gOff, g.ee_offset, 2); els.gAssembly.value = String(g.assembly); els.gSide.value = String(g.coupler_side);
       set(els.hTheta1, s.home_theta1, 2); set(els.hTheta2, s.home_theta2, 2);
-      s.motors.forEach((m, idx) => { const k = idx + 1; set(els["mNode" + k], m.node_id); els["mDir" + k].value = String(m.direction); set(els["mMin" + k], m.min, 2); set(els["mMax" + k], m.max, 2); set(els["mZeroTheta" + k], m.theta_at_zero, 2); set(els["mTorque" + k], m.torque_limit); });
+      s.motors.forEach((m, idx) => { const k = idx + 1; set(els["mNode" + k], m.node_id); els["mDir" + k].value = String(m.direction); set(els["mMin" + k], m.min, 2); set(els["mMax" + k], m.max, 2); set(els["mZeroTheta" + k], m.theta_at_zero, 2); setTorqueInput(k, m.torque_limit); });
       set(els.pVel, s.profile.velocity, 2); set(els.pAcc, s.profile.accel, 2); set(els.pDec, s.profile.decel, 2);
     }
     function validateSettings(s) {
@@ -1095,7 +1095,7 @@
         const m = s.motors[k], who = "motor " + (k + 1) + ": ";
         if (m.node_id < 0 || m.node_id > 127) return who + "node id must be 0 (none) or 1..127";
         if (m.min > m.max) return who + "limits must have min <= max";
-        if (info && m.torque_limit > info.maxTorque) return who + "torque limit " + m.torque_limit + " ‰ is above the device's maximum of " + info.maxTorque + " ‰";
+        if (info && m.torque_limit > info.maxTorque) return who + "torque limit " + m.torque_limit + " ‰ of rated is above the device's maximum of " + info.maxTorque + " ‰" + (ratedCnm[idx] ? " (" + (info.maxTorque * ratedCnm[idx] / 1e5).toFixed(2) + " Nm)" : "");
       }
       if (s.motors[0].node_id && s.motors[0].node_id === s.motors[1].node_id) return "the two motors cannot share a node id";
       if (!(s.profile.velocity > 0) || !(s.profile.accel > 0) || !(s.profile.decel > 0)) return "profile values must be positive";
@@ -1137,7 +1137,7 @@
         const mf = p[i + 1];
         s.motors.push({ node: p[i], commOk: !!(mf & 1), enabled: !!(mf & 2), faulted: !!(mf & 4), targetReached: !!(mf & 8), zeroSet: !!(mf & 16), present: !!(mf & 32),
           statusword: dv.getUint16(i + 2, true), errorCode: dv.getUint16(i + 4, true), angle: dv.getFloat32(i + 8, true), velocity: dv.getFloat32(i + 12, true),
-          torque: dv.getInt16(i + 16, true), current: dv.getInt16(i + 18, true), torqueLimit: dv.getUint16(i + 20, true) });
+          torque: dv.getInt16(i + 16, true), current: dv.getInt16(i + 18, true), torqueLimit: dv.getUint16(i + 20, true), ratedTorqueCnm: dv.getUint16(i + 22, true) });
       }
       return s;
     }
@@ -1376,7 +1376,7 @@
         e.r.angle.textContent = ok ? m.angle.toFixed(2) + "°" + (m.targetReached ? "" : " ●") : "-";
         e.r.theta.textContent = ok ? motorToTheta(cfg, m.angle).toFixed(2) + "°" : "-";
         e.r.vel.textContent = ok ? m.velocity.toFixed(1) + " °/s" : "-";
-        e.r.torque.textContent = ok ? m.torque + " / " + m.torqueLimit + " ‰" : "-";
+        e.r.torque.textContent = !ok ? "-" : m.ratedTorqueCnm ? (m.torque * m.ratedTorqueCnm / 1e5).toFixed(2) + " / " + (m.torqueLimit * m.ratedTorqueCnm / 1e5).toFixed(2) + " Nm (" + m.torque + " / " + m.torqueLimit + " ‰)" : m.torque + " / " + m.torqueLimit + " ‰";
         e.r.current.textContent = ok ? m.current + " ‰" : "-";
         e.r.zero.textContent = m.present ? (m.zeroSet ? "set" : "not set (absolute encoder)") : "-";
         e.b.enable.disabled = !connected || !ok || m.enabled || m.faulted;
@@ -1395,6 +1395,7 @@
     function applyStatus(st) {
       const prev = lastStatus;
       lastStatus = st;
+      refreshTorqueUnits(st.motors); // Nm inputs once each crank's drive reported its rated torque
       rxTimes.push(performance.now()); while (rxTimes.length && rxTimes[0] < performance.now() - 2000) rxTimes.shift();
       els.rxRate.textContent = rxTimes.length > 1 ? (rxTimes.length / 2).toFixed(1) + " Hz" : "-";
       const state = !st.canOk ? { t: "CAN down", c: "fault" } : !st.commOk ? { t: "a motor is not answering", c: "fault" } : st.faulted ? { t: "FAULT", c: "fault" } : st.enabled ? { t: "enabled", c: "enabled" } : { t: "disabled", c: "idle" };
@@ -1425,11 +1426,30 @@
       logLine("sys", "settings: motors " + s.motors.map(m => m.node_id || "none").join(" / ") + ", cranks " + s.geometry.crank1 + " / " + s.geometry.crank2 + " mm, bar " + s.geometry.bar + ", coupler " + s.geometry.coupler + " mm, M3 +" + s.geometry.ee_extension + " / " + s.geometry.ee_offset + " mm");
       onGeometryChanged();
     }
+    // The torque limit inputs are in Nm once the motor on that crank has reported
+    // its rated torque (STATUS rated_torque_cnm), in ‰ of rated before; the
+    // settings on the wire and in NVS stay ‰.
+    const ratedCnm = [0, 0]; // per crank, from the latest STATUS
+    function torqueNm(k) { return ratedCnm[k - 1] > 0; }
+    function torqueInputPermille(k) { const v = num(els["mTorque" + k]); return torqueNm(k) ? Math.round(v * 1e5 / ratedCnm[k - 1]) : Math.round(v); }
+    function setTorqueInput(k, permille) { const el = els["mTorque" + k]; el.value = torqueNm(k) ? String(Number((permille * ratedCnm[k - 1] / 1e5).toFixed(2))) : String(permille); }
+    function refreshTorqueUnits(motors) {
+      for (const k of [1, 2]) {
+        const was = torqueNm(k), pm = torqueInputPermille(k);
+        ratedCnm[k - 1] = (motors[k - 1] && motors[k - 1].ratedTorqueCnm) || 0;
+        if (torqueNm(k) !== was) {
+          els["mTorqueUnit" + k].textContent = torqueNm(k) ? "Nm" : "‰";
+          els["mTorque" + k].step = torqueNm(k) ? "0.1" : "10";
+          els["mTorque" + k].max = info && info.maxTorque ? (torqueNm(k) ? String(Number((info.maxTorque * ratedCnm[k - 1] / 1e5).toFixed(2))) : String(info.maxTorque)) : "";
+          if (els["mTorque" + k].value !== "") setTorqueInput(k, pm); // same limit, new unit
+        }
+      }
+    }
     function applyInfo(i) {
       info = i;
       els.devFw.textContent = i.project + " " + i.version; els.devFw.title = "built " + i.build;
-      els.devMaxTorque.textContent = i.maxTorque + " ‰";
-      for (const k of [1, 2]) els["mTorque" + k].max = String(i.maxTorque);
+      els.devMaxTorque.textContent = i.maxTorque + " ‰" + (ratedCnm[0] ? " (" + (i.maxTorque * ratedCnm[0] / 1e5).toFixed(2) + " Nm)" : "");
+      for (const k of [1, 2]) els["mTorque" + k].max = torqueNm(k) ? String(Number((i.maxTorque * ratedCnm[k - 1] / 1e5).toFixed(2))) : String(i.maxTorque);
       logLine("sys", "info: " + i.project + " " + i.version + " (" + i.build + ") · protocol v" + i.protocolVersion + " · torque ceiling " + i.maxTorque + " ‰ · poll " + i.pollMs + " ms");
     }
 

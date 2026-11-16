@@ -404,7 +404,10 @@ struct Info {
 /// One motor's live readings inside STATUS (24 B):
 ///   [node u8][flags u8][statusword u16][error_code u16][reserved u16]
 ///   [angle f32 (motor deg)][velocity f32 (deg/s)][torque i16][current i16]
-///   [torque_limit u16][reserved u16]
+///   [torque_limit u16][rated_torque_cnm u16]
+/// rated_torque_cnm: the drive's rated torque (0x6076) in hundredths of a Nm,
+/// the scale of the per-mille torque figures, so a console shows and sets the
+/// limit in Nm; 0 = not read yet (older firmware sent 0 here as "reserved").
 struct MotorStatus {
   static constexpr uint8_t kFlagCommOk = 0x01;
   static constexpr uint8_t kFlagEnabled = 0x02;
@@ -427,6 +430,7 @@ struct MotorStatus {
   int16_t torque_permille{0};
   int16_t current_permille{0};
   uint16_t torque_limit_permille{0};
+  uint16_t rated_torque_cnm{0}; ///< 0x6076 in 0.01 Nm (saturates at 655.35 Nm); 0 = unknown
 };
 
 /// STATUS (87 B):
@@ -521,7 +525,7 @@ struct Status {
       put_i16(out, m.torque_permille);
       put_i16(out, m.current_permille);
       put_u16(out, m.torque_limit_permille);
-      put_u16(out, 0);
+      put_u16(out, m.rated_torque_cnm);
     }
     return out;
   }
@@ -566,6 +570,7 @@ struct Status {
       m.torque_permille = get_i16(p, i + 16);
       m.current_permille = get_i16(p, i + 18);
       m.torque_limit_permille = get_u16(p, i + 20);
+      m.rated_torque_cnm = get_u16(p, i + 22);
       i += MotorStatus::kSize;
     }
     return s;

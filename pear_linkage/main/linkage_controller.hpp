@@ -96,6 +96,8 @@ private:
   mutable std::mutex mutex_;
   Settings settings_{};
   std::array<bool, kMotorCount> commissioned_{};
+  std::array<uint16_t, kMotorCount>
+      rated_torque_cnm_{}; ///< 0x6076 in 0.01 Nm per motor, 0 until read (re-read on commission)
   std::array<bool, kMotorCount> settings_dirty_{};     ///< re-read the slow objects
   std::optional<std::array<float, 2>> measured_theta_; ///< last valid fk input
   std::optional<fivebar::Point> target_;
