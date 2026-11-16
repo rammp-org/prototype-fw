@@ -25,6 +25,7 @@
 #include <utility>
 #include <vector>
 
+#include "can_bus.hpp"
 #include "cli.hpp"
 #include "coredump.hpp"
 #include "coredump_service.hpp"
@@ -49,8 +50,12 @@ namespace {
 // pid.codes VID 0x1209 (espp default) with a PID distinct from the espp examples
 // (0x0d32 ota, 0x0d34 haptics, 0x0d36 coredump); the web consoles filter by VID.
 constexpr uint16_t kUsbPid = 0x0d3a;
-constexpr gpio_num_t kCanTxGpio = GPIO_NUM_16;
-constexpr gpio_num_t kCanRxGpio = GPIO_NUM_17;
+// Named by TWAI function, the way MotorCanBus(rx_gpio, tx_gpio) takes them: RX
+// from the transceiver's RXD on GPIO 16, TX to its TXD on GPIO 17 (the wiring
+// every project in this repository uses on the P4-ETH). The previous names had
+// them the other way round and relied on the call swapping them back.
+constexpr gpio_num_t kCanRxGpio = GPIO_NUM_16;
+constexpr gpio_num_t kCanTxGpio = GPIO_NUM_17;
 
 using Transport = stem::StemModule::Transport;
 using Frame = espp::stream_frame::Frame;
@@ -80,7 +85,7 @@ void print_solution(std::ostream &out, const stem::IkSolution &s) {
 // Console CLI: the same operations the USB module exposes, on top of the same
 // controller (so limits / rejections / tracked state agree).
 std::unique_ptr<cli::Menu> make_cli_menu(stem::StemController &controller,
-                                         std::span<MotorActuator> actuators) {
+                                         std::span<MotorActuator> actuators, CanBus &can_bus) {
   auto menu = std::make_unique<cli::Menu>("STEM");
   menu->Insert(
       "set",
@@ -228,6 +233,38 @@ std::unique_ptr<cli::Menu> make_cli_menu(stem::StemController &controller,
       },
       "Set a pair's (or all pairs') current position as zero after alignment: zero_align "
       "<right|left|seat|all>");
+  menu->Insert(
+      "can",
+      [&can_bus](std::ostream &out) {
+        const auto s = can_bus.get_status();
+        out << "CAN controller: " << s.state << "\n  TEC " << s.tx_error_count << ", REC "
+            << s.rx_error_count << ", bus errors since start " << s.bus_error_count
+            << ", TX queue free " << s.tx_queue_free << "\n  by type: stuff " << s.stuff_errors
+            << ", form " << s.form_errors << ", bit " << s.bit_errors << ", ack " << s.ack_errors
+            << ", arbitration lost " << s.arbitration_lost << " (normal, retransmitted)\n  bus-off "
+            << s.bus_off_count << " time(s) since start (recovered automatically)\n";
+        if (s.bus_off) {
+          out << "  the controller left the bus: fix the wiring / bitrate, then `can_recover`\n";
+        } else if (s.stuff_errors + s.form_errors + s.bit_errors > 0) {
+          out << "  corrupted frames: signal integrity - 120 ohm termination at BOTH ends only "
+                 "(about 60 ohm across H/L, bus unpowered), every node's CAN ground tied to the "
+                 "bus ground, short stubs, or a node at another bitrate\n";
+        } else if (s.ack_errors > 0) {
+          out << "  frames we sent were not acknowledged by anyone: bus open / all nodes off at "
+                 "that moment\n";
+        } else {
+          out << "  no bus errors: a node that does not answer is off, unpowered, at another id "
+                 "or not on this bus\n";
+        }
+      },
+      "Print the CAN controller state and error counters (bitrate / wiring check)");
+  menu->Insert(
+      "can_recover",
+      [&can_bus](std::ostream &out) {
+        out << (can_bus.recover() ? "bus-off recovery started; `can` shows when it is back\n"
+                                  : "recovery not started (see the log)\n");
+      },
+      "Start the CAN bus-off recovery");
   return menu;
 }
 
@@ -262,7 +299,7 @@ extern "C" void app_main(void) {
   // --------------------------------------------------------------------------
   // CAN bus, actuators, pairs, controller
   // --------------------------------------------------------------------------
-  MotorCanBus can_bus(kCanTxGpio, kCanRxGpio);
+  MotorCanBus can_bus(kCanRxGpio, kCanTxGpio);
   const bool can_ok = can_bus.start();
   if (!can_ok) {
     // Keep going: USB / OTA / core-dump access must not depend on the motors.
@@ -678,13 +715,14 @@ extern "C" void app_main(void) {
   // --------------------------------------------------------------------------
   // Console CLI
   // --------------------------------------------------------------------------
-  static auto cli = std::make_unique<cli::Cli>(make_cli_menu(controller, actuators));
+  static auto cli = std::make_unique<cli::Cli>(make_cli_menu(controller, actuators, can_bus.bus()));
   std::thread([cli_ptr = cli.get()] {
     espp::Cli input(*cli_ptr);
     input.Start();
   }).detach();
   logger.info("CLI ready: set <pair> <deg>, move <x> <y>, home, tilt <deg>, stop, get, status, "
-              "release, zero <pair|all>, zero_align <pair|all>, ik <x> <y>, ik_ref <x> <y>");
+              "release, zero <pair|all>, zero_align <pair|all>, ik <x> <y>, ik_ref <x> <y>, "
+              "can, can_recover");
 
   bool have_ethernet_status = false;
   bool last_ethernet_status = false;

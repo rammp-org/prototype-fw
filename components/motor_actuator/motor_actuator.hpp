@@ -41,6 +41,10 @@ public:
   // follow: those then go out on an empty queue. Returns false if the queue
   // did not drain in time (a wedged controller).
   bool flush_pending();
+  /// The CAN interface this adapter talks through (owned, or the one attached
+  /// at construction): its get_status() / recover() are the wiring / bitrate
+  /// diagnosis the CLI `can` prints.
+  CanBus &bus() { return *bus_; }
 
 private:
   bool register_receivers();

@@ -23,6 +23,14 @@ public:
   bool configure_profile_position(const EyouMotor::ProfilePositionConfig &config);
   bool enable_drive(uint32_t timeout_ms = 1000);
   bool disable_drive(uint32_t timeout_ms = 1000);
+  // Stop the move in progress on both motors with the profile deceleration and
+  // hold there, drives still enabled (EyouMotor::halt). Both are asked even if
+  // the first fails, so a pair never ends with one side stopped and the other
+  // still moving; false if either did not confirm.
+  bool halt(uint32_t timeout_ms = 2000);
+  // The drives' Max torque (0x6072), per-thousand of the rated torque, on both
+  // motors: a move cannot push harder than this in any mode.
+  bool set_max_torque(uint16_t torque_permille, uint32_t timeout_ms = 100);
   bool reset_fault(uint32_t timeout_ms = 1000);
   // True if either motor reports the DS402 Fault state (or its status can't be read).
   bool is_faulted(uint32_t timeout_ms = 100);

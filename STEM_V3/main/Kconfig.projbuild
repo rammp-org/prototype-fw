@@ -1,0 +1,27 @@
+menu "STEM_V3 Configuration"
+
+    config STEM_MAX_TORQUE_PERMILLE
+        int "Maximum torque limit the console / CLI may set (per-thousand of rated)"
+        range 0 3000
+        default 500
+        help
+            Ceiling for the torque limit written to every Eyou actuator's
+            Max torque object (0x6072, per-thousand of the rated torque). The
+            web console's SET_TORQUE_LIMIT and the CLI's torque_limit refuse a
+            value above this, so a browser cannot ask the linkage to push
+            harder than the person who flashed it allowed. The drive clamps its
+            torque demand to the limit in every mode, so a profile-position
+            move cannot exceed it either. 1000 = the rated torque.
+
+    config STEM_BOOT_TORQUE_PERMILLE
+        int "Torque limit written at boot (per-thousand of rated)"
+        range 0 3000
+        default 300
+        help
+            Written to every motor before the drives are enabled (nothing moves
+            harder than this until someone raises the limit from the console
+            or the CLI); capped to STEM_MAX_TORQUE_PERMILLE. Found on the
+            single-actuator test stand: a torque-limited move is how the
+            mechanical limits are found without breaking a linkage.
+
+endmenu

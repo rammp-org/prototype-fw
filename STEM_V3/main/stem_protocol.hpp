@@ -42,8 +42,11 @@ namespace stream = espp::stream_frame;
 /// Dispatcher module id owned by the STEM protocol (the frame `module` byte).
 static constexpr uint8_t kModule = 7;
 
-/// Protocol version reported in the INFO reply.
-static constexpr uint8_t kProtocolVersion = 1;
+/// Protocol version reported in the INFO reply. v2 (2026-11): SET_TORQUE_LIMIT,
+/// the torque limit + ceiling in INFO, torque / velocity per motor and a CAN
+/// controller block appended to STATE / TELEMETRY (a v1 host that stops reading
+/// after the motor records still decodes everything it knew).
+static constexpr uint8_t kProtocolVersion = 2;
 
 /// Actuator pair indices used in payloads.
 enum class Pair : uint8_t { Left = 0, Right = 1, Seat = 2 };
@@ -70,7 +73,10 @@ enum class Msg : uint8_t {
   Zero = 0x17,         ///< u8 pair (kAllPairs = all), u8 align -> Ok(0)
   SetStreaming = 0x18, ///< u8 enable, u16 period_ms -> Ok(period_ms)
   SolveIk = 0x19,      ///< f32 x_rel, f32 y_rel -> IkResult (no motion)
-  SetSeatTilt = 0x1A,  ///< f32 tilt deg (seat-pair offset on the IK level angle), f32 rpm -> Ok(0) | Error
+  SetSeatTilt =
+      0x1A, ///< f32 tilt deg (seat-pair offset on the IK level angle), f32 rpm -> Ok(0) | Error
+  SetTorqueLimit = 0x1B, ///< u16 permille of rated torque, every motor (<= the INFO ceiling) ->
+                         ///< Ok(permille) | Error
   // --- Generic replies (device -> host) --------------------------------------
   Ok = 0x81,    ///< u8 request type, u32 value
   Error = 0x82, ///< u8 request type, u32 code (std::errc), utf8 message
@@ -91,6 +97,11 @@ enum class Msg : uint8_t {
 //   f32 x 5   IkReference fields (x, y, m1_angle_deg, m2_angle_deg, m3_angle_deg)
 //   f32 default move rpm, f32 default set rpm, f32 max rpm
 //   u16 stream period ms, u8 streaming (on this transport)
+//   v2: u16 torque limit permille (what every motor's 0x6072 is set to),
+//       u16 torque limit ceiling permille (menuconfig; SET_TORQUE_LIMIT above it is refused),
+//       u32 rated torque mNm (0x6076 of the first motor that answered; 0 = not
+//           read yet) - the scale of every per-mille torque figure, so a host
+//           shows and sets the limit in Nm
 //
 // State / Telemetry payload:
 //   u32 uptime ms
@@ -100,7 +111,12 @@ enum class Msg : uint8_t {
 //   f32 left deg, f32 right deg, f32 seat deg (tracked pair positions, primary motor)
 //   f32 seat tilt deg                       (offset applied on top of the IK seat angle)
 //   u8  motor count; per motor: u8 id, u8 ok, u16 statusword, u16 error_code,
-//       f32 tracked position deg (read live over CANopen, object 0x6064)
+//       f32 tracked position deg (read live over CANopen, object 0x6064),
+//       v2: i16 torque permille of rated (0x6077), f32 velocity deg/s (0x606C)
+//   v2 CAN controller block (CanBus::get_status, the quickest wiring / bitrate
+//   check): u8 can state (see can_state:: below), u16 TEC, u16 REC,
+//       u32 bus errors since start, u32 bus-off count since start,
+//       u32 stuff+form+bit errors (signal integrity), u32 ack errors (nobody heard us)
 //
 // IkResult payload:
 //   f32 x_rel, f32 y_rel (echo), u8 reachable, u8 within limits
@@ -113,7 +129,19 @@ static constexpr uint8_t kTargetValid = 1 << 1; ///< a MOVE/HOME target has been
 static constexpr uint8_t kPoseValid = 1 << 2;   ///< FK of the tracked angles succeeded
 static constexpr uint8_t kMotorsOk = 1 << 3;    ///< every motor answered its status poll
 static constexpr uint8_t kCanOk = 1 << 4;       ///< the CAN bus started
+static constexpr uint8_t kCanBusOff = 1
+                                      << 5; ///< v2: the controller left the bus (see the CAN block)
 } // namespace flags
+
+/// v2: the CAN controller's error state (TWAI), as the CAN block's first byte.
+namespace can_state {
+static constexpr uint8_t kNotStarted = 0;
+static constexpr uint8_t kErrorActive = 1;  ///< normal
+static constexpr uint8_t kErrorWarning = 2; ///< TEC or REC above 96
+static constexpr uint8_t kErrorPassive = 3; ///< above 127: this node no longer flags errors
+static constexpr uint8_t kBusOff = 4; ///< left the bus; recovery is automatic, or CLI can_recover
+static constexpr uint8_t kUnknown = 0xFF;
+} // namespace can_state
 
 // ---------------------------------------------------------------------------
 // Little-endian payload append / read helpers

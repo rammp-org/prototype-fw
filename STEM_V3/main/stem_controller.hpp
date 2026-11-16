@@ -9,12 +9,14 @@
 #include <array>
 #include <atomic>
 #include <cstdint>
+#include <functional>
 #include <mutex>
 #include <optional>
 #include <span>
 #include <string_view>
 
 #include "base_component.hpp"
+#include "can_bus.hpp"
 #include "eyou_motor.hpp"
 #include "ik_5bar.hpp"
 #include "paired_eyou_actuator.hpp"
@@ -34,7 +36,24 @@ struct MotorTelemetry {
   bool ok{false}; ///< the status poll was answered
   uint16_t statusword{0};
   uint16_t error_code{0};
-  float tracked_deg{0.0f}; ///< actual position read over CANopen (object 0x6064)
+  float tracked_deg{0.0f};    ///< actual position read over CANopen (object 0x6064)
+  int16_t torque_permille{0}; ///< actual torque (0x6077), per-thousand of rated
+  float velocity_deg_s{0.0f}; ///< actual velocity (0x606C)
+};
+
+/// The CAN controller as CanBus::get_status() reports it (TWAI error state and
+/// counters): the quickest way to tell a wiring / bitrate problem from a motor
+/// that is off. Zeroed when the bus never started.
+struct CanTelemetry {
+  bool started{false};
+  bool bus_off{false};
+  const char *state{"not started"};
+  uint16_t tx_error_count{0};
+  uint16_t rx_error_count{0};
+  uint32_t bus_error_count{0};
+  uint32_t bus_off_count{0};
+  uint32_t signal_errors{0}; ///< stuff + form + bit errors: termination, ground, bitrate
+  uint32_t ack_errors{0};    ///< frames nobody acknowledged: bus open / nodes off
 };
 
 // Snapshot of what the controller knows. Unlike the RMD-based STEM, the Eyou
@@ -54,6 +73,9 @@ struct State {
   float seat_tilt_deg{0.0f};                ///< tilt offset applied on top of the IK seat angle
   std::array<MotorTelemetry, kMotorCount> motors{};
   bool motors_ok{false};
+  uint16_t torque_limit_permille{0}; ///< the limit last written to every motor
+  uint32_t rated_torque_mnm{0};      ///< 0x6076 of the first motor that answered (0: unknown)
+  CanTelemetry can{};
 };
 
 // A solved end-effector target expressed as actuator-pair positions.
@@ -85,6 +107,17 @@ public:
     float max_rpm{10.0f};         ///< requested speeds are clamped to (0, max_rpm]
     GeometryConfig geometry{};
     IkReference reference{kFullDownReference};
+    /// Torque limit (0x6072, per-thousand of rated) written to every motor by
+    /// set_torque_limit(); a request above max_torque_permille is refused, so
+    /// the person who flashed the firmware bounds what a browser may ask for.
+    uint16_t max_torque_permille{1000};
+    /// Optional: the CAN bus, for the controller state in State::can. Null:
+    /// the block reports "not started".
+    CanBus *can_bus{nullptr};
+    /// Optional: run before a STOP is enacted. A set-point stuck in the TWAI
+    /// queue in front of the stop (nobody acknowledged it) would otherwise
+    /// delay the stop until the driver gave up; CanBus::flush_pending() drops it.
+    std::function<void()> flush_pending_commands{nullptr};
     espp::Logger::Verbosity log_level{espp::Logger::Verbosity::INFO};
   };
 
@@ -123,8 +156,29 @@ public:
   Result set_seat_tilt(float tilt_deg, float rpm);
   float seat_tilt() const { return seat_tilt_deg_.load(); }
 
+  /// Stop every pair where it is: halt (profile deceleration, drives stay
+  /// enabled and HOLD the linkage), and disable the pairs whose halt was not
+  /// confirmed, so a pair that did not answer coasts rather than keeps moving.
+  /// The old behaviour disabled everything: the linkage then sagged under its
+  /// own weight (found on the single-actuator stand - the drive has a halt).
   bool stop();
   bool release_brakes();
+  /// Write the torque limit (0x6072, per-thousand of rated) to every motor.
+  /// Refused above Config::max_torque_permille (Result::OutOfLimits); a motor
+  /// that did not confirm makes it ActuatorFailed (the others keep the new
+  /// value, State reports the one asked for).
+  Result set_torque_limit(uint16_t torque_permille);
+  /// The same in newton-metres, through the rated torque read from the motors
+  /// (InvalidArgument when it is not known yet: nothing to scale by).
+  Result set_torque_limit_nm(float torque_nm);
+  uint16_t torque_limit() const { return torque_limit_permille_.load(); }
+  /// Rated torque (0x6076, mNm) of the first motor that answered; 0 until one
+  /// did. Read at the first set_torque_limit() / snapshot() and kept.
+  uint32_t rated_torque_mnm() const { return rated_torque_mnm_.load(); }
+  /// per-mille of rated -> Nm with the known rated torque (0 when unknown).
+  float permille_to_nm(uint16_t permille) const {
+    return static_cast<float>(permille) * static_cast<float>(rated_torque_mnm_.load()) / 1.0e6f;
+  }
   /// Re-zero one pair (or all when `pair` is empty). Clears the tracked target.
   bool zero(std::optional<Pair> pair, bool align);
   /// Persist every pair's software zero to NVS.
@@ -157,6 +211,10 @@ private:
   Config config_;
   mutable std::mutex mutex_;
   std::array<bool, kPairCount> zero_mismatch_{};
+  std::atomic<uint16_t> torque_limit_permille_{0}; // atomic: read by the lock-free torque_limit()
+  std::atomic<uint32_t> rated_torque_mnm_{0};      // atomic: read by the lock-free getters
+  // Read the rated torque once, from the first motor that answers (mutex_ held).
+  void ensure_rated_torque_unlocked();
   std::atomic<float> seat_tilt_deg_{0.0f}; // atomic: read by the lock-free solve()
   bool target_valid_{false};
   float target_x_{0.0f};

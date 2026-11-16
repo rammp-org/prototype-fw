@@ -12,8 +12,10 @@
 // UART0), which on the ESP32-P4 has its own PHY and coexists with TinyUSB on
 // the USB-OTG HS port.
 
+#include <algorithm>
 #include <array>
 #include <chrono>
+#include <cmath>
 #include <condition_variable>
 #include <deque>
 #include <functional>
@@ -55,8 +57,19 @@ namespace {
 // pid.codes VID 0x1209 (espp default) with a PID distinct from the espp examples
 // (0x0d32 ota, 0x0d34 haptics, 0x0d36 coredump); the web consoles filter by VID.
 constexpr uint16_t kUsbPid = 0x0d3a;
-constexpr gpio_num_t kCanTxGpio = GPIO_NUM_16;
-constexpr gpio_num_t kCanRxGpio = GPIO_NUM_17;
+// Named by TWAI function, the way CanBus(rx_gpio, tx_gpio) takes them: RX from
+// the transceiver's RXD on GPIO 16, TX to its TXD on GPIO 17 (the wiring every
+// project in this repository uses on the P4-ETH). The previous names had them
+// the other way round and relied on the call swapping them back.
+constexpr gpio_num_t kCanRxGpio = GPIO_NUM_16;
+constexpr gpio_num_t kCanTxGpio = GPIO_NUM_17;
+
+// Torque limit (0x6072, per-thousand of the rated torque): written to every
+// motor before the drives are enabled, raised later from the console / CLI up
+// to the menuconfig ceiling (see Kconfig.projbuild).
+constexpr uint16_t kMaxTorquePermille = CONFIG_STEM_MAX_TORQUE_PERMILLE;
+constexpr uint16_t kBootTorquePermille =
+    std::min<uint16_t>(CONFIG_STEM_BOOT_TORQUE_PERMILLE, kMaxTorquePermille);
 
 // Base/seat swivel: two MotorActuator (RMD-style) motors sharing the same CAN
 // bus as the Eyou linkage motors. MotorActuator's own gear_ratio_ (36:1) is
@@ -150,7 +163,7 @@ void handle_swivel_xy_twist(espp::Logger &logger, SwivelJoystick &swivel,
 // controller (so limits / rejections / tracked state agree).
 std::unique_ptr<cli::Menu> make_cli_menu(stem::StemController &controller,
                                          std::span<EyouMotor> actuators, MotorActuator &base_swivel,
-                                         MotorActuator &seat_swivel) {
+                                         MotorActuator &seat_swivel, CanBus &can_bus) {
   auto menu = std::make_unique<cli::Menu>("STEM");
   menu->Insert(
       "set",
@@ -255,13 +268,123 @@ std::unique_ptr<cli::Menu> make_cli_menu(stem::StemController &controller,
           if (actuator.get_statusword(statusword) && actuator.get_position(position_degrees)) {
             out << "Motor " << static_cast<int>(actuator.node_id())
                 << ": state=" << EyouMotor::ds402_state_name(statusword)
-                << ", position=" << position_degrees << " deg\n";
+                << ", position=" << position_degrees << " deg";
+            int16_t torque = 0;
+            float velocity = 0.0f;
+            if (actuator.get_torque(torque) && actuator.get_velocity(velocity)) {
+              out << ", torque=" << torque << " permille, velocity=" << velocity << " deg/s";
+            }
+            out << "\n";
           } else {
             out << "Motor " << static_cast<int>(actuator.node_id()) << ": status read failed\n";
           }
         }
       },
       "Get status for all motors: status");
+  auto report_torque_limit = [&controller](std::ostream &out, stem::StemController::Result result) {
+    out << stem::StemController::to_string(result);
+    if (result == stem::StemController::Result::OutOfLimits) {
+      out << " (ceiling " << controller.config().max_torque_permille << " permille";
+      if (controller.rated_torque_mnm() != 0) {
+        out << " = " << controller.permille_to_nm(controller.config().max_torque_permille) << " Nm";
+      }
+      out << ", menuconfig)";
+    }
+    if (result == stem::StemController::Result::Ok) {
+      out << ": every motor at " << controller.torque_limit() << " permille of rated";
+      if (controller.rated_torque_mnm() != 0) {
+        out << " = " << controller.permille_to_nm(controller.torque_limit()) << " Nm";
+      }
+    }
+    out << "\n";
+  };
+  menu->Insert(
+      "torque_limit",
+      [&controller, report_torque_limit](std::ostream &out, float newton_metres) {
+        out << "torque limit " << newton_metres << " Nm: ";
+        report_torque_limit(out, controller.set_torque_limit_nm(newton_metres));
+        if (controller.rated_torque_mnm() == 0) {
+          out << "  (the rated torque could not be read from any motor: torque_limit_permille "
+                 "<n> sets it relative to the rated torque)\n";
+        }
+      },
+      "Set every motor's torque limit in newton-metres, up to the menuconfig ceiling: "
+      "torque_limit <Nm>");
+  menu->Insert(
+      "torque_limit_permille",
+      [&controller, report_torque_limit](std::ostream &out, int permille) {
+        if (permille < 0 || permille > 0xFFFF) {
+          out << "torque limit must be 0..65535 permille of the rated torque\n";
+          return;
+        }
+        out << "torque limit " << permille << " permille: ";
+        report_torque_limit(out, controller.set_torque_limit(static_cast<uint16_t>(permille)));
+      },
+      "The same, per-thousand of the rated torque (1000 = rated): torque_limit_permille <n>");
+  menu->Insert(
+      "set_node_id",
+      [actuators](std::ostream &out, int old_id, int new_id) {
+        if (old_id < 1 || old_id > 127 || new_id < 1 || new_id > 127) {
+          out << "node ids are 1..127\n";
+          return;
+        }
+        for (auto &actuator : actuators) {
+          if (actuator.node_id() != static_cast<uint8_t>(old_id)) {
+            continue;
+          }
+          out << "re-addressing the drive at node " << old_id << " to " << new_id
+              << " (writes both Node-ID objects, saves, resets communication; ~5 s)...\n";
+          switch (actuator.set_drive_node_id(static_cast<uint8_t>(new_id))) {
+          case EyouMotor::NodeIdResult::Applied:
+            out << "applied: the drive answers on " << new_id
+                << " and this motor object follows it; its software zero is per node - "
+                   "load_zero / zero again\n";
+            return;
+          case EyouMotor::NodeIdResult::SavedNeedsPowerCycle:
+            out << "saved: the drive keeps " << old_id
+                << " until it is power-cycled; this object stays on the old id\n";
+            return;
+          case EyouMotor::NodeIdResult::Failed:
+            out << "FAILED: nothing changed (see the log)\n";
+            return;
+          }
+        }
+        out << "no motor object talks to node " << old_id << " (the pairs use 101-106)\n";
+      },
+      "Re-address an Eyou drive (replacement actuator): set_node_id <current id> <new id>");
+  menu->Insert(
+      "can",
+      [&can_bus](std::ostream &out) {
+        const auto s = can_bus.get_status();
+        out << "CAN controller: " << s.state << "\n  TEC " << s.tx_error_count << ", REC "
+            << s.rx_error_count << ", bus errors since start " << s.bus_error_count
+            << ", TX queue free " << s.tx_queue_free << "\n  by type: stuff " << s.stuff_errors
+            << ", form " << s.form_errors << ", bit " << s.bit_errors << ", ack " << s.ack_errors
+            << ", arbitration lost " << s.arbitration_lost << " (normal, retransmitted)\n  bus-off "
+            << s.bus_off_count << " time(s) since start (recovered automatically)\n";
+        if (s.bus_off) {
+          out << "  the controller left the bus: fix the wiring / bitrate, then `can_recover`\n";
+        } else if (s.stuff_errors + s.form_errors + s.bit_errors > 0) {
+          out << "  corrupted frames: signal integrity - 120 ohm termination at BOTH ends only "
+                 "(about 60 ohm across H/L, bus unpowered), every node's isolated CAN ground "
+                 "tied to the bus ground, short stubs, or a node at another bitrate (the Eyou "
+                 "drives run 1 Mbit/s)\n";
+        } else if (s.ack_errors > 0) {
+          out << "  frames we sent were not acknowledged by anyone: bus open / all nodes off at "
+                 "that moment\n";
+        } else {
+          out << "  no bus errors: a node that does not answer is off, unpowered, at another id "
+                 "or not on this bus\n";
+        }
+      },
+      "Print the CAN controller state and error counters (bitrate / wiring check)");
+  menu->Insert(
+      "can_recover",
+      [&can_bus](std::ostream &out) {
+        out << (can_bus.recover() ? "bus-off recovery started; `can` shows when it is back\n"
+                                  : "recovery not started (see the log)\n");
+      },
+      "Start the CAN bus-off recovery");
   menu->Insert(
       "release",
       [&controller](std::ostream &out) {
@@ -412,7 +535,7 @@ extern "C" void app_main(void) {
   // --------------------------------------------------------------------------
   // CAN bus, actuators, pairs, controller
   // --------------------------------------------------------------------------
-  CanBus can_bus(kCanTxGpio, kCanRxGpio);
+  CanBus can_bus(kCanRxGpio, kCanTxGpio);
   // EyouMotor registers its CAN receivers in its constructor, which must happen
   // before CanBus::start() (registration is locked once the bus is running).
   std::array<EyouMotor, stem::kMotorCount> actuators{{
@@ -459,14 +582,35 @@ extern "C" void app_main(void) {
       .seat = seat_pair,
       .motors = actuators,
       .can_ok = can_ok,
+      .max_torque_permille = kMaxTorquePermille,
+      .can_bus = &can_bus,
+      // a STOP must not queue behind a set-point nobody acknowledged
+      .flush_pending_commands = [&can_bus]() { can_bus.flush_pending(); },
       .log_level = espp::Logger::Verbosity::INFO,
   });
 
   if (can_ok) {
+    // Mode before the controlword: a fresh Eyou drive refuses the DS402 enable
+    // sequence until modes of operation is set (enable_drive() also prepares
+    // it, idempotently), and the torque limit before anything can move.
     if (!left_pair.configure_profile_position(profile) ||
         !right_pair.configure_profile_position(profile) ||
         !seat_pair.configure_profile_position(profile)) {
       logger.error("Failed to configure profile-position mode on one or more pairs");
+    }
+    if (controller.set_torque_limit(kBootTorquePermille) != stem::StemController::Result::Ok) {
+      logger.error("Failed to write the boot torque limit ({} permille) to one or more motors",
+                   kBootTorquePermille);
+    } else if (controller.rated_torque_mnm() != 0) {
+      logger.info("Torque limit {} permille of rated = {:.2f} Nm on every motor (ceiling {} = "
+                  "{:.2f} Nm, menuconfig; rated {} mNm)",
+                  kBootTorquePermille, controller.permille_to_nm(kBootTorquePermille),
+                  kMaxTorquePermille, controller.permille_to_nm(kMaxTorquePermille),
+                  controller.rated_torque_mnm());
+    } else {
+      logger.info("Torque limit {} permille of rated on every motor (ceiling {}, menuconfig); "
+                  "the rated torque was not read, Nm figures come once a motor answers",
+                  kBootTorquePermille, kMaxTorquePermille);
     }
     if (!left_pair.enable_drive() || !right_pair.enable_drive() || !seat_pair.enable_drive()) {
       logger.error("Failed to enable one or more drives");
@@ -912,8 +1056,8 @@ extern "C" void app_main(void) {
   // --------------------------------------------------------------------------
   // Console CLI
   // --------------------------------------------------------------------------
-  static auto cli =
-      std::make_unique<cli::Cli>(make_cli_menu(controller, actuators, base_swivel, seat_swivel));
+  static auto cli = std::make_unique<cli::Cli>(
+      make_cli_menu(controller, actuators, base_swivel, seat_swivel, can_bus));
   std::thread([cli_ptr = cli.get()] {
     espp::Cli input(*cli_ptr);
     input.Start();
@@ -921,7 +1065,9 @@ extern "C" void app_main(void) {
   logger.info("CLI ready: set <pair> <deg>, move <x> <y>, home, tilt <deg>, stop, get, status, "
               "release, zero <pair|all>, zero_align <pair|all>, save_zero, read_zero, "
               "load_zero, check_zero, ik <x> <y>, ik_ref <x> <y>, set_base <deg>, "
-              "set_seat_swivel <deg>, get_base, get_seat_swivel");
+              "set_seat_swivel <deg>, get_base, get_seat_swivel, torque_limit <Nm>, "
+              "torque_limit_permille <n>, "
+              "set_node_id <old> <new>, can, can_recover");
 
   bool have_ethernet_status = false;
   bool last_ethernet_status = false;

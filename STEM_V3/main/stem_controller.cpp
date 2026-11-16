@@ -237,17 +237,98 @@ bool StemController::stop() {
 }
 
 bool StemController::stop_unlocked() {
-  // EyouMotor has no separate "halt in place" command: disabling the drive is
-  // the closest DS402 primitive (cuts torque, so the pair coasts to a stop).
-  const bool right_ok = config_.right.disable_drive();
-  const bool left_ok = config_.left.disable_drive();
-  const bool seat_ok = config_.seat.disable_drive();
-  logger_.warn("STOP: right={} left={} seat={}", right_ok, left_ok, seat_ok);
+  // A set-point nobody acknowledged, stuck in the TWAI queue, would delay the
+  // halt frames behind it: drop it first (CanBus::flush_pending, see Config).
+  if (config_.flush_pending_commands) {
+    config_.flush_pending_commands();
+  }
+  // Halt: the drives decelerate with the profile deceleration and HOLD, still
+  // enabled (EyouMotor::halt raises the controlword's halt bit, waits for rest,
+  // and makes the reached position the set-point). A pair whose halt was not
+  // confirmed is disabled instead: coasting beats a pair that may still be
+  // moving towards a target the others abandoned.
+  PairedEyouActuator *pairs[] = {&config_.right, &config_.left, &config_.seat};
+  const char *names[] = {"right", "left", "seat"};
+  bool all_ok = true;
+  for (size_t i = 0; i < 3; ++i) {
+    if (pairs[i]->halt()) {
+      continue;
+    }
+    const bool disabled = pairs[i]->disable_drive();
+    logger_.error("STOP: {} pair did not confirm the halt, drive {}", names[i],
+                  disabled ? "disabled (coasting)" : "NOT disabled either");
+    all_ok = false;
+  }
+  logger_.warn("STOP: {}", all_ok ? "every pair halted and holding" : "see the errors above");
   // the move this interrupted never reached its target: a later seat tilt must
   // offset the MEASURED seat angle (the Eyou branch of set_seat_tilt), not the
   // stale final pose of that move
   target_valid_ = false;
-  return right_ok && left_ok && seat_ok;
+  return all_ok;
+}
+
+void StemController::ensure_rated_torque_unlocked() {
+  if (rated_torque_mnm_.load() != 0) {
+    return;
+  }
+  for (auto &motor : config_.motors) {
+    uint32_t rated = 0;
+    if (motor.get_rated_torque(rated, 50) && rated != 0) {
+      rated_torque_mnm_.store(rated);
+      logger_.info("rated torque {} mNm (motor {}): torque limits can be given in Nm", rated,
+                   motor.node_id());
+      return;
+    }
+  }
+}
+
+StemController::Result StemController::set_torque_limit_nm(float torque_nm) {
+  if (!std::isfinite(torque_nm) || torque_nm < 0.0f) {
+    return Result::InvalidArgument;
+  }
+  {
+    std::lock_guard<std::mutex> lock(mutex_);
+    ensure_rated_torque_unlocked();
+  }
+  const uint32_t rated = rated_torque_mnm_.load();
+  if (rated == 0) {
+    logger_.error("torque limit {:.2f} Nm: the rated torque is not known yet (no motor answered "
+                  "0x6076), give it in per-mille of rated instead",
+                  torque_nm);
+    return Result::InvalidArgument;
+  }
+  const float permille = torque_nm * 1.0e6f / static_cast<float>(rated);
+  if (permille > 65535.0f) {
+    return Result::OutOfLimits;
+  }
+  return set_torque_limit(static_cast<uint16_t>(std::lround(permille)));
+}
+
+StemController::Result StemController::set_torque_limit(uint16_t torque_permille) {
+  if (torque_permille > config_.max_torque_permille) {
+    logger_.warn("torque limit {} permille refused: the device's ceiling is {} (menuconfig)",
+                 torque_permille, config_.max_torque_permille);
+    return Result::OutOfLimits;
+  }
+  std::lock_guard<std::mutex> lock(mutex_);
+  ensure_rated_torque_unlocked();
+  bool ok = true;
+  for (uint8_t i = 0; i < kPairCount; ++i) {
+    if (!actuator(static_cast<Pair>(i)).set_max_torque(torque_permille)) {
+      logger_.error("{} pair did not take the torque limit", stem::to_string(static_cast<Pair>(i)));
+      ok = false;
+    }
+  }
+  torque_limit_permille_.store(torque_permille);
+  const uint32_t rated = rated_torque_mnm_.load();
+  if (rated != 0) {
+    logger_.info("torque limit {} permille of rated = {:.2f} Nm on every motor: {}",
+                 torque_permille, permille_to_nm(torque_permille), ok ? "ok" : "FAILED on some");
+  } else {
+    logger_.info("torque limit {} permille of rated on every motor: {}", torque_permille,
+                 ok ? "ok" : "FAILED on some");
+  }
+  return ok ? Result::Ok : Result::ActuatorFailed;
 }
 
 bool StemController::release_brakes() {
@@ -384,10 +465,35 @@ State StemController::snapshot(bool read_motors) {
       const bool position_ok = motor.get_position(position_degrees, 50);
       const bool statusword_ok = motor.get_statusword(telemetry.statusword, 50);
       const bool error_code_ok = motor.get_error_code(telemetry.error_code, 50);
+      // torque and velocity are for the eye (how hard the linkage pushes, is it
+      // moving): a failed read zeroes them without marking the motor bad
+      if (!motor.get_torque(telemetry.torque_permille, 50)) {
+        telemetry.torque_permille = 0;
+      }
+      if (!motor.get_velocity(telemetry.velocity_deg_s, 50)) {
+        telemetry.velocity_deg_s = 0.0f;
+      }
       telemetry.tracked_deg = position_degrees;
       telemetry.ok = position_ok && statusword_ok && error_code_ok;
       state.motors_ok = state.motors_ok && telemetry.ok;
     }
+  }
+  state.torque_limit_permille = torque_limit_permille_.load();
+  if (read_motors && config_.can_ok) {
+    ensure_rated_torque_unlocked(); // a motor that was off at boot may answer now
+  }
+  state.rated_torque_mnm = rated_torque_mnm_.load();
+  if (config_.can_bus != nullptr && config_.can_ok) {
+    const auto s = config_.can_bus->get_status();
+    state.can.started = true;
+    state.can.bus_off = s.bus_off;
+    state.can.state = s.state;
+    state.can.tx_error_count = s.tx_error_count;
+    state.can.rx_error_count = s.rx_error_count;
+    state.can.bus_error_count = s.bus_error_count;
+    state.can.bus_off_count = s.bus_off_count;
+    state.can.signal_errors = s.stuff_errors + s.form_errors + s.bit_errors;
+    state.can.ack_errors = s.ack_errors;
   }
   return state;
 }

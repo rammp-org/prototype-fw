@@ -67,6 +67,7 @@
     #log .t { color: var(--muted); }
     #log .err { color: var(--err); }
     #log .warn { color: var(--warn); }
+    .warn { color: var(--warn); }
     #log .ok { color: var(--ok); }
     #log .sys { color: var(--accent); }
     a.pill { display: inline-block; text-decoration: none; color: var(--fg); background: var(--panel2);
@@ -152,15 +153,21 @@
           <button id="tiltBtn" disabled>Apply tilt</button>
           <span id="tiltNow" class="muted">device: –</span>
         </div>
+        <div class="row" style="margin-top:10px">
+          <label class="inline"><span id="torqueUnit">torque limit Nm</span> <input id="torqueInput" type="number" step="0.1" min="0" value="" style="width:90px" /></label>
+          <button id="torqueBtn" disabled>Apply limit</button>
+          <span id="torqueNow" class="muted">device: –</span>
+        </div>
         <p class="hint">Positions are read live from each Eyou motor's CANopen encoder (object 0x6064, relative to the saved zero); the pose above is the FK of the live pair positions. "moving" follows the DS402 target-reached bit.
           <b>Zero</b> marks the current position as 0 without moving (CLI <code>zero</code>); <b>Zero-align</b> first drives each motor to its encoder zero (the motors move), then zeros (CLI <code>zero_align</code>) — do this once per power-up after reaching the calibration pose.
-          <b>Seat tilt</b> is an offset the firmware adds to the IK's level seat angle on every move, so it persists as the linkage moves (positive = positive seat-pair rotation).</p>
+          <b>Seat tilt</b> is an offset the firmware adds to the IK's level seat angle on every move, so it persists as the linkage moves (positive = positive seat-pair rotation).
+          <b>Torque limit</b> is every motor's Max torque (CANopen 0x6072), set here in Nm through the rated torque the firmware reads from the motors (the drive stores it as per-thousand of rated; the console falls back to ‰ until a motor has answered): no move pushes harder than this, which is how mechanical limits are found without breaking a linkage. The firmware refuses a value above the ceiling it was built with (menuconfig). <b>STOP</b> halts the drives with the profile deceleration and holds the linkage there (drives stay enabled); a pair that does not confirm the halt is disabled and coasts.</p>
       </div>
 
       <div class="panel">
         <h2>Motor telemetry</h2>
         <table>
-          <thead><tr><th>motor</th><th>pair</th><th>ok</th><th>DS402 state</th><th>statusword</th><th>error</th><th>position °</th></tr></thead>
+          <thead><tr><th>motor</th><th>pair</th><th>ok</th><th>DS402 state</th><th>statusword</th><th>error</th><th>position °</th><th id="torqueCol">torque</th><th>velocity °/s</th></tr></thead>
           <tbody id="motors"></tbody>
         </table>
         <div class="row" style="margin-top:8px">
@@ -168,6 +175,11 @@
           <label class="inline">period ms <input id="periodInput" type="number" min="50" max="5000" step="50" value="200" style="width:80px" /></label>
           <span id="telemAge" class="muted"></span>
         </div>
+        <div class="kv" style="margin-top:8px">
+          <span class="k">CAN controller</span><span id="canState">–</span>
+          <span class="k">CAN errors</span><span id="canCounters">–</span>
+        </div>
+        <p class="hint">The CAN controller's TWAI error state and counters, as the CLI <code>can</code> prints them: stuff/form/bit errors are signal integrity (120 Ω termination at both ends only, every node's isolated CAN ground tied to the bus ground, short stubs, a node at another bitrate); ACK errors mean nobody heard a frame we sent (bus open / nodes off); with no errors, a motor that does not answer is off, at another id or not on this bus. Bus-off recovers automatically (CLI <code>can_recover</code> starts it by hand).</p>
       </div>
 
       <div class="panel">
@@ -200,12 +212,14 @@
     const MODULE_DISCOVERY = 0xFF, T_LIST_MODULES = 0x00;
 
     // ======================= STEM protocol (main/stem_protocol.hpp) =======================
-    const MODULE = 7, PROTOCOL_VERSION = 1;
+    const MODULE = 7, PROTOCOL_VERSION = 2;
     const T = { GET_INFO: 0x10, GET_STATE: 0x11, MOVE_TO: 0x12, SET_PAIR: 0x13, HOME: 0x14, STOP: 0x15,
-                RELEASE: 0x16, ZERO: 0x17, SET_STREAMING: 0x18, SOLVE_IK: 0x19, SET_SEAT_TILT: 0x1A,
+                RELEASE: 0x16, ZERO: 0x17, SET_STREAMING: 0x18, SOLVE_IK: 0x19, SET_SEAT_TILT: 0x1A, SET_TORQUE_LIMIT: 0x1B,
                 OK: 0x81, ERROR: 0x82, INFO: 0x90, STATE: 0x91, MOVED: 0x92, IK_RESULT: 0x93, TELEMETRY: 0x94 };
     const REQ_NAME = {}; for (const [k, v] of Object.entries(T)) REQ_NAME[v] = k;
-    const FLAG = { STREAMING: 1, TARGET_VALID: 2, POSE_VALID: 4, MOTORS_OK: 8, CAN_OK: 16 };
+    const FLAG = { STREAMING: 1, TARGET_VALID: 2, POSE_VALID: 4, MOTORS_OK: 8, CAN_OK: 16, CAN_BUS_OFF: 32 };
+    // v2 CAN block: the controller's TWAI error state (stem_protocol.hpp can_state::)
+    const CAN_STATE = { 0: "not started", 1: "error active", 2: "error warning", 3: "error passive", 4: "BUS OFF", 255: "?" };
     const PAIR_NAMES = ["left", "right", "seat"], ALL_PAIRS = 0xFF;
     const DISCOVERY_TIMEOUT_MS = 800;
 
@@ -213,7 +227,7 @@
     for (const id of ["status","connectUsbBtn","connectSerialBtn","disconnectBtn","anyDevice","unsupported","canvas",
       "poseRel","posePlate","targetRel","targetStatus","thetas","motion","log","xInput","yInput","rpmInput","moveBtn",
       "homeBtn","stopBtn","moveOnRelease","liveDrag","pairs","zeroAllBtn","zeroAlignAllBtn","releaseBtn","tiltInput","tiltBtn","tiltNow","motors","stream","periodInput",
-      "telemAge","devName","devFw","devBuild","devIdf","devModules"]) els[id] = document.getElementById(id);
+      "telemAge","devName","devFw","devBuild","devIdf","devModules","torqueInput","torqueBtn","torqueNow","torqueUnit","canState","canCounters"]) els[id] = document.getElementById(id);
 
     function logLine(cls, text) {
       const line = document.createElement("div");
@@ -426,6 +440,9 @@
     // Pair convention (StemController::pose_to_pair_deg): positive pair rotation = negative crank
     // rotation; the seat carries the device's tilt offset on top of the IK level angle.
     let seatTilt = 0;
+    let torqueLimit = null, torqueCeiling = null, ratedTorqueMnm = 0; // protocol v2 (null: not reported; rated 0: unknown, ‰ until known)
+    const torqueNm = () => ratedTorqueMnm > 0; // the control is in Nm once the rated torque is known
+    const pmToNm = (pm) => pm * ratedTorqueMnm / 1e6, nmToPm = (nm) => Math.round(nm * 1e6 / ratedTorqueMnm);
     const pairsFromSolution = (s) => [-s.theta1Rel, -s.theta2Rel, -s.m3AngleRel + seatTilt];
     const withinLimits = (pairs) => pairs.every(p => p >= limits.min && p <= limits.max);
 
@@ -538,6 +555,7 @@
       setPair: (pair, degrees, rpm) => { const b = new Uint8Array(9), dv = new DataView(b.buffer); b[0] = pair; dv.setFloat32(1, degrees, true); dv.setFloat32(5, rpm, true); return b; },
       zero: (pair, align) => new Uint8Array([pair, align ? 1 : 0]),
       streaming: (enable, period) => { const b = new Uint8Array(3); b[0] = enable ? 1 : 0; new DataView(b.buffer).setUint16(1, period, true); return b; },
+      torqueLimit: (permille) => { const b = new Uint8Array(2); new DataView(b.buffer).setUint16(0, permille, true); return b; },
     };
     class Reader {
       constructor(p) { this.p = p; this.dv = new DataView(p.buffer, p.byteOffset, p.byteLength); this.i = 0; }
@@ -559,13 +577,24 @@
       info.geometry = g;
       info.reference = { x: r.f32(), y: r.f32(), m1: r.f32(), m2: r.f32(), m3: r.f32() };
       info.moveRpm = r.f32(); info.setRpm = r.f32(); info.maxRpm = r.f32(); info.period = r.u16(); info.streaming = r.u8() !== 0;
+      // v2 (protocol version >= 2, and the bytes are there): the torque limit in force and the device's ceiling
+      if (info.version >= 2 && r.p.length - r.i >= 4) { info.torqueLimit = r.u16(); info.torqueCeiling = r.u16(); info.ratedTorqueMnm = r.p.length - r.i >= 4 ? r.u32() : 0; }
       return info;
     }
     function decodeState(p) {
       const r = new Reader(p), s = { uptime: r.u32(), flags: r.u8(), targetX: r.f32(), targetY: r.f32(), poseX: r.f32(), poseY: r.f32(), pairs: [r.f32(), r.f32(), r.f32()], seatTilt: r.f32(), motors: [] };
       const n = r.u8();
-      // V3 motor record (stem_protocol.hpp): u8 id, u8 ok, u16 statusword, u16 error_code, f32 position deg (live, 0x6064)
-      for (let i = 0; i < n; i++) s.motors.push({ id: r.u8(), ok: r.u8() !== 0, statusword: r.u16(), errorCode: r.u16(), tracked: r.f32() });
+      // V3 motor record (stem_protocol.hpp): u8 id, u8 ok, u16 statusword, u16 error_code, f32 position deg (live, 0x6064);
+      // protocol v2 appends i16 torque permille, f32 velocity deg/s per motor and a 21-byte CAN block after the motors
+      // (a v1 device sends 10 bytes per motor and nothing after): told apart by the payload length.
+      const V1_MOTOR = 10, V2_MOTOR = 16, CAN_BLOCK = 21;
+      const v2 = (p.length - r.i) >= n * V2_MOTOR + CAN_BLOCK;
+      for (let i = 0; i < n; i++) {
+        const m = { id: r.u8(), ok: r.u8() !== 0, statusword: r.u16(), errorCode: r.u16(), tracked: r.f32(), torque: null, velocity: null };
+        if (v2) { m.torque = r.i16(); m.velocity = r.f32(); }
+        s.motors.push(m);
+      }
+      if (v2) s.can = { state: r.u8(), tec: r.u16(), rec: r.u16(), busErrors: r.u32(), busOffCount: r.u32(), signalErrors: r.u32(), ackErrors: r.u32() };
       return s;
     }
 
@@ -603,7 +632,9 @@
         else if (f.type === T.INFO) onInfo(decodeInfo(f.payload));
         else if (f.type === T.MOVED) { const r = new Reader(f.payload); const x = r.f32(), y = r.f32(), pairs = [r.f32(), r.f32(), r.f32()];
           logLine("ok", "moving to x_rel " + x.toFixed(1) + ", y_rel " + y.toFixed(1) + " -> pairs " + pairs.map(v => v.toFixed(2)).join(" / ") + "°"); }
-        else if (f.type === T.OK) { const r = new Reader(f.payload); const req = r.u8(), value = r.u32(); logLine("ok", (REQ_NAME[req] || ("0x" + req.toString(16))) + " ok" + (req === T.SET_STREAMING ? " (period " + value + " ms)" : "")); }
+        else if (f.type === T.OK) { const r = new Reader(f.payload); const req = r.u8(), value = r.u32();
+          logLine("ok", (REQ_NAME[req] || ("0x" + req.toString(16))) + " ok" + (req === T.SET_STREAMING ? " (period " + value + " ms)" : req === T.SET_TORQUE_LIMIT ? " (" + (torqueNm() ? pmToNm(value).toFixed(2) + " Nm = " : "") + value + " ‰ of rated on every motor)" : ""));
+          if (req === T.SET_TORQUE_LIMIT) { torqueLimit = value; renderTorque(); } }
         else if (f.type === T.ERROR) { const r = new Reader(f.payload); const req = r.u8(), code = r.u32(); logLine("err", (REQ_NAME[req] || ("0x" + req.toString(16))) + " error " + code + ": " + r.rest()); }
         else if (f.type === T.IK_RESULT) { const r = new Reader(f.payload); const x = r.f32(), y = r.f32(), reach = r.u8(), ok = r.u8(); logLine("sys", "device IK (" + x.toFixed(1) + ", " + y.toFixed(1) + "): " + (reach ? (ok ? "reachable, within limits" : "reachable, outside limits") : "unreachable")); }
       } catch (e) { logLine("err", "malformed frame type 0x" + f.type.toString(16) + ": " + (e.message || e)); }
@@ -613,6 +644,15 @@
       geometry = info.geometry; reference = info.reference;
       if (info.pairs.length) { limits = { min: info.pairs[0].min, max: info.pairs[0].max }; motorsMeta = info.pairs; }
       els.rpmInput.value = info.moveRpm; els.rpmInput.max = info.maxRpm;
+      if (info.torqueLimit !== undefined) {
+        torqueLimit = info.torqueLimit; torqueCeiling = info.torqueCeiling; ratedTorqueMnm = info.ratedTorqueMnm || 0;
+        els.torqueUnit.textContent = torqueNm() ? "torque limit Nm" : "torque limit ‰";
+        els.torqueInput.step = torqueNm() ? "0.1" : "10";
+        els.torqueInput.value = torqueNm() ? Number(pmToNm(torqueLimit).toFixed(2)) : torqueLimit;
+        els.torqueInput.max = torqueNm() ? Number(pmToNm(torqueCeiling).toFixed(2)) : torqueCeiling;
+      } else { torqueLimit = null; torqueCeiling = null; ratedTorqueMnm = 0; }
+      renderTorque();
+      if (info.version < PROTOCOL_VERSION) logLine("warn", "device protocol v" + info.version + " is older than this console (v" + PROTOCOL_VERSION + "): torque limit, torque / velocity and CAN status are not available");
       logLine("sys", "info: " + info.project + " " + info.fw + " · protocol v" + info.version + " · reference (" + reference.x + ", " + reference.y + ") · limits [" + limits.min + ", " + limits.max + "]°");
       drawStatic(); renderPairs(); refreshTarget(target.x, target.y); refreshCurrent();
     }
@@ -624,8 +664,8 @@
       if (s.flags & FLAG.TARGET_VALID) { /* keep the user's target; show the device's in the log only on change */ }
       // DS402 statusword bit 10 = target reached (profile position): clear while a move is in progress
       const moving = s.motors.some(m => m.ok && (m.statusword & 0x0400) === 0 && (m.statusword & 0x0004) !== 0);
-      els.motion.className = moving ? "good" : ""; els.motion.textContent = (moving ? "moving" : "idle") + (s.flags & FLAG.CAN_OK ? "" : " · CAN DOWN") + (s.flags & FLAG.MOTORS_OK ? "" : " · motor status missing");
-      renderPairs(); renderMotors(s.motors);
+      els.motion.className = moving ? "good" : ""; els.motion.textContent = (moving ? "moving" : "idle") + (s.flags & FLAG.CAN_OK ? "" : " · CAN DOWN") + (s.flags & FLAG.CAN_BUS_OFF ? " · CAN BUS OFF" : "") + (s.flags & FLAG.MOTORS_OK ? "" : " · motor status missing");
+      renderPairs(); renderMotors(s.motors); renderCan(s);
       if (!isTelemetry) logLine("sys", "state: pairs " + s.pairs.map(v => v.toFixed(2)).join(" / ") + "° · uptime " + (s.uptime / 1000).toFixed(0) + " s");
     }
     function renderPairs() {
@@ -661,16 +701,36 @@
     }
     function renderMotors(motors) {
       els.motors.innerHTML = "";
+      document.getElementById("torqueCol").textContent = torqueNm() ? "torque Nm" : "torque ‰";
       for (const m of motors) {
         const tr = document.createElement("tr");
         const pair = motorsMeta.find(p => p.primary === m.id || p.secondary === m.id);
         const faulted = m.ok && (m.statusword & 0x0008) !== 0;
         const cells = [m.id, pair ? pair.name : "–", m.ok ? "✓" : "✗", m.ok ? ds402StateName(m.statusword) : "–",
                        m.ok ? "0x" + m.statusword.toString(16).padStart(4, "0") : "–",
-                       m.ok ? (m.errorCode ? "0x" + m.errorCode.toString(16).padStart(4, "0") : "none") : "–", m.tracked.toFixed(2)];
-        cells.forEach((c, i) => { const td = document.createElement("td"); td.textContent = c; if ((i === 2 && !m.ok) || (i === 3 && faulted)) td.className = "bad"; tr.appendChild(td); });
+                       m.ok ? (m.errorCode ? "0x" + m.errorCode.toString(16).padStart(4, "0") : "none") : "–", m.tracked.toFixed(2),
+                       m.torque === null ? "–" : (torqueNm() ? pmToNm(m.torque).toFixed(2) : String(m.torque)), m.velocity === null ? "–" : m.velocity.toFixed(1)];
+        cells.forEach((c, i) => { const td = document.createElement("td"); td.textContent = c; if ((i === 2 && !m.ok) || (i === 3 && faulted)) td.className = "bad";
+          if (i === 7 && torqueLimit && m.torque !== null && Math.abs(m.torque) >= 0.9 * torqueLimit) td.className = "warn"; tr.appendChild(td); });
         els.motors.appendChild(tr);
       }
+    }
+    function renderTorque() {
+      if (torqueLimit === null) els.torqueNow.textContent = "device: – (protocol v1: no torque limit)";
+      else if (torqueNm()) els.torqueNow.textContent = "device: " + pmToNm(torqueLimit).toFixed(2) + " Nm (" + torqueLimit + " ‰ of the rated " + (ratedTorqueMnm / 1000).toFixed(2) + " Nm; ceiling " + pmToNm(torqueCeiling).toFixed(2) + " Nm)";
+      else els.torqueNow.textContent = "device: " + torqueLimit + " ‰ of rated (ceiling " + torqueCeiling + " ‰; the rated torque is not known yet, so no Nm)";
+      els.torqueBtn.disabled = !transport || torqueLimit === null;
+    }
+    function renderCan(s) {
+      if (!s.can) { els.canState.textContent = "– (protocol v1)"; els.canCounters.textContent = "–"; return; }
+      const c = s.can, name = CAN_STATE[c.state] || "?";
+      els.canState.textContent = name + (c.busOffCount ? " · bus-off " + c.busOffCount + "× since start" : "");
+      els.canState.className = c.state === 4 ? "bad" : (c.state === 2 || c.state === 3) ? "warn" : "";
+      const hints = [];
+      if (c.signalErrors) hints.push("signal integrity");
+      if (c.ackErrors) hints.push("frames not acknowledged");
+      els.canCounters.textContent = "TEC " + c.tec + " · REC " + c.rec + " · bus errors " + c.busErrors + " · stuff/form/bit " + c.signalErrors + " · ack " + c.ackErrors + (hints.length ? " — " + hints.join(", ") : "");
+      els.canCounters.className = (c.signalErrors || c.ackErrors) ? "warn" : "";
     }
     setInterval(() => {
       if (!transport || !els.stream.checked) { els.telemAge.textContent = ""; return; }
@@ -728,6 +788,8 @@
       els.disconnectBtn.disabled = !on;
       for (const b of [els.homeBtn, els.stopBtn, els.zeroAllBtn, els.zeroAlignAllBtn, els.releaseBtn, els.tiltBtn]) b.disabled = !on;
       els.moveBtn.disabled = !on || !targetOk;
+      if (!on) { torqueLimit = null; torqueCeiling = null; ratedTorqueMnm = 0; els.torqueInput.value = ""; els.canState.textContent = "–"; els.canCounters.textContent = "–"; els.canState.className = ""; els.canCounters.className = ""; }
+      renderTorque();
       renderPairs();
     }
 
@@ -741,6 +803,17 @@
     els.zeroAlignAllBtn.addEventListener("click", () => { if (window.confirm("Zero-align ALL pairs? Every motor will MOVE to its encoder zero, then all pairs are zeroed. Do this at the calibration pose.")) send(T.ZERO, enc.zero(ALL_PAIRS, true)); });
     els.tiltBtn.addEventListener("click", () => send(T.SET_SEAT_TILT, enc.f32s(Number(els.tiltInput.value) || 0, 0)));
     els.tiltInput.addEventListener("keydown", (ev) => { if (ev.key === "Enter") els.tiltBtn.click(); });
+    els.torqueBtn.addEventListener("click", () => {
+      const raw = Number(els.torqueInput.value);
+      if (!Number.isFinite(raw) || raw < 0) { logLine("warn", "torque limit must be a number" + (torqueNm() ? " in Nm" : " in ‰ of rated")); return; }
+      const v = torqueNm() ? nmToPm(raw) : Math.round(raw);
+      const describe = (pm) => torqueNm() ? pmToNm(pm).toFixed(2) + " Nm (" + pm + " ‰)" : pm + " ‰";
+      if (!(v >= 0 && v <= 65535)) { logLine("warn", "torque limit out of range"); return; }
+      if (torqueCeiling !== null && v > torqueCeiling) { logLine("warn", "torque limit " + describe(v) + " is above the device's ceiling (" + describe(torqueCeiling) + ", menuconfig); not sent"); return; }
+      logLine("tx", "set torque limit " + describe(v));
+      send(T.SET_TORQUE_LIMIT, enc.torqueLimit(v));
+    });
+    els.torqueInput.addEventListener("keydown", (ev) => { if (ev.key === "Enter") els.torqueBtn.click(); });
     els.releaseBtn.addEventListener("click", () => { if (window.confirm("Release all motor brakes? The seat will be free to move.")) send(T.RELEASE); });
     if (!navigator.usb) els.connectUsbBtn.disabled = true;
     if (!navigator.serial) els.connectSerialBtn.disabled = true;

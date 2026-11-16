@@ -44,6 +44,18 @@ bool PairedEyouActuator::disable_drive(uint32_t timeout_ms) {
   return primary_ok && secondary_ok;
 }
 
+bool PairedEyouActuator::halt(uint32_t timeout_ms) {
+  const bool primary_ok = primary_.halt(timeout_ms);
+  const bool secondary_ok = secondary_.halt(timeout_ms);
+  return primary_ok && secondary_ok;
+}
+
+bool PairedEyouActuator::set_max_torque(uint16_t torque_permille, uint32_t timeout_ms) {
+  const bool primary_ok = primary_.set_max_torque(torque_permille, timeout_ms);
+  const bool secondary_ok = secondary_.set_max_torque(torque_permille, timeout_ms);
+  return primary_ok && secondary_ok;
+}
+
 bool PairedEyouActuator::reset_fault(uint32_t timeout_ms) {
   const bool primary_ok = primary_.reset_fault(timeout_ms);
   const bool secondary_ok = secondary_.reset_fault(timeout_ms);

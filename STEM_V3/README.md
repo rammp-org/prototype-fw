@@ -30,7 +30,31 @@ swaps the actuator layer for `EyouMotor`/`PairedEyouActuator`.
   whose pair angles fall outside the limits are **rejected**, not clamped.
 - **Console CLI** (USB-Serial-JTAG / UART0): `move <x_rel> <y_rel>`, `home`,
   `stop`, `set <pair> <deg>`, `get`, `status`, `release`, `zero <pair|all>`,
-  `zero_align <pair|all>`, `ik <x> <y>`, `ik_ref <x_rel> <y_rel>`.
+  `zero_align <pair|all>`, `ik <x> <y>`, `ik_ref <x_rel> <y_rel>`,
+  `torque_limit <permille>`, `set_node_id <old> <new>`, `can`, `can_recover`.
+- **Safety, from the single-actuator test stand and the PEAR base**
+  (`main/stem_controller.*`, `main/Kconfig.projbuild`):
+  - every motor's **torque limit** (CANopen Max torque 0x6072, per-thousand
+    of the rated torque) is written before the drives are enabled
+    (`STEM_BOOT_TORQUE_PERMILLE`, default 300) and may be raised from the
+    console / CLI up to the ceiling the firmware was built with
+    (`STEM_MAX_TORQUE_PERMILLE`, default 500) - a browser cannot ask the
+    linkage to push harder than the person who flashed it allowed; a move
+    cannot exceed the limit in any mode;
+  - **STOP halts** the drives with the profile deceleration and holds the
+    linkage there, drives enabled (`EyouMotor::halt`); a pair that does not
+    confirm the halt is disabled and coasts. The old stop disabled everything,
+    and the linkage sagged under its own weight. A set-point nobody
+    acknowledged, stuck in the TWAI queue, is flushed first so the halt does
+    not queue behind it;
+  - the drives are put in profile-position mode **before** the DS402 enable
+    sequence (a fresh Eyou drive refuses the enable otherwise);
+  - the **CAN controller's** error state and counters (TWAI; wiring /
+    bitrate diagnosis) are in the telemetry and the CLI `can`; bus-off
+    recovers automatically (`can_recover` by hand). The CAN driver retries a
+    frame that lost arbitration to a drive's reply instead of dropping it;
+  - `set_node_id` re-addresses a replacement actuator in place (both Node-ID
+    objects, saved, communication reset), then that motor object follows it.
 - **Native USB** (`main/main.cpp`): an espp *dispatcher* device on the P4's
   USB-OTG port — a composite WebUSB vendor interface + CDC-ACM port, each
   carrying [`stream_frame`](https://github.com/esp-cpp/espp/tree/main/components/stream_frame)
@@ -48,7 +72,10 @@ swaps the actuator layer for `EyouMotor`/`PairedEyouActuator`.
   the core-dump console.
 - **Web console** (`web/stem_console.html`): draws the linkage from the
   firmware's measured pose, lets you drag the end effector to move it, sends
-  direct pose / pair commands and streams motor telemetry. See `web/README.md`.
+  direct pose / pair commands, sets the torque limit, and streams motor
+  telemetry (DS402 state, position, torque, velocity) and the CAN controller's
+  state. Protocol v2 (`main/stem_protocol.hpp`); a v1 device still works
+  without the new fields. See `web/README.md`.
 
 Note on "current pose": each Eyou motor reports its actual output position
 over CANopen (object 0x6064, relative to the saved software zero), and the

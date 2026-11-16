@@ -2,6 +2,7 @@
 
 #include <algorithm>
 #include <cmath>
+#include <string_view>
 #include <system_error>
 
 #include "esp_timer.h"
@@ -32,7 +33,7 @@ espp::Dispatcher::ModuleInfo StemModule::module_info() {
           .app = "stem_console.html",
           .description = "5-bar seat linkage: live pose, drag-to-move, pair control, telemetry",
           .protocol = "rammp.stem",
-          .protocol_version = 1};
+          .protocol_version = proto::kProtocolVersion};
 }
 
 bool StemModule::streaming(Transport transport) const {
@@ -111,8 +112,35 @@ std::vector<uint8_t> StemModule::build_info(Transport transport) const {
   proto::put_f32(payload, cfg.max_rpm);
   proto::put_u16(payload, stream_period_ms(transport)); // this stream's period
   payload.push_back(streaming(transport) ? 1 : 0);
+  // v2
+  proto::put_u16(payload, config_.controller.torque_limit());
+  proto::put_u16(payload, cfg.max_torque_permille);
+  proto::put_u32(payload, config_.controller.rated_torque_mnm());
   return proto::build(Msg::Info, payload);
 }
+
+namespace {
+// CanBus::Status::state is the driver's wording; the wire carries a byte.
+uint8_t can_state_byte(const CanTelemetry &can) {
+  if (!can.started) {
+    return proto::can_state::kNotStarted;
+  }
+  if (can.bus_off) {
+    return proto::can_state::kBusOff;
+  }
+  const std::string_view state{can.state != nullptr ? can.state : ""};
+  if (state.find("passive") != std::string_view::npos) {
+    return proto::can_state::kErrorPassive;
+  }
+  if (state.find("warning") != std::string_view::npos) {
+    return proto::can_state::kErrorWarning;
+  }
+  if (state.find("active") != std::string_view::npos) {
+    return proto::can_state::kErrorActive;
+  }
+  return proto::can_state::kUnknown;
+}
+} // namespace
 
 std::vector<uint8_t> StemModule::build_state_frame(Msg type, const State &state,
                                                    Transport transport) const {
@@ -129,6 +157,8 @@ std::vector<uint8_t> StemModule::build_state_frame(Msg type, const State &state,
     flags |= proto::flags::kMotorsOk;
   if (state.can_ok)
     flags |= proto::flags::kCanOk;
+  if (state.can.bus_off)
+    flags |= proto::flags::kCanBusOff;
   payload.push_back(flags);
   proto::put_f32(payload, state.target_x);
   proto::put_f32(payload, state.target_y);
@@ -145,7 +175,17 @@ std::vector<uint8_t> StemModule::build_state_frame(Msg type, const State &state,
     proto::put_u16(payload, motor.statusword);
     proto::put_u16(payload, motor.error_code);
     proto::put_f32(payload, motor.tracked_deg);
+    proto::put_i16(payload, motor.torque_permille); // v2
+    proto::put_f32(payload, motor.velocity_deg_s);  // v2
   }
+  // v2 CAN controller block
+  payload.push_back(can_state_byte(state.can));
+  proto::put_u16(payload, state.can.tx_error_count);
+  proto::put_u16(payload, state.can.rx_error_count);
+  proto::put_u32(payload, state.can.bus_error_count);
+  proto::put_u32(payload, state.can.bus_off_count);
+  proto::put_u32(payload, state.can.signal_errors);
+  proto::put_u32(payload, state.can.ack_errors);
   return proto::build(type, payload);
 }
 
@@ -302,6 +342,22 @@ void StemModule::handle_frame(const espp::stream_frame::Frame &frame, Transport 
       break;
     }
     reply_result(controller.set_seat_tilt(*tilt, *rpm), "seat tilt rejected");
+    break;
+  }
+
+  case Msg::SetTorqueLimit: {
+    const auto permille = proto::get_u16_at(payload, 0);
+    if (payload.size() != 2 || !permille) {
+      bad_args("SET_TORQUE_LIMIT needs u16 permille of the rated torque");
+      break;
+    }
+    const Result result = controller.set_torque_limit(*permille);
+    if (result == Result::Ok)
+      send(proto::make_ok(request, *permille));
+    else
+      send(error_for(request, result,
+                     result == Result::OutOfLimits ? "torque limit above the device's ceiling"
+                                                   : "torque limit"));
     break;
   }
 
