@@ -269,6 +269,12 @@ protected:
       send(Reply::IkResult, result.serialize());
       return;
     }
+    case Request::JogMotor: {
+      const auto req = proto::SetMotor::parse(payload); // same shape: [motor u8][f32]
+      if (!req)
+        return malformed("short payload");
+      return finish(controller_.jog_motor(req->motor, req->degrees), "jog motor");
+    }
     case Request::RecoverCan:
       finish_bool(controller_.recover_can(), "CAN bus-off recovery");
       return;

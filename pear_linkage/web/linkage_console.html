@@ -206,6 +206,7 @@
             <span><i style="background:var(--link3)"></i>coupler J1→J3</span>
             <span><i style="background:var(--ee)"></i>end effector M3</span>
             <span><i style="background:var(--target);opacity:.6"></i>target (drag)</span>
+            <span><i style="background:transparent;border-top:2px dashed #9aa6ba;height:0;border-radius:0"></i>home pose (zero reference, always drawn)</span>
           </div>
           <div class="readouts">
             <div><span class="k">pose x / y</span><span class="v" id="poseXY">-</span></div>
@@ -263,15 +264,15 @@
               <span class="k" title="On which side of the J1 -> J2 line the joint J3 folds: a fixed property of the machine">J3 side of J1→J2</span><select id="gSide"><option value="0">counter-clockwise</option><option value="1">clockwise</option></select><span></span>
               <span class="k" title="The Home pose, and the ik's branch reference while no pose is measured">home θ1 / θ2</span><span class="pair"><input type="number" id="hTheta1" step="1"><input type="number" id="hTheta2" step="1"></span><button class="small" id="hUseCurrentBtn" title="Copy the measured crank angles">use current</button>
               <h3>Motor 1 (crank 1, M1)</h3>
-              <span class="k" title="The CANopen node id the drive on this crank answers on (0 = no motor on this crank). Apply makes the device talk to that id; it does not change the drive.">node id</span><input type="number" id="mNode1" min="0" max="127" step="1"><span class="note" id="mNodeNote1"></span>
-              <span class="k" title="Re-address the DRIVE on this crank: writes the new id into both of its Node-ID objects, saves them and resets its communication (~5 s). On success the node id above follows it and is saved. 'saved, needs a power cycle' means the drive keeps its old id until power-cycled: then set the node id above by hand.">re-address drive to</span><span class="pair"><input type="number" id="mNewNode1" min="1" max="127" step="1" placeholder="new id"><button class="small" id="mProgram1" disabled>Program drive</button></span>
+              <span class="k" title="The CANopen node id the drive on this crank answers on (0 = no motor on this crank). Apply makes the device talk to that id; it does not change the drive.">node id</span><input type="number" id="mNode1" min="0" max="127" step="1"><span class="u" id="mNodeNote1"></span>
+              <span class="k" title="Re-address the DRIVE on this crank: writes the new id into both of its Node-ID objects, saves them and resets its communication (~5 s). On success the node id above follows it and is saved. 'saved, needs a power cycle' means the drive keeps its old id until power-cycled: then set the node id above by hand.">re-address drive to</span><span class="pair"><input type="number" id="mNewNode1" min="1" max="127" step="1" placeholder="new id"><button class="small" id="mProgram1" disabled>Program drive</button></span><span></span>
               <span class="k" title="+1: a positive motor angle turns the crank counter-clockwise; -1: clockwise">direction</span><select id="mDir1"><option value="1">+1 (motor + = crank CCW)</option><option value="-1">-1 (motor + = crank CW)</option></select><span></span>
               <span class="k" title="Motor angle limits (motor degrees from its zero); moves outside are refused">limits min / max</span><span class="pair"><input type="number" id="mMin1" step="1"><input type="number" id="mMax1" step="1"></span><span class="u">deg</span>
               <span class="k" title="The crank's angle in the linkage frame when the motor reads 0">crank angle at zero</span><input type="number" id="mZeroTheta1" step="1"><span class="u">deg</span>
               <span class="k" title="Max torque (object 0x6072): set in Nm once the drive has reported its rated torque (stored and sent as per-thousand of rated); the device's ceiling caps it">torque limit</span><input type="number" id="mTorque1" min="0" max="3000" step="10"><span class="u" id="mTorqueUnit1">‰</span>
               <h3>Motor 2 (crank 2, M2)</h3>
-              <span class="k">node id</span><input type="number" id="mNode2" min="0" max="127" step="1"><span class="note" id="mNodeNote2"></span>
-              <span class="k">re-address drive to</span><span class="pair"><input type="number" id="mNewNode2" min="1" max="127" step="1" placeholder="new id"><button class="small" id="mProgram2" disabled>Program drive</button></span>
+              <span class="k">node id</span><input type="number" id="mNode2" min="0" max="127" step="1"><span class="u" id="mNodeNote2"></span>
+              <span class="k">re-address drive to</span><span class="pair"><input type="number" id="mNewNode2" min="1" max="127" step="1" placeholder="new id"><button class="small" id="mProgram2" disabled>Program drive</button></span><span></span>
               <span class="k">direction</span><select id="mDir2"><option value="1">+1 (motor + = crank CCW)</option><option value="-1">-1 (motor + = crank CW)</option></select><span></span>
               <span class="k">limits min / max</span><span class="pair"><input type="number" id="mMin2" step="1"><input type="number" id="mMax2" step="1"></span><span class="u">deg</span>
               <span class="k">crank angle at zero</span><input type="number" id="mZeroTheta2" step="1"><span class="u">deg</span>
@@ -334,7 +335,8 @@
     const T_GET_INFO = 0x10, T_GET_STATUS = 0x11, T_SET_STREAM = 0x12, T_GET_SETTINGS = 0x13, T_SET_SETTINGS = 0x14,
           T_RESET_SETTINGS = 0x15, T_MOVE_TO = 0x16, T_MOVE_BY = 0x17, T_HOME = 0x18, T_SET_MOTOR = 0x19,
           T_ENABLE = 0x1B, T_DISABLE = 0x1C, T_RESET_FAULT = 0x1D, T_HALT = 0x1E, T_ZERO_MOTOR = 0x1F,
-          T_SAVE_ZERO = 0x20, T_LOAD_ZERO = 0x21, T_SOLVE_IK = 0x22, T_RECOVER_CAN = 0x23, T_SET_DRIVE_NODE_ID = 0x24;
+          T_SAVE_ZERO = 0x20, T_LOAD_ZERO = 0x21, T_SOLVE_IK = 0x22, T_RECOVER_CAN = 0x23, T_SET_DRIVE_NODE_ID = 0x24, T_JOG_MOTOR = 0x25;
+    const JOG_MAX_DEG = 10; // linkage_protocol::kJogMaxDeg
     const CONSOLE_PROTOCOL_VERSION = 2;
     const CAN_STATE = { 0: "not started", 1: "error active", 2: "error warning", 3: "error passive", 4: "BUS OFF", 255: "?" };
     // replies
@@ -1179,7 +1181,7 @@
     const NS = "http://www.w3.org/2000/svg";
     const svg = els.canvas;
     const layers = {};
-    for (const name of ["workspace", "grid", "ground", "target", "current", "labels"]) { const g = document.createElementNS(NS, "g"); g.id = "L_" + name; svg.appendChild(g); layers[name] = g; }
+    for (const name of ["workspace", "grid", "ground", "home", "target", "current", "labels"]) { const g = document.createElementNS(NS, "g"); g.id = "L_" + name; svg.appendChild(g); layers[name] = g; }
     function el(tag, attrs, parent) { const e = document.createElementNS(NS, tag); for (const [k, v] of Object.entries(attrs)) e.setAttribute(k, v); (parent || svg).appendChild(e); return e; }
     const S = (p) => [p[0], -p[1]]; // linkage frame (y up) -> SVG (y down)
     function line(p, q, color, width, parent, extra = {}) { const a = S(p), b = S(q); return el("line", { x1: a[0], y1: a[1], x2: b[0], y2: b[1], stroke: color, "stroke-width": width, "stroke-linecap": "round", ...extra }, parent); }
@@ -1248,7 +1250,7 @@
       clear(layer);
       if (!s) return;
       const g = settings.geometry, m1 = [0, 0], m2 = [g.m2_x, g.m2_y];
-      const op = opts.opacity, w = strokeW(opts.width), extra = { opacity: op };
+      const op = opts.opacity, w = strokeW(opts.width), extra = opts.dash ? { opacity: op, "stroke-dasharray": strokeW(5) + " " + strokeW(4) } : { opacity: op };
       const c1 = opts.bad ? "var(--danger)" : "var(--link1)", c2 = opts.bad ? "var(--danger)" : "var(--link2)", c3 = opts.bad ? "var(--danger)" : "var(--link3)", c4 = opts.bad ? "var(--danger)" : "var(--link4)";
       line(m1, s.j2, c1, w, layer, extra); line(m2, s.j1, c2, w, layer, extra);
       line(s.j1, s.j3, c3, w, layer, extra); line(s.j2, s.j3, c4, w, layer, extra);
@@ -1259,7 +1261,15 @@
       el("circle", { cx: S(s.m3)[0], cy: S(s.m3)[1], r: Math.max(6, view.w * 0.045), fill: "none", stroke: opts.bad ? "var(--danger)" : "var(--ee)", "stroke-width": strokeW(0.6), opacity: op * 0.7 }, layer);
       if (opts.labels) text(s.m3, "M3", layer, { "font-weight": 600 });
     }
-    function onGeometryChanged() { computeWorkspace(); drawWorkspace(); drawStatic(); refreshCurrent(); refreshTarget(target.x, target.y); }
+    // The home pose, from the settings' home crank angles: always on the drawing
+    // (dashed), so that while each motor is jogged into position before its zero
+    // is set, the real linkage can be matched to it by eye.
+    function drawHome() {
+      const h = solveFk(settings.home_theta1, settings.home_theta2, settings.geometry);
+      drawPose(layers.home, h, { opacity: 0.45, width: 1.4, handle: false, bad: false, labels: false, dash: true });
+      if (h) text(h.m3, "home", layers.home, { fill: "#9aa6ba", "font-style": "italic" });
+    }
+    function onGeometryChanged() { computeWorkspace(); drawWorkspace(); drawStatic(); drawHome(); refreshCurrent(); refreshTarget(target.x, target.y); }
 
     // ===================== State =====================
     let lastStatus = null, currentSolution = null;
@@ -1344,6 +1354,7 @@
             '<span><span class="k">torque / limit</span><span class="v" data-r="torque">-</span></span>' +
             '<span><span class="k">current</span><span class="v" data-r="current">-</span></span>' +
             '<span><span class="k">zero</span><span class="v" data-r="zero">-</span></span>' +
+            '<span title="The motor angle this motor reads at the home pose (settings: home crank angle, direction, crank angle at zero). Jog the real crank to the dashed home pose, then Zero here (or \'crank is at\' with the home angle)."><span class="k">at home</span><span class="v" data-r="athome">-</span></span>' +
           '</div>' +
           '<div class="btns">' +
             '<button class="small ok" data-b="enable" disabled>Enable</button><button class="small" data-b="disable" disabled>Disable</button>' +
@@ -1356,6 +1367,14 @@
             '<label>crank is at <input type="number" class="tiny" data-i="crank" value="0" step="1"> °</label><button class="small" data-b="zeroCrank" disabled title="Tell the device where the crank physically is now (linkage frame, CCW from +x): it sets the motor\'s zero accordingly, using the configured direction and crank angle at zero">Set</button>' +
             '<button class="small" data-b="saveZero" disabled title="Persist this motor\'s software zero on the device (NVS, per node id)">Save zero</button>' +
             '<button class="small" data-b="loadZero" disabled title="Reload the saved software zero">Load zero</button>' +
+          '</div>' +
+          '<div class="btns" style="align-items:center;" title="Jog: move this motor by the step from where it is, ignoring the position limits (which a pre-zero encoder angle is usually outside of). For bringing the real linkage to the dashed home pose before zeroing. Needs the drive enabled; at most ' + JOG_MAX_DEG + '° per press.">' +
+            '<span class="k">jog</span>' +
+            '<button class="small" data-b="jogM5" disabled>-5°</button><button class="small" data-b="jogM1" disabled>-1°</button>' +
+            '<label><input type="number" class="tiny" data-i="jog" value="0.5" min="0.01" max="' + JOG_MAX_DEG + '" step="0.1"> °</label>' +
+            '<button class="small" data-b="jogMinus" disabled>-step</button><button class="small" data-b="jogPlus" disabled>+step</button>' +
+            '<button class="small" data-b="jogP1" disabled>+1°</button><button class="small" data-b="jogP5" disabled>+5°</button>' +
+            '<span class="muted">pre-zero positioning (limits ignored)</span>' +
           '</div>';
         els.motors.appendChild(card);
         const r = {}; card.querySelectorAll("[data-r]").forEach((e) => { r[e.dataset.r] = e; });
@@ -1368,6 +1387,10 @@
         b.halt.addEventListener("click", () => { logLine("tx", "halt motor " + (k + 1)); send(T_HALT, encU8(k)); });
         b.set.addEventListener("click", () => { const v = num(i.set); logLine("tx", "motor " + (k + 1) + " -> " + v.toFixed(2) + "°"); send(T_SET_MOTOR, encSetMotor(k, v)); });
         i.set.addEventListener("keydown", (e) => { if (e.key === "Enter" && !b.set.disabled) b.set.click(); });
+        const jog = (d) => { if (!(Math.abs(d) <= JOG_MAX_DEG) || d === 0) { logLine("err", "jog step must be 0.01.." + JOG_MAX_DEG + "°"); return; } logLine("tx", "motor " + (k + 1) + " jog " + (d > 0 ? "+" : "") + d.toFixed(2) + "° (limits ignored)"); send(T_JOG_MOTOR, encSetMotor(k, d)); };
+        b.jogM5.addEventListener("click", () => jog(-5)); b.jogP5.addEventListener("click", () => jog(5));
+        b.jogM1.addEventListener("click", () => jog(-1)); b.jogP1.addEventListener("click", () => jog(1));
+        b.jogMinus.addEventListener("click", () => jog(-Math.abs(num(i.jog, 0.5)))); b.jogPlus.addEventListener("click", () => jog(Math.abs(num(i.jog, 0.5))));
         b.zeroHere.addEventListener("click", () => { logLine("tx", "motor " + (k + 1) + ": zero here"); send(T_ZERO_MOTOR, encZero(k, 0, 0)); });
         b.zeroCrank.addEventListener("click", () => { const v = num(i.crank); logLine("tx", "motor " + (k + 1) + ": the crank is at " + v.toFixed(2) + "°"); send(T_ZERO_MOTOR, encZero(k, 2, v)); });
         b.saveZero.addEventListener("click", () => { logLine("tx", "motor " + (k + 1) + ": save zero"); send(T_SAVE_ZERO, encU8(k)); });
@@ -1395,6 +1418,9 @@
         e.b.reset.disabled = !connected || !ok || !m.faulted;
         e.b.halt.disabled = !connected || !ok || !m.enabled;
         e.b.set.disabled = !connected || !ok || !m.enabled || m.faulted;
+        for (const jb of ["jogM5", "jogM1", "jogMinus", "jogPlus", "jogP1", "jogP5"]) e.b[jb].disabled = e.b.set.disabled;
+        // inverse of motorToTheta: the motor angle at the settings' home crank angle
+        e.r.athome.textContent = cfg ? (normDeg((k === 0 ? settings.home_theta1 : settings.home_theta2) - cfg.theta_at_zero) * cfg.direction).toFixed(2) + "°" : "-";
         e.b.zeroHere.disabled = e.b.zeroCrank.disabled = !connected || !ok;
         e.b.saveZero.disabled = e.b.loadZero.disabled = !connected || !m.present;
         e.i.set.min = cfg.min; e.i.set.max = cfg.max;
@@ -1446,8 +1472,9 @@
       for (const k of [1, 2]) {
         const el = els["mNodeNote" + k]; if (!el) continue;
         const def = info && info.defaultNodeIds ? info.defaultNodeIds[k - 1] : null, cur = Math.round(num(els["mNode" + k]));
-        if (def === null || !Number.isFinite(cur) || def === cur) { el.textContent = ""; el.style.color = ""; continue; }
-        el.textContent = "firmware default (menuconfig): " + def + (info.nodeIdsFromMenuconfig ? " - overrides this at the next boot" : " - Reset settings adopts it");
+        if (def === null || !Number.isFinite(cur) || def === cur) { el.textContent = ""; el.title = ""; el.style.color = ""; continue; }
+        el.textContent = "default " + def;
+        el.title = "The firmware's default node id (menuconfig) is " + def + (info.nodeIdsFromMenuconfig ? ": it overrides this one at the next boot (LINKAGE_NODE_IDS_FROM_MENUCONFIG)" : ": Reset settings adopts it; the saved settings win otherwise");
         el.style.color = "var(--warn, #d29922)";
       }
     }

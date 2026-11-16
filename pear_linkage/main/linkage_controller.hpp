@@ -72,6 +72,12 @@ public:
   Result home();
   /// One crank's motor to an absolute motor angle (clears the target).
   Result set_motor(uint8_t motor, float degrees);
+  /// Move one crank's motor by `delta_deg` from where it is, ignoring the
+  /// settings' position limits (|delta| <= linkage_protocol::kJogMaxDeg, else
+  /// InvalidArgument): the way to bring the real linkage to its home pose
+  /// before the zero is set, when the raw encoder angle is anywhere. Needs
+  /// the drive enabled. Clears the end-effector target.
+  Result jog_motor(uint8_t motor, float delta_deg);
 
   /// 0xFF = every configured motor. True when every addressed motor succeeded.
   bool enable(uint8_t motor);

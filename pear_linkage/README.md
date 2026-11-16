@@ -132,7 +132,16 @@ request is answered with OK `[request u8]` or ERROR `[request u8][code u32]
 | 0x20 / 0x21 | SaveZero / LoadZero | `[motor u8]` |
 | 0x22 | SolveIk | `[x f32][y f32]` → IK_RESULT (no motion) |
 | 0x23 | RecoverCan | start the CAN bus-off recovery (it is automatic too) |
+| 0x25 | JogMotor | `[motor u8][delta f32]` move one motor relative to where it is, at most 10° per request, ignoring the software limits: pre-zero positioning (the console's per-motor jog buttons) |
 | 0x24 | SetDriveNodeId | `[motor u8][new_id u8]` re-address the drive on that crank (both Node-ID objects, saved, communication reset, ~5 s); on success the settings' node id follows it and is saved; "saved, needs a power cycle" and failure come back as ERROR text |
+
+**Zeroing a motor.** The drawing always shows the home pose dashed (the
+settings' home crank angles), and each motor card shows the motor angle it will
+read there ("at home"). To set a zero: enable the motor, jog it (the per-motor
+-5 / -1 / step / +1 / +5 buttons, which ignore the position limits a raw
+encoder angle is usually outside of) until the real crank matches the dashed
+pose, then *Zero here* (motor reads 0) or *crank is at* with the home angle,
+then *Save zero*. *Set* (absolute motor angle, within the limits) is for after.
 
 **Node ids: who wins.** The console's settings are saved in NVS and win over
 the menuconfig defaults, so changing `LINKAGE_MOTOR1_NODE_ID` /

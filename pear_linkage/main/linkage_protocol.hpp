@@ -68,9 +68,13 @@ enum class Request : uint8_t {
   SolveIk = 0x22,       ///< [x f32][y f32] -> IkResult (no motion)
   RecoverCan = 0x23,    ///< start the CAN bus-off recovery (automatic too; this is the by-hand way)
   SetDriveNodeId =
-      0x24, ///< [motor u8][new_id u8]: re-address the DRIVE on that crank (both Node-ID
-            ///< objects, saved, communication reset); on success the settings' node id
-            ///< follows it and is persisted. Ok, or Error with the outcome in the text.
+      0x24,        ///< [motor u8][new_id u8]: re-address the DRIVE on that crank (both Node-ID
+                   ///< objects, saved, communication reset); on success the settings' node id
+                   ///< follows it and is persisted. Ok, or Error with the outcome in the text.
+  JogMotor = 0x25, ///< [motor u8][delta_deg f32]: move one crank's motor RELATIVE to where it is,
+                   ///< at most kJogMaxDeg per request, ignoring the software position limits: for
+                   ///< bringing the real linkage to the home pose before zeroing, when the raw
+                   ///< encoder angle is anywhere. Needs the drive enabled.
 };
 
 /// Device -> host replies / events (0x9X => reply flag set).
@@ -337,6 +341,9 @@ struct Point2 {
 };
 
 /// SetMotor: [motor u8][degrees f32] (5 B).
+/// The biggest relative move one JOG_MOTOR request makes (motor degrees).
+static constexpr float kJogMaxDeg = 10.0f;
+
 struct SetMotor {
   uint8_t motor{0};
   float degrees{0.0f};

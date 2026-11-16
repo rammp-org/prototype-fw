@@ -351,6 +351,27 @@ LinkageController::Result LinkageController::home() {
   return result;
 }
 
+LinkageController::Result LinkageController::jog_motor(uint8_t motor, float delta_deg) {
+  if (motor >= kMotorCount || !std::isfinite(delta_deg) ||
+      std::fabs(delta_deg) > linkage_protocol::kJogMaxDeg)
+    return Result::InvalidArgument;
+  std::lock_guard<std::mutex> lock(mutex_);
+  if (!present_unlocked(motor))
+    return Result::NoMotor;
+  uint16_t statusword = 0;
+  if (!config_.motors[motor]->get_statusword(statusword, kReadTimeoutMs) ||
+      (statusword & 0x006F) != 0x0027)
+    return Result::NotEnabled;
+  target_.reset(); // one crank on its own: the end effector is not at a target
+  // EyouMotor::move_incremental is a relative profile-position move with no
+  // software-limit clamp (move_absolute clamps): exactly what a pre-zero jog
+  // needs, bounded by kJogMaxDeg per request instead.
+  if (!config_.motors[motor]->move_incremental(delta_deg, true))
+    return Result::MotorFailed;
+  logger_.info("motor {} jog {:+.2f} deg (limits bypassed)", motor + 1, delta_deg);
+  return Result::Ok;
+}
+
 LinkageController::Result LinkageController::set_motor(uint8_t motor, float degrees) {
   if (motor >= kMotorCount || !std::isfinite(degrees))
     return Result::InvalidArgument;
