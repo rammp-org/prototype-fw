@@ -117,7 +117,7 @@ request is answered with OK `[request u8]` or ERROR `[request u8][code u32]
 
 | type | request | payload / reply |
 | --- | --- | --- |
-| 0x10 | GetInfo | → INFO `[proto u8][motors u8][max_torque u16][poll_ms u16][str project][str version][str build]` |
+| 0x10 | GetInfo | → INFO `[proto u8][motors u8][max_torque u16][poll_ms u16][str project][str version][str build]` v2: `[default node id M1 u8][M2 u8][node ids from menuconfig u8]` |
 | 0x11 | GetStatus | → STATUS |
 | 0x12 | SetStream | `[enable u8][period_ms u16]` |
 | 0x13 | GetSettings | → SETTINGS |
@@ -133,6 +133,17 @@ request is answered with OK `[request u8]` or ERROR `[request u8][code u32]
 | 0x22 | SolveIk | `[x f32][y f32]` → IK_RESULT (no motion) |
 | 0x23 | RecoverCan | start the CAN bus-off recovery (it is automatic too) |
 | 0x24 | SetDriveNodeId | `[motor u8][new_id u8]` re-address the drive on that crank (both Node-ID objects, saved, communication reset, ~5 s); on success the settings' node id follows it and is saved; "saved, needs a power cycle" and failure come back as ERROR text |
+
+**Node ids: who wins.** The console's settings are saved in NVS and win over
+the menuconfig defaults, so changing `LINKAGE_MOTOR1_NODE_ID` /
+`LINKAGE_MOTOR2_NODE_ID` and reflashing does NOT change the ids a device with
+saved settings uses: the boot log says so, the console shows the firmware
+default beside a differing node id, and *Reset settings* adopts the defaults.
+Set `LINKAGE_NODE_IDS_FROM_MENUCONFIG=y` to make the menuconfig ids win at every
+boot instead. Two different things in the console: the **node id** field is the
+id the drive answers on (Apply makes the device talk to it; the drive is not
+touched), **re-address drive to** programs a new id INTO the drive (both Node-ID
+objects, saved, communication reset) and the node id follows it on success.
 
 Protocol v2 (2026-11): STATUS ends with the CAN controller block
 `[state u8][TEC u16][REC u16][bus errors u32][bus-off count u32][stuff+form+bit u32][ack u32]`

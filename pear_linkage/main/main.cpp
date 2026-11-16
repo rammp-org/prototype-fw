@@ -145,18 +145,43 @@ extern "C" void app_main(void) {
   }
   const Settings defaults = default_settings();
   Settings settings = defaults;
-  if (load_settings_blob(logger, settings))
-    logger.info("Settings loaded from NVS: motors {} / {}", settings.motors[0].node_id,
-                settings.motors[1].node_id);
-  else
-    logger.info("No saved settings: using the defaults (motors {} / {})",
-                defaults.motors[0].node_id, defaults.motors[1].node_id);
+  const bool have_saved = load_settings_blob(logger, settings);
   {
     std::string why;
     if (!settings.validate(CONFIG_LINKAGE_MAX_TORQUE_PERMILLE, why)) {
       logger.error("Saved settings are invalid ({}): using the defaults", why);
       settings = defaults;
     }
+  }
+  // Which node ids are in use, and where they came from: the saved settings
+  // (the console's) win by default, so a changed menuconfig node id does NOT
+  // show up until "Reset settings" - unless LINKAGE_NODE_IDS_FROM_MENUCONFIG
+  // makes the menuconfig values win at every boot.
+  constexpr bool kNodeIdsFromMenuconfig =
+#ifdef CONFIG_LINKAGE_NODE_IDS_FROM_MENUCONFIG
+      true;
+#else
+      false;
+#endif
+  const bool ids_differ = settings.motors[0].node_id != defaults.motors[0].node_id ||
+                          settings.motors[1].node_id != defaults.motors[1].node_id;
+  if (have_saved && ids_differ && kNodeIdsFromMenuconfig) {
+    logger.warn("Saved settings name motors {} / {}; the menuconfig node ids {} / {} override "
+                "them (LINKAGE_NODE_IDS_FROM_MENUCONFIG) and are saved",
+                settings.motors[0].node_id, settings.motors[1].node_id, defaults.motors[0].node_id,
+                defaults.motors[1].node_id);
+    settings.motors[0].node_id = defaults.motors[0].node_id;
+    settings.motors[1].node_id = defaults.motors[1].node_id;
+    save_settings_blob(logger, settings);
+  } else if (have_saved) {
+    logger.info("Settings loaded from NVS: motors {} / {}{}", settings.motors[0].node_id,
+                settings.motors[1].node_id,
+                ids_differ ? " (the menuconfig defaults differ: use the console's Reset settings "
+                             "to adopt them, or LINKAGE_NODE_IDS_FROM_MENUCONFIG)"
+                           : "");
+  } else {
+    logger.info("No saved settings: using the defaults (motors {} / {})",
+                defaults.motors[0].node_id, defaults.motors[1].node_id);
   }
 
   // --- CAN + the two motors ---------------------------------------------------
@@ -223,11 +248,14 @@ extern "C" void app_main(void) {
 
   // The linkage service, one per transport, sharing the controller.
   auto on_settings_changed = [&](const Settings &s) { save_settings_blob(logger, s); };
-  const linkage_protocol::Info info{.max_torque_permille = CONFIG_LINKAGE_MAX_TORQUE_PERMILLE,
-                                    .poll_period_ms = CONFIG_LINKAGE_POLL_PERIOD_MS,
-                                    .project = running.project_name,
-                                    .version = running.version,
-                                    .build = running.date + " " + running.time};
+  const linkage_protocol::Info info{
+      .max_torque_permille = CONFIG_LINKAGE_MAX_TORQUE_PERMILLE,
+      .poll_period_ms = CONFIG_LINKAGE_POLL_PERIOD_MS,
+      .project = running.project_name,
+      .version = running.version,
+      .build = running.date + " " + running.time,
+      .default_node_ids = {defaults.motors[0].node_id, defaults.motors[1].node_id},
+      .node_ids_from_menuconfig = kNodeIdsFromMenuconfig};
   LinkageService vendor_linkage(controller, {.send = vendor_send,
                                              .info = info,
                                              .defaults = defaults,

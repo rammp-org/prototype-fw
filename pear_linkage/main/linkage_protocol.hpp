@@ -399,6 +399,12 @@ struct Info {
   std::string project;
   std::string version;
   std::string build;
+  /// v2: the firmware's default node ids (menuconfig), so a console can tell
+  /// when the saved settings differ from what the firmware was built for.
+  std::array<uint8_t, kMotorCount> default_node_ids{};
+  /// v2: whether the firmware forced those defaults over the saved settings at
+  /// boot (LINKAGE_NODE_IDS_FROM_MENUCONFIG).
+  bool node_ids_from_menuconfig{false};
   std::vector<uint8_t> serialize() const {
     std::vector<uint8_t> out{protocol_version, motor_count};
     put_u16(out, max_torque_permille);
@@ -406,6 +412,9 @@ struct Info {
     put_str(out, project);
     put_str(out, version);
     put_str(out, build);
+    for (const auto id : default_node_ids)
+      out.push_back(id);
+    out.push_back(node_ids_from_menuconfig ? 1 : 0);
     return out;
   }
 };

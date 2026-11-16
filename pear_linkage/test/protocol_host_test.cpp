@@ -287,9 +287,14 @@ void test_small_payloads() {
                    .poll_period_ms = 50,
                    .project = "pear_linkage",
                    .version = "1.0",
-                   .build = "today"};
+                   .build = "today",
+                   .default_node_ids = {107, 108},
+                   .node_ids_from_menuconfig = true};
   const auto ib = info.serialize();
-  check(ib.size() == 6 + 1 + 12 + 1 + 3 + 1 + 5 && ib[0] == proto::kProtocolVersion && ib[1] == 2,
+  // v1 part (6 + the three strings), then v2: two default node ids + the override flag
+  const size_t v1_size = 6 + 1 + 12 + 1 + 3 + 1 + 5;
+  check(ib.size() == v1_size + 3 && ib[0] == proto::kProtocolVersion && ib[1] == 2 &&
+            ib[v1_size] == 107 && ib[v1_size + 1] == 108 && ib[v1_size + 2] == 1,
         "info payload");
 }
 

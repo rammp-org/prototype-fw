@@ -34,6 +34,20 @@ menu "PEAR Linkage Console Configuration"
         range 0 127
         default 2
 
+    config LINKAGE_NODE_IDS_FROM_MENUCONFIG
+        bool "The menuconfig node ids override the saved settings at boot"
+        default n
+        help
+            Off: the node ids the console saved (NVS) are used and the two
+            values above only apply to a device without saved settings (or
+            after "Reset settings" in the console) - the console is the
+            source of truth. On: at every boot the saved settings' node ids
+            are replaced by the two values above (and saved), so changing
+            them in menuconfig and reflashing is enough; the console can
+            still re-address a drive, but its node id choice is overwritten at
+            the next boot. Either way the boot log says which node ids are in
+            use and where they came from.
+
     config LINKAGE_POLL_PERIOD_MS
         int "Poll period (ms)"
         range 20 1000

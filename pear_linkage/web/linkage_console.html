@@ -263,13 +263,15 @@
               <span class="k" title="On which side of the J1 -> J2 line the joint J3 folds: a fixed property of the machine">J3 side of J1→J2</span><select id="gSide"><option value="0">counter-clockwise</option><option value="1">clockwise</option></select><span></span>
               <span class="k" title="The Home pose, and the ik's branch reference while no pose is measured">home θ1 / θ2</span><span class="pair"><input type="number" id="hTheta1" step="1"><input type="number" id="hTheta2" step="1"></span><button class="small" id="hUseCurrentBtn" title="Copy the measured crank angles">use current</button>
               <h3>Motor 1 (crank 1, M1)</h3>
-              <span class="k" title="CANopen node id; 0 = no motor on this crank">node id</span><input type="number" id="mNode1" min="0" max="127" step="1"><button class="small" id="mProgram1" disabled title="Re-address the DRIVE currently on this crank to the node id typed here (writes both of its Node-ID objects, saves, resets its communication, ~5 s); the settings follow it on success">Program drive</button>
+              <span class="k" title="The CANopen node id the drive on this crank answers on (0 = no motor on this crank). Apply makes the device talk to that id; it does not change the drive.">node id</span><input type="number" id="mNode1" min="0" max="127" step="1"><span class="note" id="mNodeNote1"></span>
+              <span class="k" title="Re-address the DRIVE on this crank: writes the new id into both of its Node-ID objects, saves them and resets its communication (~5 s). On success the node id above follows it and is saved. 'saved, needs a power cycle' means the drive keeps its old id until power-cycled: then set the node id above by hand.">re-address drive to</span><span class="pair"><input type="number" id="mNewNode1" min="1" max="127" step="1" placeholder="new id"><button class="small" id="mProgram1" disabled>Program drive</button></span>
               <span class="k" title="+1: a positive motor angle turns the crank counter-clockwise; -1: clockwise">direction</span><select id="mDir1"><option value="1">+1 (motor + = crank CCW)</option><option value="-1">-1 (motor + = crank CW)</option></select><span></span>
               <span class="k" title="Motor angle limits (motor degrees from its zero); moves outside are refused">limits min / max</span><span class="pair"><input type="number" id="mMin1" step="1"><input type="number" id="mMax1" step="1"></span><span class="u">deg</span>
               <span class="k" title="The crank's angle in the linkage frame when the motor reads 0">crank angle at zero</span><input type="number" id="mZeroTheta1" step="1"><span class="u">deg</span>
               <span class="k" title="Max torque (object 0x6072): set in Nm once the drive has reported its rated torque (stored and sent as per-thousand of rated); the device's ceiling caps it">torque limit</span><input type="number" id="mTorque1" min="0" max="3000" step="10"><span class="u" id="mTorqueUnit1">‰</span>
               <h3>Motor 2 (crank 2, M2)</h3>
-              <span class="k">node id</span><input type="number" id="mNode2" min="0" max="127" step="1"><button class="small" id="mProgram2" disabled title="Re-address the DRIVE currently on this crank to the node id typed here (writes both of its Node-ID objects, saves, resets its communication, ~5 s); the settings follow it on success">Program drive</button>
+              <span class="k">node id</span><input type="number" id="mNode2" min="0" max="127" step="1"><span class="note" id="mNodeNote2"></span>
+              <span class="k">re-address drive to</span><span class="pair"><input type="number" id="mNewNode2" min="1" max="127" step="1" placeholder="new id"><button class="small" id="mProgram2" disabled>Program drive</button></span>
               <span class="k">direction</span><select id="mDir2"><option value="1">+1 (motor + = crank CCW)</option><option value="-1">-1 (motor + = crank CW)</option></select><span></span>
               <span class="k">limits min / max</span><span class="pair"><input type="number" id="mMin2" step="1"><input type="number" id="mMax2" step="1"></span><span class="u">deg</span>
               <span class="k">crank angle at zero</span><input type="number" id="mZeroTheta2" step="1"><span class="u">deg</span>
@@ -350,7 +352,7 @@
       "poseXY","poseThetas","poseMotors","poseBar","targetXY","targetStatus","deviceTarget","motion",
       "targetX","targetY","moveToBtn","homeBtn","moveOnRelease","liveDrag","jogUp","jogDown","jogLeft","jogRight","jogStep","jogStepLabel",
       "motors","settings","gM2x","gM2y","gCrank1","gCrank2","gBar","gCoupler","gExt","gOff","gAssembly","gSide","hTheta1","hTheta2","hUseCurrentBtn",
-      "mNode1","mDir1","mMin1","mMax1","mZeroTheta1","mTorque1","mNode2","mDir2","mMin2","mMax2","mZeroTheta2","mTorque2","mTorqueUnit1","mTorqueUnit2","mProgram1","mProgram2",
+      "mNode1","mDir1","mMin1","mMax1","mZeroTheta1","mTorque1","mNode2","mDir2","mMin2","mMax2","mZeroTheta2","mTorque2","mTorqueUnit1","mTorqueUnit2","mProgram1","mProgram2","mNewNode1","mNewNode2","mNodeNote1","mNodeNote2",
       "pVel","pAcc","pDec","settingsNote","settingsApplyBtn","settingsReloadBtn","settingsResetBtn",
       "clearLogBtn","log","unsupported"]) els[id] = document.getElementById(id);
 
@@ -1105,6 +1107,7 @@
       return null;
     }
     // every edit previews at once (drawing, workspace, target check)
+    for (const id of ["mNode1", "mNode2"]) els[id].addEventListener("input", refreshNodeNotes);
     for (const id of ["gM2x","gM2y","gCrank1","gCrank2","gBar","gCoupler","gExt","gOff","gAssembly","gSide","hTheta1","hTheta2","mNode1","mDir1","mMin1","mMax1","mZeroTheta1","mTorque1","mNode2","mDir2","mMin2","mMax2","mZeroTheta2","mTorque2","pVel","pAcc","pDec"])
       els[id].addEventListener("input", () => { settings = settingsFromForm(); const why = validateSettings(settings); els.settingsNote.textContent = why ? why : "Edits preview in the drawing at once; Apply sends them to the device, which validates and stores them."; els.settingsNote.style.color = why ? "var(--danger)" : "var(--text-muted)"; onGeometryChanged(); });
     els.hUseCurrentBtn.addEventListener("click", () => { if (!lastStatus || !Number.isFinite(lastStatus.theta1)) { logLine("warn", "no measured crank angles yet"); return; } els.hTheta1.value = lastStatus.theta1.toFixed(2); els.hTheta2.value = lastStatus.theta2.toFixed(2); els.hTheta1.dispatchEvent(new Event("input")); });
@@ -1151,7 +1154,9 @@
       if (p.length < 6) return null;
       const dv = new DataView(p.buffer, p.byteOffset, p.byteLength);
       let i = 6; const str = () => { const n = p[i++]; const s = new TextDecoder().decode(p.subarray(i, i + n)); i += n; return s; };
-      return { protocolVersion: p[0], motorCount: p[1], maxTorque: dv.getUint16(2, true), pollMs: dv.getUint16(4, true), project: str(), version: str(), build: str() };
+      const info = { protocolVersion: p[0], motorCount: p[1], maxTorque: dv.getUint16(2, true), pollMs: dv.getUint16(4, true), project: str(), version: str(), build: str(), defaultNodeIds: null, nodeIdsFromMenuconfig: false };
+      if (p.length >= i + 3) { info.defaultNodeIds = [p[i], p[i + 1]]; info.nodeIdsFromMenuconfig = p[i + 2] !== 0; } // v2
+      return info;
     }
     function parseIkResult(p) {
       if (p.length < 58) return null;
@@ -1433,11 +1438,25 @@
       streamRequestPending = false;
       if (prev === null) logLine("sys", "first status: cranks " + (Number.isFinite(st.theta1) ? st.theta1.toFixed(1) + "° / " + st.theta2.toFixed(1) + "°" : "unknown") + ", motors " + st.motors.map(m => m.present ? "node " + m.node + (m.commOk ? "" : " (no answer)") : "none").join(" / "));
     }
+    // Beside each node id: the firmware's default (menuconfig) when the saved
+    // settings differ from it - the usual reason "I changed menuconfig and the
+    // device still shows the old ids" (saved settings win unless the firmware
+    // was built with LINKAGE_NODE_IDS_FROM_MENUCONFIG).
+    function refreshNodeNotes() {
+      for (const k of [1, 2]) {
+        const el = els["mNodeNote" + k]; if (!el) continue;
+        const def = info && info.defaultNodeIds ? info.defaultNodeIds[k - 1] : null, cur = Math.round(num(els["mNode" + k]));
+        if (def === null || !Number.isFinite(cur) || def === cur) { el.textContent = ""; el.style.color = ""; continue; }
+        el.textContent = "firmware default (menuconfig): " + def + (info.nodeIdsFromMenuconfig ? " - overrides this at the next boot" : " - Reset settings adopts it");
+        el.style.color = "var(--warn, #d29922)";
+      }
+    }
     function applySettingsReply(s) {
       deviceSettings = s; settings = s; settingsToForm(s);
       els.settingsNote.textContent = "Device settings loaded."; els.settingsNote.style.color = "var(--text-muted)";
       logLine("sys", "settings: motors " + s.motors.map(m => m.node_id || "none").join(" / ") + ", cranks " + s.geometry.crank1 + " / " + s.geometry.crank2 + " mm, bar " + s.geometry.bar + ", coupler " + s.geometry.coupler + " mm, M3 +" + s.geometry.ee_extension + " / " + s.geometry.ee_offset + " mm");
       onGeometryChanged();
+      refreshNodeNotes();
     }
     // The torque limit inputs are in Nm once the motor on that crank has reported
     // its rated torque (STATUS rated_torque_cnm), in ‰ of rated before; the
@@ -1466,6 +1485,7 @@
       logLine("sys", "info: " + i.project + " " + i.version + " (" + i.build + ") · protocol v" + i.protocolVersion + " · torque ceiling " + i.maxTorque + " ‰ · poll " + i.pollMs + " ms");
       if (i.protocolVersion < CONSOLE_PROTOCOL_VERSION) logLine("warn", "device protocol v" + i.protocolVersion + " is older than this console (v" + CONSOLE_PROTOCOL_VERSION + "): no CAN counters, Nm torque, bus-off recovery or drive re-addressing");
       for (const k of [1, 2]) els["mProgram" + k].disabled = i.protocolVersion < 2;
+      refreshNodeNotes();
     }
 
     // ===================== Incoming frame handling =====================
@@ -1581,10 +1601,12 @@
     els.resetAllBtn.addEventListener("click", () => { logLine("tx", "reset faults"); send(T_RESET_FAULT, encU8(ALL_MOTORS)); });
     els.canRecoverBtn.addEventListener("click", () => { logLine("tx", "CAN bus-off recovery"); send(T_RECOVER_CAN); });
     for (const k of [1, 2]) els["mProgram" + k].addEventListener("click", () => {
-      const cur = lastStatus && lastStatus.motors[k - 1] ? lastStatus.motors[k - 1].node : null, id = Math.round(num(els["mNode" + k]));
-      if (!(id >= 1 && id <= 127)) { logLine("err", "node id must be 1..127"); return; }
+      const m = lastStatus && lastStatus.motors[k - 1], cur = m ? m.node : null, id = Math.round(num(els["mNewNode" + k]));
+      if (!(id >= 1 && id <= 127)) { logLine("err", "type the new node id (1..127) in the 're-address drive to' box"); return; }
+      if (!m || !m.present) { logLine("err", "crank " + k + " has no motor configured: set its node id and Apply first"); return; }
+      if (!m.commOk) { logLine("err", "the drive on crank " + k + " (node " + cur + ") does not answer, so it cannot be re-addressed: fix the node id above (the id it answers on) and Apply, or its power / wiring"); return; }
       if (cur === id) { logLine("warn", "the drive on crank " + k + " already is node " + id); return; }
-      if (!window.confirm("Re-address the drive on crank " + k + " from node " + cur + " to " + id + "? It writes the drive's Node-ID objects and saves them (~5 s); the settings follow on success.")) return;
+      if (!window.confirm("Re-address the drive on crank " + k + " from node " + cur + " to " + id + "? It writes the drive's Node-ID objects and saves them (~5 s); the node id above follows on success.")) return;
       logLine("tx", "program drive on crank " + k + ": node " + cur + " -> " + id); send(T_SET_DRIVE_NODE_ID, new Uint8Array([k - 1, id]));
     });
     els.haltAllBtn.addEventListener("click", () => { logLine("tx", "HALT"); send(T_HALT, encU8(ALL_MOTORS)); });
