@@ -10,6 +10,7 @@
 // both coupler folds, and that unreachable points / impossible crank angles are
 // rejected.
 
+#include <algorithm>
 #include <cmath>
 #include <cstdio>
 #include <cstdlib>
@@ -247,6 +248,80 @@ void test_offset_end_effector() {
   check(solved > 20, "offset: points were reachable");
 }
 
+// The reported bug: dragging the target across M2's home (theta2 = -90 deg) made
+// the browser solver flip to the mirror assembly. Each pose was solved against a
+// FIXED reference (home), and "closest to the reference" scoring swaps branches
+// as the solution crosses the reference angle - jumping to the cranks-toward-
+// each-other assembly. The fix is to solve each pose against the PREVIOUS solved
+// pose (continuation): the firmware already does this with the measured pose, and
+// the console now does it while dragging the target. This proves the solver, with
+// Open pinned, inverts a smooth FK-generated path straight through M2 home without
+// a branch flip when fed the previous pose, and records how far a fixed-home
+// reference drifts over the same path.
+void test_continuity_across_m2_home() {
+  fivebar::Geometry g{};
+  g.m2_x = 200.0f;
+  g.m2_y = 0.0f;
+  g.crank1 = g.crank2 = 150.0f;
+  g.bar = g.coupler = 250.0f;
+  g.assembly = fivebar::Assembly::Open;
+  g.coupler_side = fivebar::CouplerSide::Ccw;
+
+  // A path whose true crank-2 angle sweeps through -90 (M2 home): hold theta1 and
+  // sweep theta2 across -90. FK gives the exact M3 the IK must invert.
+  const float theta1 = -70.0f;
+  float ref1 = 0.0f, ref2 = 0.0f; // continuation reference, seeded from the first pose
+  float prev_cont_t2 = 0.0f;
+  bool have_prev = false;
+  int checked = 0, home_checked = 0;
+  float max_cont_step = 0.0f, max_fixed_dev = 0.0f;
+  float min_cont_t2 = 1e9f, max_cont_t2 = -1e9f;
+  for (float theta2 = -70.0f; theta2 >= -110.0f; theta2 -= 1.0f) {
+    fivebar::Pose fk{};
+    if (!fivebar::solve_fk(theta1, theta2, g, fk))
+      continue; // skip crank combos that are not an Open loop
+    if (!have_prev) {
+      ref1 = theta1;
+      ref2 = theta2;
+    }
+    fivebar::Pose cont{};
+    if (!fivebar::solve_ik(fk.m3[0], fk.m3[1], g, ref1, ref2, cont))
+      continue;
+    ++checked;
+    min_cont_t2 = std::min(min_cont_t2, cont.theta2_deg);
+    max_cont_t2 = std::max(max_cont_t2, cont.theta2_deg);
+    if (have_prev)
+      max_cont_step = std::max(
+          max_cont_step, std::fabs(fivebar::normalize_angle_deg(cont.theta2_deg - prev_cont_t2)));
+    // In the home neighborhood - clear of the crank2 dyad singularity near
+    // theta2 ~ -105, where a fixed-theta1 sweep legitimately changes branch -
+    // continuation must recover the exact FK branch.
+    if (theta2 <= -80.0f && theta2 >= -100.0f) {
+      ++home_checked;
+      check_near(cont.theta2_deg, theta2, 0.5f, "continuation recovers theta2 near M2 home");
+      check_near(cont.theta1_deg, theta1, 0.5f, "continuation recovers theta1 near M2 home");
+    }
+    ref1 = cont.theta1_deg;
+    ref2 = cont.theta2_deg;
+    prev_cont_t2 = cont.theta2_deg;
+    have_prev = true;
+    // contrast: a fixed home reference is the old browser behavior
+    fivebar::Pose fixed{};
+    if (fivebar::solve_ik(fk.m3[0], fk.m3[1], g, -90.0f, -90.0f, fixed))
+      max_fixed_dev = std::max(
+          max_fixed_dev, std::fabs(fivebar::normalize_angle_deg(fixed.theta2_deg - theta2)));
+  }
+  std::printf("m2-home continuity: %d poses (%d near home); max continuation step %.1f deg, max "
+              "fixed-home deviation %.1f deg\n",
+              checked, home_checked, max_cont_step, max_fixed_dev);
+  check(checked > 20, "m2-home: the sweep produced poses across home");
+  check(home_checked > 10, "m2-home: covered the home neighborhood");
+  check(min_cont_t2 < -90.0f && max_cont_t2 > -90.0f, "continuation sweeps across M2 home");
+  check(max_cont_step < 10.0f, "continuation stays smooth across M2 home (no branch flip)");
+  check(max_fixed_dev > max_cont_step + 3.0f,
+        "a fixed home reference drifts off the branch far more than continuation");
+}
+
 void test_normalize() {
   check_near(fivebar::normalize_angle_deg(190.0f), -170.0f, 1e-4f, "normalize 190");
   check_near(fivebar::normalize_angle_deg(-190.0f), 170.0f, 1e-4f, "normalize -190");
@@ -264,6 +339,7 @@ int main() {
   test_classic_round_trip(fivebar::CouplerSide::Ccw);
   test_classic_round_trip(fivebar::CouplerSide::Cw);
   test_offset_end_effector();
+  test_continuity_across_m2_home();
   if (failures) {
     std::printf("%d failure(s)\n", failures);
     return EXIT_FAILURE;

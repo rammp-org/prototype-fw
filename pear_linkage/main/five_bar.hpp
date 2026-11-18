@@ -62,7 +62,14 @@ struct Geometry {
   float coupler{250.0f};    ///< J1 -> J3 (the distal link of crank 2)
   float ee_extension{0.0f}; ///< M3 past J3 along J2->J3 (0 = M3 is J3)
   float ee_offset{0.0f};    ///< M3 perpendicular offset, 90 deg CCW of J2->J3
-  Assembly assembly{Assembly::Any};
+  // PEAR is built as a non-crossed (Open) linkage. Pin it so the IK only ever
+  // returns Open assemblies: without this (Assembly::Any) nothing geometrically
+  // constrains the branch, so the "closest to the reference" scoring can pick the
+  // mirror assembly with both cranks swung inward toward each other - physically a
+  // self-collision for finite-width bars - whenever a solve crosses the reference
+  // angle (e.g. M2's home). Set it from the stored geometry for a machine that is
+  // actually built crossed.
+  Assembly assembly{Assembly::Open};
   CouplerSide coupler_side{CouplerSide::Ccw};
 };
 

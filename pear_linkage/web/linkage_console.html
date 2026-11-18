@@ -1061,7 +1061,7 @@
     // ===================== Settings (form <-> object <-> payload) =====================
     const SETTINGS_SIZE = 95, SETTINGS_VERSION = 1;
     function defaultSettings() {
-      return { geometry: { m2_x: 200, m2_y: 0, crank1: 150, crank2: 150, bar: 250, coupler: 250, ee_extension: 0, ee_offset: 0, assembly: 0, coupler_side: 0 },
+      return { geometry: { m2_x: 200, m2_y: 0, crank1: 150, crank2: 150, bar: 250, coupler: 250, ee_extension: 0, ee_offset: 0, assembly: 2, coupler_side: 0 },
                home_theta1: -90, home_theta2: -90,
                motors: [ { node_id: 1, direction: 1, min: -90, max: 90, theta_at_zero: -90, torque_limit: 300 },
                          { node_id: 2, direction: 1, min: -90, max: 90, theta_at_zero: -90, torque_limit: 300 } ],
@@ -1290,18 +1290,31 @@
       drawPose(layers.home, h, { opacity: 0.45, width: 1.4, handle: false, bad: false, labels: false, dash: true });
       if (h) text(h.m3, "home", layers.home, { fill: "#9aa6ba", "font-style": "italic" });
     }
-    function onGeometryChanged() { computeWorkspace(); drawWorkspace(); drawStatic(); drawHome(); refreshCurrent(); refreshTarget(target.x, target.y); }
+    function onGeometryChanged() { lastTargetTheta = null; computeWorkspace(); drawWorkspace(); drawStatic(); drawHome(); refreshCurrent(); refreshTarget(target.x, target.y); }
 
     // ===================== State =====================
     let lastStatus = null, currentSolution = null;
     let target = { x: 0, y: 0 }, targetSolution = null, targetOk = false, targetMotors = null;
+    // IK branch continuity: the previously solved target angles, used as the
+    // reference for the next solve so dragging the target CONTINUES one assembly
+    // instead of snapping each pose independently toward a fixed reference (which
+    // flips branches whenever the solution crosses that reference angle - e.g. at
+    // M2's home - and can jump to the cranks-toward-each-other assembly). Null =
+    // no continuation yet; seed from the device/home reference. Reset on a
+    // geometry change (the branch meaning changes with it).
+    let lastTargetTheta = null;
     let dragging = false, liveTimer = null, liveDirty = false;
     let streamRequestPending = false, rxTimes = [];
 
     function refreshTarget(x, y) {
       target = { x, y };
-      const ref = referenceThetas();
+      // Continue from the last solved target pose when we have one, so a drag
+      // tracks a single assembly; otherwise seed from the device pose, or home.
+      const ref = lastTargetTheta || referenceThetas();
       const s = solveIk(x, y, settings.geometry, ref[0], ref[1]);
+      // Advance the continuity reference only on a real solution; a momentary
+      // unreachable excursion must not reset which branch we are tracking.
+      if (s) lastTargetTheta = [s.theta1, s.theta2];
       targetSolution = s;
       targetMotors = s ? [thetaToMotor(settings.motors[0], s.theta1), thetaToMotor(settings.motors[1], s.theta2)] : null;
       targetOk = !!s && withinLimits(settings.motors[0], targetMotors[0]) && withinLimits(settings.motors[1], targetMotors[1]);
