@@ -1,0 +1,47 @@
+// cppcheck suppressions for the repository-wide static-analysis scan.
+//
+// The esp-cpp/StaticAnalysis workflow (.github/workflows/static_analysis.yml)
+// runs a single cppcheck pass with --enable=all --inconclusive over every
+// sub-project in this monorepo at once (MIB, STEM, STEM_V3, pear, pear_linkage,
+// holo_deck, holo_deck_mib, five_bar and the shared components/). Those are
+// independent firmware images that are never linked into one program, so many
+// whole-repo findings are false positives of the merged scan, and --inconclusive
+// is deliberately noisy. This file mirrors the per-project suppressions.txt files
+// (e.g. pear/suppressions.txt) and extends them for the combined scan.
+//
+// Format: a bare word suppresses an error id globally; "[id]:[file]:[line]"
+// scopes it. See https://cppcheck.sourceforge.io/manual.html
+
+// --- noise categories (identical to the per-project suppressions.txt files) ---
+missingInclude
+missingIncludeSystem
+unusedFunction
+unusedStructMember
+functionStatic
+cstyleCast
+
+// --- artifacts of analysing several independent projects as one program ---
+// Each firmware image defines its own Config / MotorStatus / ... types; they are
+// never part of the same translation unit or binary, so the "one definition rule"
+// finding across projects is spurious.
+ctuOneDefinitionRuleViolation
+
+// --- --enable=all / --inconclusive style opinions (not correctness issues) ---
+shadowFunction
+funcArgNamesDifferent
+useStlAlgorithm
+knownConditionTrueFalse
+useInitializationList
+passedByValue
+noExplicitConstructor
+constParameterPointer
+constVariablePointer
+duplicateExpression
+// Config / Geometry structs are POD aggregates populated via designated
+// initializers (the espp Config pattern); they intentionally have no ctor.
+uninitMemberVarNoCtor
+
+// --- vendored / external / generated trees (not our source) ---
+*:*/managed_components/*
+*:*/components/espp/*
+*:external/*
