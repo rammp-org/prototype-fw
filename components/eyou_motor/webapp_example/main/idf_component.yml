@@ -1,0 +1,22 @@
+## IDF Component Manager Manifest File
+dependencies:
+  idf:
+    version: '>=5.4'
+  # USB device (vendor / WebUSB + CDC) on TinyUSB 3.x
+  espressif/esp_tinyusb: '>=3.0'
+  # the espp pieces: the USB device, the framed protocol routing and the
+  # standard services every espp USB example carries
+  espp/usb_device: '>=1.4.2'
+  espp/dispatcher: '>=1.4.2'
+  espp/stream_frame: '>=1.4.2'
+  espp/system: '>=1.4.2'
+  espp/monitor: '>=1.4.2'
+  espp/ota: '>=1.4.2'
+  espp/coredump: '>=1.4.2'
+  espp/task: '>=1.4.2'
+  espp/timer: '>=1.4.2'
+  espp/logger: '>=1.4.2'
+  espp/format: '>=1.4.2'
+  espp/base_component: '>=1.4.2'
+  # the motor's software zero lives in NVS (eyou_motor)
+  espp/nvs: '>=1.4.2'

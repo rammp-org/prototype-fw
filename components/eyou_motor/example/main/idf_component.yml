@@ -1,0 +1,4 @@
+dependencies:
+  espp/cli: '>=1.0'
+  idf:
+    version: '>=5.3'

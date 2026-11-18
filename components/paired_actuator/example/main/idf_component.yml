@@ -1,0 +1,5 @@
+## IDF Component Manager Manifest File
+dependencies:
+  idf:
+    version: '>=5.3'
+  espp/cli: '>=1.0'

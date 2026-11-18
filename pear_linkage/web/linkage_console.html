@@ -1,0 +1,1734 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>PEAR Linkage Console (WebUSB / Web Serial)</title>
+  <meta name="description" content="Configure and test one 5-bar linkage driven by two Eyou harmonic actuators over CAN from an ESP32-P4: set the link lengths and assembly, each motor's node id, direction, limits, crank angle at zero and torque limit, then drag the end effector to move it (inverse kinematics on the device), drive the cranks directly, enable / disable / reset / halt the drives and set their zeros, with the live pose drawn from the measured crank angles. Streamed over USB (WebUSB / Web Serial).">
+  <meta name="espp-category" content="motors">
+  <meta name="espp-protocols" content="pear.linkage:1">
+  <meta name="espp-transports" content="webusb webserial">
+  <!--
+    PEAR Linkage Console
+    ====================
+    A single-file, offline, dependency-free browser front-end for the PEAR
+    linkage firmware (pear_linkage/). The ESP32-P4 runs the EyouMotor CANopen /
+    DS402 driver for the two crank motors and the 5-bar kinematics; this page
+    speaks its protocol over EITHER WebUSB (vendor 0xFF interface) OR Web
+    Serial. It also runs the SAME kinematics (a port of main/five_bar.cpp) to
+    preview a dragged target, shade the reachable workspace and draw the pose.
+
+    Framed with the espp stream_frame v2 codec, routed on module id 0x21 by
+    default (a routing key; the id actually used is discovered from the device,
+    see resolveModuleId). Requests use types 0x1X / 0x2X; replies / events use
+    0x9X (reply flag set). Payloads: see main/linkage_protocol.hpp.
+  -->
+  <style>
+    :root {
+      --bg:#f4f6f9; --panel-bg:#fff; --panel-border:#d9dee6; --text:#1c2330; --text-muted:#5c6675;
+      --accent:#2563eb; --accent-hover:#1d4ed8; --accent-contrast:#fff; --danger:#dc2626; --ok:#16a34a;
+      --warn:#b45309; --log-bg:#0f1420; --log-text:#d6dbe6; --tx:#7dd3fc; --rx:#86efac; --err:#fca5a5;
+      --sys:#fcd34d; --time:#64748b; --input-bg:#fff; --input-border:#c3cbd6; --chip-bg:#eef2f8;
+      --row-alt:#f7f9fc; --shadow:0 1px 3px rgba(0,0,0,.08),0 1px 2px rgba(0,0,0,.04);
+      --view-bg:#0d1118; --view-grid:#2a3344; --view-text:#9aa6ba;
+      --link1:#f05d5e; --link2:#f3c623; --link3:#4ecb71; --link4:#b47cf5; --ee:#38bdf8; --target:#60a5fa;
+    }
+    @media (prefers-color-scheme: dark) {
+      :root {
+        --bg:#0b0e14; --panel-bg:#151a23; --panel-border:#262d3a; --text:#e6eaf2; --text-muted:#98a2b3;
+        --accent:#3b82f6; --accent-hover:#60a5fa; --accent-contrast:#0b0e14; --danger:#ef4444; --ok:#22c55e;
+        --warn:#f59e0b; --log-bg:#05070c; --log-text:#cdd4e0; --tx:#38bdf8; --rx:#4ade80; --err:#f87171;
+        --sys:#fbbf24; --time:#64748b; --input-bg:#0e1219; --input-border:#2b3341; --chip-bg:#1b2230;
+        --row-alt:#10151d; --shadow:0 1px 3px rgba(0,0,0,.4);
+        --view-bg:#05070c; --view-grid:#222a38; --view-text:#8591a6;
+      }
+    }
+    :root[data-theme="dark"] {
+      --bg:#0b0e14; --panel-bg:#151a23; --panel-border:#262d3a; --text:#e6eaf2; --text-muted:#98a2b3;
+      --accent:#3b82f6; --accent-hover:#60a5fa; --accent-contrast:#0b0e14; --danger:#ef4444; --ok:#22c55e;
+      --warn:#f59e0b; --log-bg:#05070c; --log-text:#cdd4e0; --tx:#38bdf8; --rx:#4ade80; --err:#f87171;
+      --sys:#fbbf24; --time:#64748b; --input-bg:#0e1219; --input-border:#2b3341; --chip-bg:#1b2230; --row-alt:#10151d;
+      --view-bg:#05070c; --view-grid:#222a38; --view-text:#8591a6;
+    }
+    :root[data-theme="light"] {
+      --bg:#f4f6f9; --panel-bg:#fff; --panel-border:#d9dee6; --text:#1c2330; --text-muted:#5c6675;
+      --accent:#2563eb; --accent-hover:#1d4ed8; --accent-contrast:#fff; --danger:#dc2626; --ok:#16a34a;
+      --warn:#b45309; --log-bg:#0f1420; --log-text:#d6dbe6; --tx:#7dd3fc; --rx:#86efac; --err:#fca5a5;
+      --sys:#fcd34d; --time:#64748b; --input-bg:#fff; --input-border:#c3cbd6; --chip-bg:#eef2f8; --row-alt:#f7f9fc;
+      --view-bg:#0d1118; --view-grid:#2a3344; --view-text:#9aa6ba;
+    }
+    * { box-sizing: border-box; }
+    html, body { margin: 0; padding: 0; }
+    body { background: var(--bg); color: var(--text); font-family: system-ui, -apple-system, "Segoe UI", Roboto, Helvetica, Arial, sans-serif; font-size: 14px; line-height: 1.45; min-height: 100vh; }
+    .wrap { max-width: 1320px; margin: 0 auto; padding: 16px; }
+    header { display: flex; align-items: center; gap: 12px; flex-wrap: wrap; margin-bottom: 14px; }
+    header h1 { font-size: 18px; margin: 0; }
+    .status-pill { display: inline-flex; align-items: center; gap: 6px; padding: 3px 10px; border-radius: 999px; font-size: 12px; font-weight: 600; background: var(--chip-bg); color: var(--text-muted); border: 1px solid var(--panel-border); }
+    .status-pill::before { content: ""; width: 8px; height: 8px; border-radius: 50%; background: var(--text-muted); }
+    .status-pill.connected { color: var(--ok); } .status-pill.connected::before { background: var(--ok); }
+    .status-pill.error { color: var(--danger); } .status-pill.error::before { background: var(--danger); }
+    .panel { background: var(--panel-bg); border: 1px solid var(--panel-border); border-radius: 10px; box-shadow: var(--shadow); padding: 14px; margin-bottom: 14px; }
+    .panel h2 { font-size: 13px; text-transform: uppercase; letter-spacing: .06em; color: var(--text-muted); margin: 0 0 10px; }
+    .panel h2 .sub { text-transform: none; letter-spacing: 0; font-weight: 400; }
+    .row { display: flex; align-items: center; gap: 10px; flex-wrap: wrap; }
+    .row + .row { margin-top: 10px; }
+    .muted { color: var(--text-muted); font-size: 12.5px; }
+    .spacer { flex: 1 1 auto; }
+    .main { display: grid; grid-template-columns: minmax(0, 1.25fr) minmax(360px, 1fr); gap: 14px; align-items: start; }
+    .nowrap { display: inline-flex; align-items: center; gap: 6px; white-space: nowrap; }
+    @media (max-width: 980px) { .main { grid-template-columns: minmax(0, 1fr); } }
+    button { font: inherit; padding: 7px 14px; border-radius: 7px; cursor: pointer; border: 1px solid var(--panel-border); background: var(--chip-bg); color: var(--text); }
+    button.primary { background: var(--accent); border-color: var(--accent); color: var(--accent-contrast); }
+    button.primary:hover:not(:disabled) { background: var(--accent-hover); border-color: var(--accent-hover); }
+    button.danger { background: var(--danger); border-color: var(--danger); color: #fff; }
+    button.ok { background: var(--ok); border-color: var(--ok); color: #fff; }
+    button.small { padding: 5px 10px; font-size: 13px; }
+    button:disabled { opacity: .5; cursor: not-allowed; }
+    button:focus-visible, input:focus-visible, select:focus-visible, svg:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
+    label { display: inline-flex; align-items: center; gap: 6px; font-size: 13px; color: var(--text-muted); }
+    input[type="text"], input[type="number"], select { font: inherit; padding: 6px 8px; border-radius: 6px; background: var(--input-bg); color: var(--text); border: 1px solid var(--input-border); }
+    input[type="text"], input[type="number"] { font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; width: 96px; }
+    input.tiny { width: 72px; }
+    .mono { font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; }
+    .state-badge { display: inline-block; padding: 3px 10px; border-radius: 8px; font-weight: 700; font-size: 12.5px; border: 1px solid var(--panel-border); background: var(--chip-bg); color: var(--text-muted); }
+    .state-badge.enabled { color: var(--ok); border-color: var(--ok); }
+    .state-badge.idle { color: var(--accent); border-color: var(--accent); }
+    .state-badge.fault { color: var(--danger); border-color: var(--danger); }
+    .state-badge.warn { color: var(--warn); border-color: var(--warn); }
+    .statusline { display: flex; gap: 16px; flex-wrap: wrap; font-size: 12.5px; color: var(--text-muted); font-variant-numeric: tabular-nums; }
+    .statusline b { color: var(--text); font-weight: 600; }
+    hr.sep { border: none; border-top: 1px solid var(--panel-border); margin: 12px 0; }
+    /* the linkage view */
+    .view { position: relative; background: var(--view-bg); border-radius: 8px; overflow: hidden; }
+    .view svg { display: block; width: 100%; height: auto; max-height: 68vh; touch-action: none; cursor: crosshair; user-select: none; }
+    .view svg.dragging { cursor: grabbing; }
+    .view .hint { position: absolute; left: 10px; bottom: 8px; font-size: 11px; color: var(--view-text); pointer-events: none; }
+    .legend { display: flex; flex-wrap: wrap; gap: 4px 14px; font-size: 12px; color: var(--text-muted); margin-top: 8px; }
+    .legend i { display: inline-block; width: 18px; height: 4px; border-radius: 2px; vertical-align: middle; margin-right: 5px; }
+    .readouts { display: grid; grid-template-columns: repeat(auto-fit, minmax(170px, 1fr)); gap: 6px 14px; margin-top: 10px; font-variant-numeric: tabular-nums; font-size: 13px; }
+    .readouts div { display: flex; justify-content: space-between; gap: 8px; border-bottom: 1px dotted var(--panel-border); }
+    .readouts .k { color: var(--text-muted); }
+    .readouts .v { font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; }
+    .readouts .bad { color: var(--danger); } .readouts .good { color: var(--ok); }
+    /* settings grid: label, input(s), unit */
+    .settings { display: grid; grid-template-columns: auto 1fr auto; gap: 8px 10px; align-items: center; font-size: 13px; }
+    .settings .k { color: var(--text-muted); white-space: nowrap; }
+    .settings select, .settings input[type="number"] { width: 100%; }
+    .settings .pair { display: flex; gap: 6px; }
+    .settings .pair input, .settings .pair select { width: 50%; min-width: 0; }
+    .settings .triple { display: flex; gap: 6px; }
+    .settings .triple input { width: 33%; min-width: 0; }
+    .settings .full { grid-column: 1 / -1; }
+    .settings .note { grid-column: 1 / -1; font-size: 12px; color: var(--warn); }
+    .settings h3 { grid-column: 1 / -1; margin: 6px 0 0; font-size: 12px; text-transform: uppercase; letter-spacing: .05em; color: var(--text-muted); border-top: 1px solid var(--panel-border); padding-top: 8px; }
+    .settings .u { color: var(--text-muted); font-size: 12px; white-space: nowrap; }
+    /* motor cards */
+    .motor { border: 1px solid var(--panel-border); border-radius: 8px; padding: 10px 12px; margin-bottom: 10px; background: var(--row-alt); }
+    .motor .head { display: flex; align-items: center; gap: 10px; flex-wrap: wrap; }
+    .motor .head b { font-size: 14px; }
+    .motor .vals { display: grid; grid-template-columns: repeat(auto-fit, minmax(120px, 1fr)); gap: 4px 12px; margin-top: 8px; font-size: 12.5px; font-variant-numeric: tabular-nums; }
+    .motor .vals span { display: flex; justify-content: space-between; gap: 6px; border-bottom: 1px dotted var(--panel-border); }
+    .motor .vals .k { color: var(--text-muted); }
+    .motor .vals .v { font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; }
+    .btns { display: flex; gap: 6px; flex-wrap: wrap; margin-top: 8px; }
+    .jog { display: grid; grid-template-columns: repeat(3, 44px); grid-template-rows: repeat(3, 36px); gap: 4px; }
+    .jog button { padding: 0; font-size: 16px; }
+    .jog .c { display: flex; align-items: center; justify-content: center; font-size: 11px; color: var(--text-muted); }
+    .log { background: var(--log-bg); color: var(--log-text); border-radius: 8px; padding: 10px 12px; font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; font-size: 12px; line-height: 1.5; height: 150px; overflow-y: auto; overflow-x: auto; white-space: pre-wrap; word-break: break-word; }
+    .log .t { color: var(--time); } .log .tx { color: var(--tx); } .log .rx { color: var(--rx); } .log .err { color: var(--err); } .log .warn { color: #d08770; } .log .sys { color: var(--sys); }
+    footer { color: var(--text-muted); font-size: 12px; margin-top: 10px; }
+    #unsupported { display: none; background: var(--panel-bg); border: 1px solid var(--danger); color: var(--danger); border-radius: 10px; padding: 12px 14px; margin-bottom: 14px; }
+    .espp-nav { display: inline-flex; gap: 6px; align-items: center; margin-left: 12px; font-size: 12px; font-weight: 600; vertical-align: middle; }
+    .espp-nav a { text-decoration: none; white-space: nowrap; padding: 4px 10px; border-radius: 6px;
+      border: 1px solid var(--accent, #4aa8ff); color: var(--accent, #4aa8ff); }
+    .espp-nav a.hub { background: var(--accent, #4aa8ff); color: var(--accent-contrast, #06121f); }
+    .espp-nav a:hover { filter: brightness(1.1); }
+    .espp-nav a:focus-visible { outline: 2px solid var(--accent, #4aa8ff); outline-offset: 2px; }
+    details > summary { cursor: pointer; font-size: 13px; text-transform: uppercase; letter-spacing: .06em; color: var(--text-muted); margin-bottom: 10px; }
+  </style>
+</head>
+<body>
+  <div class="wrap">
+    <header>
+      <h1>PEAR Linkage Console <span class="muted">(WebUSB / Web Serial)</span></h1>
+      <nav class="espp-nav" aria-label="espp web apps"><a id="navHub" class="hub" href="https://esp-cpp.github.io/espp/apps/dispatcher_hub.html" title="Back to the espp Device Hub (hands a connected device back to it)">Device Hub</a><a id="navApps" href="https://esp-cpp.github.io/espp/apps/index.html" title="All espp web apps">All apps</a></nav>
+      <span id="status" class="status-pill">Disconnected</span>
+    </header>
+
+    <div id="unsupported">
+      This browser supports neither WebUSB nor Web Serial. Use a Chromium-based browser
+      (Chrome / Edge / Opera) on a secure origin (https, localhost or file://).
+    </div>
+
+    <!-- ============================ Device ============================ -->
+    <div class="panel">
+      <h2>Device</h2>
+      <div class="row">
+        <button id="connectUsbBtn" class="primary">Connect (WebUSB)</button>
+        <button id="connectSerialBtn">Connect (Web Serial)</button>
+        <button id="disconnectBtn" class="danger" disabled>Disconnect</button>
+        <label><input type="checkbox" id="anyDevice"> Any device (ignore VID/PID filter)</label>
+        <label title="Reconnect automatically when the device comes back after a reboot or re-plug"><input type="checkbox" id="autoReconnect" checked> auto-reconnect</label>
+        <div class="spacer"></div>
+        <label title="Stream a status snapshot from the device at this period"><input type="checkbox" id="liveStream" checked> Live</label>
+        <label>every <select id="streamPeriod"><option value="50">50 ms</option><option value="100" selected>100 ms</option><option value="200">200 ms</option><option value="500">500 ms</option><option value="1000">1 s</option></select></label>
+        <button id="refreshBtn" class="small" disabled title="Fetch one status snapshot">Refresh</button>
+      </div>
+      <p id="devInfo" class="muted" style="margin: 10px 0 0;">Not connected. Default WebUSB filter: VID 0x1209 (espp default).</p>
+      <div class="statusline" style="margin-top:8px;">
+        <span>Linkage: <span id="linkState" class="state-badge">-</span></span>
+        <span title="The CAN controller's TWAI error state and counters (bitrate / wiring check): stuff/form/bit errors are signal integrity - 120 ohm termination at both ends only, every node's isolated CAN ground tied to the bus ground, short stubs, a node at another bitrate; ACK errors mean nobody heard a frame we sent (bus open / nodes off); no errors and a silent motor = off, at another id or not on this bus">CAN: <b id="devCan">-</b> <span id="devCanErrors" class="muted"></span></span>
+        <button id="canRecoverBtn" class="small danger" disabled title="Start the CAN bus-off recovery (it also happens automatically)" style="display:none">Recover CAN</button>
+        <span>Firmware: <b id="devFw">-</b></span>
+        <span>Torque ceiling: <b id="devMaxTorque">-</b></span>
+        <span>Received: <b id="rxRate">-</b></span>
+        <div class="spacer"></div>
+        <button id="enableAllBtn" class="small ok" disabled title="DS402 Operation enabled on both motors (they hold position and accept moves)">Enable both</button>
+        <button id="disableAllBtn" class="small" disabled title="Power stage off on both motors (the linkage is free)">Disable both</button>
+        <button id="resetAllBtn" class="small" disabled title="Clear a DS402 fault on both motors">Reset faults</button>
+        <button id="haltAllBtn" class="small danger" disabled title="Stop the moves in progress (profile deceleration), stay enabled">HALT</button>
+      </div>
+    </div>
+
+    <div class="main">
+      <div>
+        <!-- ============================ Linkage view ============================ -->
+        <div class="panel">
+          <h2>Linkage <span class="sub">— linkage frame, mm: origin M1, +x toward M2, crank angles CCW from +x</span></h2>
+          <div class="view">
+            <svg id="canvas" viewBox="-300 -300 800 600" preserveAspectRatio="xMidYMid meet" tabindex="0" aria-label="5-bar linkage drawing; drag to place the target"></svg>
+            <div class="hint">drag to place the target (M3) &middot; arrow keys jog by the step &middot; shaded = reachable within the motor limits</div>
+          </div>
+          <div class="legend">
+            <span><i style="background:var(--link1)"></i>crank 1 M1→J2</span>
+            <span><i style="background:var(--link2)"></i>crank 2 M2→J1</span>
+            <span><i style="background:var(--link4)"></i>bar J2→J3 (→ M3)</span>
+            <span><i style="background:var(--link3)"></i>coupler J1→J3</span>
+            <span><i style="background:var(--ee)"></i>end effector M3</span>
+            <span><i style="background:var(--target);opacity:.6"></i>target (drag)</span>
+            <span><i style="background:transparent;border-top:2px dashed #9aa6ba;height:0;border-radius:0"></i>home pose (zero reference, always drawn)</span>
+          </div>
+          <div class="readouts">
+            <div><span class="k">pose x / y</span><span class="v" id="poseXY">-</span></div>
+            <div><span class="k">cranks θ1 / θ2</span><span class="v" id="poseThetas">-</span></div>
+            <div><span class="k">motors m1 / m2</span><span class="v" id="poseMotors">-</span></div>
+            <div><span class="k">bar angle</span><span class="v" id="poseBar">-</span></div>
+            <div><span class="k">target x / y</span><span class="v" id="targetXY">-</span></div>
+            <div><span class="k">target status</span><span class="v" id="targetStatus">-</span></div>
+            <div><span class="k">device target</span><span class="v" id="deviceTarget">-</span></div>
+            <div><span class="k">motion</span><span class="v" id="motion">-</span></div>
+          </div>
+        </div>
+
+        <!-- ============================ Move ============================ -->
+        <div class="panel">
+          <h2>Move the end effector</h2>
+          <div class="row">
+            <label>x <input type="number" id="targetX" step="1" value="0"> mm</label>
+            <label>y <input type="number" id="targetY" step="1" value="0"> mm</label>
+            <button id="moveToBtn" class="small primary" disabled title="Move the end effector to the target (device-side ik; refused when unreachable or outside the motor limits)">Move to</button>
+            <button id="homeBtn" class="small" disabled title="Both cranks to the configured home angles">Home</button>
+            <label title="Send one Move to when a drag ends"><input type="checkbox" id="moveOnRelease" checked> move on release</label>
+            <label title="Send moves while dragging (4 Hz)"><input type="checkbox" id="liveDrag"> live drag</label>
+          </div>
+          <div class="row" style="margin-top:10px; align-items:flex-start;">
+            <div class="jog">
+              <span></span><button id="jogUp" class="small" disabled title="+y">&uarr;</button><span></span>
+              <button id="jogLeft" class="small" disabled title="-x">&larr;</button><span class="c" id="jogStepLabel">5 mm</span><button id="jogRight" class="small" disabled title="+x">&rarr;</button>
+              <span></span><button id="jogDown" class="small" disabled title="-y">&darr;</button><span></span>
+            </div>
+            <label>step <input type="number" id="jogStep" class="tiny" value="5" min="0.1" step="1"> mm</label>
+            <span class="muted">Jogs move relative to the device's pending target, else to its measured pose. The device refuses a jog that leaves the reachable area or the motor limits.</span>
+          </div>
+        </div>
+      </div>
+
+      <div>
+        <!-- ============================ Motors ============================ -->
+        <div class="panel">
+          <h2>Motors</h2>
+          <div id="motors"></div>
+        </div>
+
+        <!-- ============================ Settings ============================ -->
+        <div class="panel">
+          <details open>
+            <summary>Settings <span class="muted">(geometry, motors, profile — stored on the device)</span></summary>
+            <div class="settings" id="settings">
+              <h3>Geometry</h3>
+              <span class="k" title="M2 relative to M1 (M1 is the origin)">M2 x / y</span><span class="pair"><input type="number" id="gM2x" step="1"><input type="number" id="gM2y" step="1"></span><span class="u">mm</span>
+              <span class="k" title="M1 -> J2 and M2 -> J1">cranks 1 / 2</span><span class="pair"><input type="number" id="gCrank1" step="1" min="0.1"><input type="number" id="gCrank2" step="1" min="0.1"></span><span class="u">mm</span>
+              <span class="k" title="bar: J2 -> J3 (the end effector rides on this link); coupler: J1 -> J3">bar / coupler</span><span class="pair"><input type="number" id="gBar" step="1" min="0.1"><input type="number" id="gCoupler" step="1" min="0.1"></span><span class="u">mm</span>
+              <span class="k" title="The end effector M3 past J3 along the bar (0 = M3 is J3), and its perpendicular offset (90 deg CCW of J2 -> J3)">M3 extension / offset</span><span class="pair"><input type="number" id="gExt" step="1"><input type="number" id="gOff" step="1"></span><span class="u">mm</span>
+              <span class="k" title="Which crank assembly the machine is built in. Any: the candidate closest to the measured pose (continuity). Crossed: the cranks cross (STEM). Open: the whole loop M1-J2-J3-J1-M2 stays a simple polygon - cranks apart, bar and coupler never folded back across a crank or the ground, the end-effector arm likewise; poses that fold are refused by both the preview and the device.">assembly</span><select id="gAssembly"><option value="0">any (closest to the current pose)</option><option value="1">crossed cranks (STEM)</option><option value="2">open (cranks never cross)</option></select><span></span>
+              <span class="k" title="On which side of the J1 -> J2 line the joint J3 folds: a fixed property of the machine">J3 side of J1→J2</span><select id="gSide"><option value="0">counter-clockwise</option><option value="1">clockwise</option></select><span></span>
+              <span class="k" title="The Home pose, and the ik's branch reference while no pose is measured">home θ1 / θ2</span><span class="pair"><input type="number" id="hTheta1" step="1"><input type="number" id="hTheta2" step="1"></span><button class="small" id="hUseCurrentBtn" title="Copy the measured crank angles">use current</button>
+              <h3>Motor 1 (crank 1, M1)</h3>
+              <span class="k" title="The CANopen node id the drive on this crank answers on (0 = no motor on this crank). Apply makes the device talk to that id; it does not change the drive.">node id</span><input type="number" id="mNode1" min="0" max="127" step="1"><span class="u" id="mNodeNote1"></span>
+              <span class="k" title="Re-address the DRIVE on this crank: writes the new id into both of its Node-ID objects, saves them and resets its communication (~5 s). On success the node id above follows it and is saved. 'saved, needs a power cycle' means the drive keeps its old id until power-cycled: then set the node id above by hand.">re-address drive to</span><span class="pair"><input type="number" id="mNewNode1" min="1" max="127" step="1" placeholder="new id"><button class="small" id="mProgram1" disabled>Program drive</button></span><span></span>
+              <span class="k" title="+1: a positive motor angle turns the crank counter-clockwise; -1: clockwise">direction</span><select id="mDir1"><option value="1">+1 (motor + = crank CCW)</option><option value="-1">-1 (motor + = crank CW)</option></select><span></span>
+              <span class="k" title="Motor angle limits (motor degrees from its zero); moves outside are refused">limits min / max</span><span class="pair"><input type="number" id="mMin1" step="1"><input type="number" id="mMax1" step="1"></span><span class="u">deg</span>
+              <span class="k" title="The crank's angle in the linkage frame when the motor reads 0">crank angle at zero</span><input type="number" id="mZeroTheta1" step="1"><span class="u">deg</span>
+              <span class="k" title="Max torque (object 0x6072): set in Nm once the drive has reported its rated torque (stored and sent as per-thousand of rated); the device's ceiling caps it">torque limit</span><input type="number" id="mTorque1" min="0" max="3000" step="10"><span class="u" id="mTorqueUnit1">‰</span>
+              <h3>Motor 2 (crank 2, M2)</h3>
+              <span class="k">node id</span><input type="number" id="mNode2" min="0" max="127" step="1"><span class="u" id="mNodeNote2"></span>
+              <span class="k">re-address drive to</span><span class="pair"><input type="number" id="mNewNode2" min="1" max="127" step="1" placeholder="new id"><button class="small" id="mProgram2" disabled>Program drive</button></span><span></span>
+              <span class="k">direction</span><select id="mDir2"><option value="1">+1 (motor + = crank CCW)</option><option value="-1">-1 (motor + = crank CW)</option></select><span></span>
+              <span class="k">limits min / max</span><span class="pair"><input type="number" id="mMin2" step="1"><input type="number" id="mMax2" step="1"></span><span class="u">deg</span>
+              <span class="k">crank angle at zero</span><input type="number" id="mZeroTheta2" step="1"><span class="u">deg</span>
+              <span class="k">torque limit</span><input type="number" id="mTorque2" min="0" max="3000" step="10"><span class="u" id="mTorqueUnit2">‰</span>
+              <h3>Profile (both motors)</h3>
+              <span class="k" title="Profile position velocity / acceleration / deceleration (each motor moves on its own profile: the end effector path between two poses is not a straight line)">vel / acc / dec</span><span class="triple"><input type="number" id="pVel" step="1" min="0.1"><input type="number" id="pAcc" step="1" min="0.1"><input type="number" id="pDec" step="1" min="0.1"></span><span class="u">deg/s, deg/s²</span>
+              <span class="note" id="settingsNote" style="color: var(--text-muted);">Edits preview in the drawing at once; Apply sends them to the device, which validates and stores them.</span>
+            </div>
+            <div class="btns">
+              <button id="settingsApplyBtn" class="small primary" disabled title="Send the settings to the device (validated there, saved in its NVS, applied to the motors)">Apply to device</button>
+              <button id="settingsReloadBtn" class="small" disabled title="Discard the edits and show the device's settings">Reload from device</button>
+              <button id="settingsResetBtn" class="small" disabled title="Back to the firmware defaults (click twice)">Reset to defaults</button>
+            </div>
+          </details>
+        </div>
+      </div>
+    </div>
+
+    <!-- ============================ Log ============================ -->
+    <div class="panel">
+      <h2>Log <button id="clearLogBtn" class="small" style="float:right; margin-top:-4px;">Clear</button></h2>
+      <div id="log" class="log"></div>
+    </div>
+
+    <footer>
+      PEAR Linkage Console &middot; talks to the PEAR linkage firmware
+      (<span class="mono">pear_linkage/</span>), which runs the <span class="mono">EyouMotor</span>
+      CANopen / DS402 driver and the 5-bar kinematics on the device. Single-file, offline, no dependencies.
+    </footer>
+  </div>
+
+  <script>
+    "use strict";
+
+    // ===================== stream_frame protocol =====================
+    const DEFAULT_VID = 0x1209, DEFAULT_PID = 0x0d3c, VENDOR_CLASS = 0xFF;
+    const MAGIC0 = 0x54, MAGIC1 = 0x4F, HEADER_SIZE = 9, CRC_SIZE = 4, CORRELATION_SIZE = 2;
+    const MAX_PAYLOAD = 4096, MAX_FRAME = HEADER_SIZE + CORRELATION_SIZE + MAX_PAYLOAD + CRC_SIZE;
+    const FLAGS_VERSION = 1, FLAGS_REQUEST = (FLAGS_VERSION << 4), FLAGS_REPLY_BIT = 0x01, FLAG_CORRELATION = 0x02;
+    // The dispatcher module byte is only a routing key: the linkage service is
+    // published on module 0x21 by default, but a device may serve it on any id.
+    // The id actually used is resolved on connect from the device's discovery
+    // reply (by the advertised protocol id, then app / name), from ?module=N,
+    // or the default. PROTOCOL(_VERSION) mirror linkage_protocol::kProtocol(Version).
+    const DEFAULT_MODULE = 0x21;
+    const PROTOCOL = "pear.linkage", PROTOCOL_VERSION = 1;
+    const MODULE_IDENT = { protocol: PROTOCOL, protocolVersion: PROTOCOL_VERSION,
+                           app: "linkage_console.html", name: "PEAR linkage", fallback: DEFAULT_MODULE, override: null };
+    let moduleLinkage = DEFAULT_MODULE;         // adopted by adoptModule() before the first linkage frame
+    // True once adoptModule() has run for this connection: every send path
+    // waits for it, so nothing can go out on the default id while the discovery
+    // probe (up to DISCOVERY_TIMEOUT_MS) is still pending.
+    let moduleReady = false;
+    // Reserved dispatcher discovery module: a device running an espp::Dispatcher
+    // answers a ListModules query on 0xFF with the modules it serves, which is
+    // how the linkage module's id is found before driving it.
+    const MODULE_DISCOVERY = 0xFF, T_LIST_MODULES = 0x00;
+    const DISCOVERY_TIMEOUT_MS = 800;        // module-presence probe (0xFF ListModules) timeout
+    // requests
+    const T_GET_INFO = 0x10, T_GET_STATUS = 0x11, T_SET_STREAM = 0x12, T_GET_SETTINGS = 0x13, T_SET_SETTINGS = 0x14,
+          T_RESET_SETTINGS = 0x15, T_MOVE_TO = 0x16, T_MOVE_BY = 0x17, T_HOME = 0x18, T_SET_MOTOR = 0x19,
+          T_ENABLE = 0x1B, T_DISABLE = 0x1C, T_RESET_FAULT = 0x1D, T_HALT = 0x1E, T_ZERO_MOTOR = 0x1F,
+          T_SAVE_ZERO = 0x20, T_LOAD_ZERO = 0x21, T_SOLVE_IK = 0x22, T_RECOVER_CAN = 0x23, T_SET_DRIVE_NODE_ID = 0x24, T_JOG_MOTOR = 0x25;
+    const JOG_MAX_DEG = 10; // linkage_protocol::kJogMaxDeg
+    const CONSOLE_PROTOCOL_VERSION = 2;
+    const CAN_STATE = { 0: "not started", 1: "error active", 2: "error warning", 3: "error passive", 4: "BUS OFF", 255: "?" };
+    // replies
+    const T_INFO = 0x90, T_STATUS = 0x91, T_SETTINGS = 0x92, T_IK_RESULT = 0x93, T_OK = 0x94, T_ERROR = 0x95;
+    const REQ_NAME = { 0x10:"get info",0x11:"get status",0x12:"set stream",0x13:"get settings",0x14:"set settings",
+      0x15:"reset settings",0x16:"move to",0x17:"move by",0x18:"home",0x19:"set motor",0x1B:"enable",0x1C:"disable",
+      0x1D:"reset fault",0x1E:"halt",0x1F:"zero motor",0x20:"save zero",0x21:"load zero",0x22:"solve ik" };
+    const ALL_MOTORS = 0xFF;
+    const STATUS_POLL_MS = 1000;
+
+    const els = {};
+    for (const id of ["status","connectUsbBtn","connectSerialBtn","disconnectBtn","anyDevice","autoReconnect","devInfo",
+      "liveStream","streamPeriod","refreshBtn","linkState","devCan","devCanErrors","canRecoverBtn","devFw","devMaxTorque","rxRate",
+      "enableAllBtn","disableAllBtn","resetAllBtn","haltAllBtn","canvas",
+      "poseXY","poseThetas","poseMotors","poseBar","targetXY","targetStatus","deviceTarget","motion",
+      "targetX","targetY","moveToBtn","homeBtn","moveOnRelease","liveDrag","jogUp","jogDown","jogLeft","jogRight","jogStep","jogStepLabel",
+      "motors","settings","gM2x","gM2y","gCrank1","gCrank2","gBar","gCoupler","gExt","gOff","gAssembly","gSide","hTheta1","hTheta2","hUseCurrentBtn",
+      "mNode1","mDir1","mMin1","mMax1","mZeroTheta1","mTorque1","mNode2","mDir2","mMin2","mMax2","mZeroTheta2","mTorque2","mTorqueUnit1","mTorqueUnit2","mProgram1","mProgram2","mNewNode1","mNewNode2","mNodeNote1","mNodeNote2",
+      "pVel","pAcc","pDec","settingsNote","settingsApplyBtn","settingsReloadBtn","settingsResetBtn",
+      "clearLogBtn","log","unsupported"]) els[id] = document.getElementById(id);
+
+    function logLine(cls, text) {
+      const line = document.createElement("div");
+      const time = document.createElement("span"); time.className = "t"; time.textContent = new Date().toLocaleTimeString() + " ";
+      const body = document.createElement("span"); body.className = cls; body.textContent = text;
+      line.appendChild(time); line.appendChild(body); els.log.appendChild(line);
+      while (els.log.childNodes.length > 400) els.log.removeChild(els.log.firstChild);
+      els.log.scrollTop = els.log.scrollHeight;
+    }
+    els.clearLogBtn.addEventListener("click", () => { els.log.textContent = ""; });
+    function setStatus(state, text) { els.status.className = "status-pill" + (state ? " " + state : ""); els.status.textContent = text; }
+
+    // ---- CRC-32 (zlib), golden crc32("123456789") === 0xCBF43926 ----
+    const CRC_TABLE = (() => { const t = new Uint32Array(256); for (let i=0;i<256;i++){ let c=i; for(let k=0;k<8;k++) c=(c&1)?((c>>>1)^0xEDB88320):(c>>>1); t[i]=c>>>0; } return t; })();
+    function crc32(bytes) { let c=0xFFFFFFFF; for (let i=0;i<bytes.length;i++) c=CRC_TABLE[(c^bytes[i])&0xFF]^(c>>>8); return (~c)>>>0; }
+    if (crc32(new TextEncoder().encode("123456789")) !== 0xCBF43926) throw new Error("CRC-32 self-test failed");
+
+    function buildFrame(type, payload, module = moduleLinkage) {
+      payload = payload || new Uint8Array(0);
+      const frame = new Uint8Array(HEADER_SIZE + payload.length + CRC_SIZE);
+      const view = new DataView(frame.buffer);
+      view.setUint16(0, 0x4F54, true);
+      frame[2] = FLAGS_REQUEST | ((type & 0x80) ? FLAGS_REPLY_BIT : 0);
+      frame[3] = module; frame[4] = type;
+      view.setUint32(5, payload.length, true);
+      frame.set(payload, HEADER_SIZE);
+      view.setUint32(HEADER_SIZE + payload.length, crc32(frame.subarray(0, HEADER_SIZE + payload.length)), true);
+      return frame;
+    }
+
+    class StreamParser {
+      constructor() { this.buf = new Uint8Array(0); }
+      reset() { this.buf = new Uint8Array(0); }
+      feed(chunk) {
+        const merged = new Uint8Array(this.buf.length + chunk.length);
+        merged.set(this.buf, 0); merged.set(chunk, this.buf.length);
+        const frames = []; let pos = 0;
+        for (;;) {
+          while (pos < merged.length && !(merged[pos] === MAGIC0 && (pos + 1 >= merged.length || merged[pos + 1] === MAGIC1))) pos++;
+          if (merged.length - pos < 3) break;
+          const flags = merged[pos + 2];
+          const ext = (flags & FLAG_CORRELATION) ? CORRELATION_SIZE : 0;
+          const headerSize = HEADER_SIZE + ext;
+          if (merged.length - pos < headerSize) break;
+          const view = new DataView(merged.buffer, merged.byteOffset + pos);
+          const len = view.getUint32(5 + ext, true);
+          if (len > MAX_PAYLOAD) { pos++; continue; }
+          const total = headerSize + len + CRC_SIZE;
+          if (merged.length - pos < total) break;
+          const expected = view.getUint32(headerSize + len, true);
+          if (crc32(merged.subarray(pos, pos + headerSize + len)) !== expected) { pos++; continue; }
+          frames.push({ module: merged[pos + 3], type: merged[pos + 4], reply: (flags & FLAGS_REPLY_BIT) !== 0,
+                        payload: merged.slice(pos + headerSize, pos + headerSize + len) });
+          pos += total;
+        }
+        this.buf = merged.slice(pos);
+        return frames;
+      }
+    }
+    const parser = new StreamParser();
+    // A pending checkModulePresent() parks its resolver here; onIncoming calls it
+    // when the 0xFF ListModules reply arrives.
+    let discoveryResolve = null;
+
+    // ===================== Transports (WebUSB + Web Serial) =====================
+    let transport = null;
+    // WebUSB requires a `filters` member (there is no acceptAllDevices). The
+    // "show all" path uses one empty filter `{}` (matches everything); a few
+    // WebUSB implementations reject an empty filter object, so fall back to a
+    // VID-only filter in that case.
+    async function requestUsbDevice(anyDevice) {
+      const showAll = { filters: [{}] };
+      const vidOnly = { filters: [{ vendorId: DEFAULT_VID }] };
+      try {
+        return await navigator.usb.requestDevice(anyDevice ? showAll : vidOnly);
+      } catch (e) {
+        if (anyDevice && e && e.name === "TypeError")
+          return await navigator.usb.requestDevice(vidOnly);
+        throw e;
+      }
+    }
+    class UsbTransport {
+      constructor() { this.device=null; this.iface=null; this.epIn=null; this.epOut=null; this.reading=false; }
+      // `preset`: an already-permitted USBDevice (auto-connect / reconnect) is
+      // opened directly, without the chooser.
+      async open(anyDevice, preset) {
+        this.device = preset || await requestUsbDevice(anyDevice);
+        await this.device.open();
+        if (this.device.configuration === null) await this.device.selectConfiguration(1);
+        const config = this.device.configuration; if (!config) throw new Error("no active USB configuration");
+        let found = null;
+        for (const itf of config.interfaces) { for (const alt of itf.alternates) {
+          if (alt.interfaceClass !== VENDOR_CLASS) continue;
+          let inEp=null, outEp=null;
+          for (const ep of alt.endpoints) { if (ep.type!=="bulk") continue; if (ep.direction==="in"&&!inEp) inEp=ep; else if (ep.direction==="out"&&!outEp) outEp=ep; }
+          if (inEp && outEp) { found = { itf: itf.interfaceNumber, alt: alt.alternateSetting, inEp, outEp }; break; }
+        } if (found) break; }
+        if (!found) throw new Error("no vendor-specific (0xFF) interface with a bulk IN+OUT endpoint pair was found");
+        await this.device.claimInterface(found.itf);
+        if (found.alt !== 0) await this.device.selectAlternateInterface(found.itf, found.alt);
+        this.iface = found.itf; this.epIn = found.inEp.endpointNumber; this.epOut = found.outEp.endpointNumber;
+      }
+      describe() { const d=this.device; return (d.productName||"USB device")+" ("+d.vendorId.toString(16).padStart(4,"0")+":"+d.productId.toString(16).padStart(4,"0")+") [WebUSB]"; }
+      identity() { return usbIdentity(this.device); }
+      async send(bytes) {
+        let sent = 0;
+        while (sent < bytes.length) {
+          const out = await this.device.transferOut(this.epOut, sent === 0 ? bytes : bytes.subarray(sent));
+          if (out.status === "stall") { try { await this.device.clearHalt("out", this.epOut); } catch(_){} throw new Error("OUT endpoint stalled"); }
+          if (out.status !== "ok") throw new Error("OUT transfer status: " + out.status);
+          const n = out.bytesWritten || 0; if (n === 0) throw new Error("OUT transfer made no progress"); sent += n;
+        }
+      }
+      async readLoop(onData) {
+        this.reading = true;
+        while (this.reading && this.device) {
+          let result;
+          try { result = await this.device.transferIn(this.epIn, MAX_FRAME); } catch(e) { if (this.reading) throw e; return; }
+          if (!this.reading) return;
+          if (result.status === "stall") { try { await this.device.clearHalt("in", this.epIn); } catch(_){} continue; }
+          if (result.data && result.data.byteLength) onData(new Uint8Array(result.data.buffer, result.data.byteOffset, result.data.byteLength));
+        }
+      }
+      async close() { this.reading = false; if (this.device) { if (this.iface !== null) { try { await this.device.releaseInterface(this.iface); } catch(_){} } try { await this.device.close(); } catch(_){} } this.device = null; }
+    }
+    class SerialTransport {
+      constructor() { this.port=null; this.reader=null; this.writer=null; this.reading=false; }
+      async open(preset) { this.port = preset || await navigator.serial.requestPort(); await this.port.open({ baudRate: 115200 }); this.writer = this.port.writable.getWriter(); }
+      describe() { const info = this.port.getInfo ? this.port.getInfo() : {}; let id = "Serial port"; if (info && info.usbVendorId != null) id = "USB serial ("+info.usbVendorId.toString(16).padStart(4,"0")+":"+(info.usbProductId||0).toString(16).padStart(4,"0")+")"; return id + " [Web Serial]"; }
+      identity() { return serialIdentity(this.port); }
+      async send(bytes) { await this.writer.write(bytes); }
+      async readLoop(onData) {
+        this.reading = true; this.reader = this.port.readable.getReader();
+        try { while (this.reading) { const { value, done } = await this.reader.read(); if (done) { if (this.reading) throw new Error("serial connection closed (EOF)"); break; } if (value && value.length) onData(new Uint8Array(value.buffer, value.byteOffset, value.byteLength)); } }
+        finally { try { this.reader.releaseLock(); } catch(_){} this.reader = null; }
+      }
+      async close() {
+        this.reading = false;
+        if (this.reader) { try { await this.reader.cancel(); } catch(_){} try { this.reader.releaseLock(); } catch(_){} this.reader = null; }
+        if (this.writer) { try { await this.writer.close(); } catch(_){} try { this.writer.releaseLock(); } catch(_){} this.writer = null; }
+        if (this.port) { try { await this.port.close(); } catch(_){} this.port = null; }
+      }
+    }
+
+    async function tx(bytes) { if (!transport) { logLine("err", "not connected"); return; } try { await transport.send(bytes); } catch(e) { logLine("err", "send failed: " + (e && e.message ? e.message : e)); } }
+    function send(type, payload) {
+      if (!moduleReady) { logLine("warn", "Module id not resolved yet (discovery pending)."); return; }
+      tx(buildFrame(type, payload));
+    }
+
+    // ===================== Module discovery + module id resolution =====================
+    // Decode the ListModules TLV (see espp::Dispatcher::describe).
+    function parseDiscovery(payload) {
+      let i = 0;
+      const need = (n) => { if (i + n > payload.length) throw new Error("truncated discovery payload"); };
+      const u8 = () => { need(1); return payload[i++]; };
+      const u16 = () => { need(2); const v = payload[i] | (payload[i + 1] << 8); i += 2; return v; };
+      const str = () => { const n = u8(); need(n); const s = new TextDecoder().decode(payload.subarray(i, i + n)); i += n; return s; };
+      const version = u8(); u8();            // version, reserved
+      const device = str(), fw = str();
+      const count = u8();
+      const modules = [];
+      for (let m = 0; m < count; m++) {
+        const rec = { id: u8(), name: str(), app: str(), desc: str(), protocol: "", protocolVersion: 0 };
+        // Version 2 records also carry [protocol str][protocol_version u16 LE].
+        // Records carry no length, so a payload version newer than
+        // DISCOVERY_VERSION_KNOWN is parsed with the exact version-2 record
+        // layout: a future version may only append bytes AFTER the record list
+        // (reported as `trailing`, ignored), never inside a record.
+        if (version >= 2) { rec.protocol = str(); rec.protocolVersion = u16(); }
+        modules.push(rec);
+      }
+      return { version, device, fw, modules, trailing: payload.length - i };
+    }
+    // ---- module id resolution (identical in every espp console) --------------
+    // The dispatcher module byte is a routing key, not the identity of a
+    // service: a device may serve any protocol on any id. Identity is what the
+    // device advertises in its ListModules reply -- the protocol id first
+    // (e.g. "espp.ota"), then the hosted app filename, then the module name.
+    // Latest discovery payload version these helpers understand.
+    const DISCOVERY_VERSION_KNOWN = 2;
+    // info: parseDiscovery() output, or null when the device did not answer.
+    // ident: { protocol, protocolVersion, app, name, fallback, override } -- the
+    //   identity this console implements; `override` (from ?module=) wins.
+    // Returns { id, source: "override"|"protocol"|"app"|"name"|"default",
+    //           protocolVersion (advertised by the chosen module, else null),
+    //           warnings: [strings], notes: [informational strings] }.
+    function resolveModuleId(info, ident) {
+      const norm = (s) => String(s == null ? "" : s).trim().toLowerCase();
+      const base = (s) => { const n = norm(s).split("?")[0].split("#")[0]; return n.slice(n.lastIndexOf("/") + 1); };
+      const list = (info && Array.isArray(info.modules)) ? info.modules : null;
+      const label = (m) => (m.name || m.protocol || "?") + " (#" + m.id + ")";
+      const want = String(ident.protocol || "");
+      const warnings = [], notes = [];
+      if (info && info.version > DISCOVERY_VERSION_KNOWN)
+        warnings.push("discovery payload v" + info.version + " is newer than this console understands (v" + DISCOVERY_VERSION_KNOWN + "); parsed with the v" + DISCOVERY_VERSION_KNOWN + " record layout");
+      if (info && info.trailing > 0)
+        notes.push("ignoring " + info.trailing + " trailing byte(s) after the module list (discovery v" + info.version + ")");
+      // Finish with the chosen module (m may be null when unknown), checking
+      // that it speaks the protocol we implement, at a version we support.
+      const done = (m, source) => {
+        const v = (m && Number.isInteger(m.protocolVersion)) ? m.protocolVersion : null;
+        if (m && want && m.protocol && m.protocol !== want)
+          warnings.push("module #" + m.id + " advertises protocol " + m.protocol + ", not " + want);
+        else if (v && Number.isInteger(ident.protocolVersion) && v !== ident.protocolVersion)
+          warnings.push("device speaks " + (m.protocol || want) + " v" + v + ", this console supports v" + ident.protocolVersion);
+        return { id: m ? m.id : ident.fallback, source, protocolVersion: v, warnings, notes };
+      };
+      const ov = ident.override;
+      if (Number.isInteger(ov) && ov >= 0 && ov <= 0xEF) { // 0xF0..0xFF: reserved (dispatcher / meta)
+        const m = list ? list.find((x) => x.id === ov) : null;
+        if (list && !m) warnings.push("module #" + ov + " was requested but the device does not advertise it");
+        const r = done(m, "override"); r.id = ov; return r;
+      }
+      if (list) {
+        const byProto = want ? list.filter((m) => m.protocol === want) : [];
+        if (byProto.length > 1)
+          warnings.push("several modules speak " + want + " (" + byProto.map(label).join(", ") + "); using the first -- add ?module=N to the URL to pick another");
+        if (byProto.length) return done(byProto[0], "protocol");
+        const wantApp = base(ident.app), wantName = norm(ident.name);
+        const byApp = wantApp ? list.find((m) => base(m.app) === wantApp) : null;
+        if (byApp) return done(byApp, "app");
+        const byName = wantName ? list.find((m) => norm(m.name) === wantName) : null;
+        if (byName) return done(byName, "name");
+        warnings.push("the device does not advertise " + (want || ident.name || ident.app) + " (advertised: " + (list.map(label).join(", ") || "none") + "); using the default module #" + ident.fallback);
+      }
+      return { id: ident.fallback, source: "default", protocolVersion: null, warnings, notes };
+    }
+    // The ?module=N query parameter (decimal or 0x..) overrides discovery; the
+    // Device Hub links each console this way. Null when absent or invalid.
+    function moduleOverrideFromQuery(search) {
+      const raw = new URLSearchParams(search || "").get("module");
+      if (raw == null || raw.trim() === "") return null;
+      // the WHOLE token must be a decimal or 0x-hex integer (parseInt would
+      // accept "9oops" as 9); anything else is invalid and ignored
+      const m = /^(?:0x([0-9a-f]+)|([0-9]+))$/i.exec(raw.trim());
+      if (!m) return null;
+      const n = m[1] !== undefined ? Number.parseInt(m[1], 16) : Number.parseInt(m[2], 10);
+      return (Number.isInteger(n) && n >= 0 && n <= 0xEF) ? n : null; // 0xF0..0xFF are reserved
+    }
+    // One log line saying how a module id was chosen.
+    function describeModuleChoice(label, r, ident, info) {
+      const how = r.source === "override" ? "from ?module=" :
+                  r.source === "protocol" ? "advertises " + ident.protocol + (r.protocolVersion ? " v" + r.protocolVersion : "") :
+                  r.source === "app" ? "advertised as app " + ident.app :
+                  r.source === "name" ? "advertised as \"" + ident.name + "\"" :
+                  info ? "default" : "default; the device did not answer discovery";
+      return label + " module: #" + r.id + " (" + how + ")";
+    }
+
+    // --- begin connection helpers (shared; byte-identical in every console + the hub, see web/test/resolve_module_id_test.js) ---
+    // Links may carry, besides ?module=, parameters that make a page connect on
+    // load WITHOUT the browser chooser to a device this origin was already
+    // granted (the Device Hub links its apps this way after releasing the
+    // device):  ?autoconnect=1&transport=usb|serial&vid=0x1209&pid=0x0d32&serial=ABC
+    // vid / pid are hex (0x..) or decimal; `serial` is the USB serial number
+    // (WebUSB only: Web Serial exposes vid / pid alone).
+    function parseConnectParams(search) {
+      const q = new URLSearchParams(search || "");
+      const num = (key) => {
+        const raw = q.get(key);
+        if (raw === null) return null;
+        const s = raw.trim();
+        if (!/^(0x[0-9a-f]+|[0-9]+)$/i.test(s)) return null;
+        const v = Number(s);
+        return Number.isInteger(v) && v >= 0 && v <= 0xFFFF ? v : null;
+      };
+      const transport = (q.get("transport") || "").trim().toLowerCase();
+      const flag = (q.get("autoconnect") || "").trim().toLowerCase();
+      return {
+        autoconnect: flag === "1" || flag === "true" || flag === "yes",
+        transport: transport === "usb" || transport === "serial" ? transport : null,
+        vid: num("vid"),
+        pid: num("pid"),
+        serial: (q.get("serial") || "").trim() || null,
+      };
+    }
+    // The identity of an open connection: enough to find the same device again
+    // (after a reboot it re-enumerates as a NEW USBDevice / SerialPort object
+    // with the same ids) and to build hand-off links.
+    function usbIdentity(device) {
+      return { transport: "usb", vid: device.vendorId, pid: device.productId, serial: device.serialNumber || null };
+    }
+    function serialIdentity(port) {
+      const info = port && typeof port.getInfo === "function" ? (port.getInfo() || {}) : {};
+      return { transport: "serial", vid: info.usbVendorId != null ? info.usbVendorId : null,
+               pid: info.usbProductId != null ? info.usbProductId : null, serial: null };
+    }
+    // Is `got` (the identity of a device that just appeared) the device `want`
+    // names? vid + pid must match; the serial number only when both sides
+    // report one (a serial-port arrival never has one). An arrival with no
+    // usable ids is never a match.
+    function identityMatches(want, got) {
+      if (!want || !got || got.vid == null || got.pid == null) return false;
+      if (want.vid != null && want.vid !== got.vid) return false;
+      if (want.pid != null && want.pid !== got.pid) return false;
+      if (want.serial && got.serial && want.serial !== got.serial) return false;
+      return true;
+    }
+    function describeIdentity(identity) {
+      if (!identity) return "device";
+      const hex = (v) => v == null ? "?" : "0x" + v.toString(16).padStart(4, "0");
+      return (identity.transport === "serial" ? "serial port" : "USB device") + " " + hex(identity.vid) + ":" + hex(identity.pid) +
+             (identity.serial ? " sn " + identity.serial : "");
+    }
+    // Pick, among the devices this origin may already use (navigator.usb
+    // .getDevices() / navigator.serial.getPorts()), the one `want` names: vid
+    // and pid must match when given; a serial number must match when both sides
+    // report one (a device that reports none is accepted only when it is the
+    // sole candidate). Several candidates without a serial -> the first. With no
+    // ids at all only a lone permitted device is accepted.
+    function pickUsbDevice(devices, want) {
+      const list = Array.isArray(devices) ? devices.filter(Boolean) : [];
+      if (!want || (want.vid == null && want.pid == null && !want.serial)) return list.length === 1 ? list[0] : null;
+      const byIds = list.filter(d => (want.vid == null || d.vendorId === want.vid) && (want.pid == null || d.productId === want.pid));
+      if (want.serial) {
+        const exact = byIds.find(d => d.serialNumber === want.serial);
+        if (exact) return exact;
+        const unnamed = byIds.filter(d => !d.serialNumber);
+        return unnamed.length === 1 ? unnamed[0] : null;
+      }
+      return byIds.length ? byIds[0] : null;
+    }
+    function pickSerialPort(ports, want) {
+      const list = Array.isArray(ports) ? ports.filter(Boolean) : [];
+      if (!want || (want.vid == null && want.pid == null)) return list.length === 1 ? list[0] : null;
+      const byIds = list.filter(p => { const id = serialIdentity(p); return (want.vid == null || id.vid === want.vid) && (want.pid == null || id.pid === want.pid); });
+      return byIds.length ? byIds[0] : null;
+    }
+    async function findPermittedUsbDevice(want) {
+      if (typeof navigator === "undefined" || !navigator.usb || typeof navigator.usb.getDevices !== "function") return null;
+      try { return pickUsbDevice(await navigator.usb.getDevices(), want); } catch (_) { return null; }
+    }
+    async function findPermittedSerialPort(want) {
+      if (typeof navigator === "undefined" || !navigator.serial || typeof navigator.serial.getPorts !== "function") return null;
+      try { return pickSerialPort(await navigator.serial.getPorts(), want); } catch (_) { return null; }
+    }
+    // "Auto-reconnect" checkbox preference, shared by every app on this origin
+    // (localStorage; default on; access may throw in private windows).
+    const AUTO_RECONNECT_KEY = "espp.autoReconnect";
+    function loadAutoReconnect() {
+      try { const v = localStorage.getItem(AUTO_RECONNECT_KEY); return v === null ? true : v === "1"; } catch (_) { return true; }
+    }
+    function saveAutoReconnect(on) { try { localStorage.setItem(AUTO_RECONNECT_KEY, on ? "1" : "0"); } catch (_) {} }
+    // One open at a time per page. Every connect entry point — the Connect
+    // button(s), the ?autoconnect path and the reconnect supervisor — runs
+    // through gate.run(fn); while an open is in progress a second entry is
+    // refused (resolves false) instead of racing the first: the later
+    // completion would otherwise overwrite a live transport without closing it
+    // or orphan a claimed USB device. The supervisor consults isBusy() and
+    // waits rather than counting a refused entry as a failed attempt.
+    // opts.connected() is the page's "already holds a device" predicate: the
+    // gate serializes opens but does not know about an adopted connection, so
+    // run() also refuses (opens nothing) while the page is connected — a
+    // reconnect callback whose permitted-device lookup outlived a manual
+    // connect must not open the same device a second time.
+    function createOpenGate(opts) {
+      const connected = opts && typeof opts.connected === "function" ? opts.connected : () => false;
+      const gate = { busy: false };
+      gate.isBusy = () => gate.busy;
+      gate.isConnected = () => !!connected();
+      gate.run = async (fn) => {
+        if (gate.busy || connected()) return false;
+        gate.busy = true;
+        try { return await fn(); } finally { gate.busy = false; }
+      };
+      return gate;
+    }
+    // Reconnect supervisor. After an UNEXPECTED link loss (unplug, reboot) it
+    // retries opts.reconnect(identity, attempt) -> bool on a bounded back-off
+    // until an attempt succeeds, the attempts run out, or stop() is called; a
+    // platform `connect` event (onDeviceAppeared) retries at once. opts.enabled()
+    // (the checkbox) is consulted on every attempt. expectReboot() marks a
+    // reboot the page itself requested (longer window, friendlier log);
+    // suppress() cancels reconnecting until the next successful connect (a
+    // bootloader reboot: the device comes back as a DIFFERENT USB device that
+    // this page cannot drive). opts.log(cls, text) receives progress lines.
+    // Attempts never overlap: one opts.reconnect() call is in flight at a time
+    // (two concurrent opens of the same device would race each other); an
+    // arrival event during an attempt is remembered and retried right after
+    // the current attempt settles. A loss that happens while an older attempt
+    // is still in flight (the device dropped again during the post-open
+    // discovery probe) starts a new generation; when the stale attempt settles
+    // it hands over by scheduling the current generation's pending retry.
+    // opts.gate (createOpenGate) is shared with the page's manual / auto-connect
+    // paths: while one of those holds it the supervisor polls instead of opening.
+    // Cancellation: stop() (the checkbox unticked, a manual disconnect) and a
+    // newer loss cancel the attempt in flight. opts.reconnect(identity, n,
+    // token) may consult token.cancelled(); when a cancelled attempt settles
+    // the supervisor ignores the page's connected() call made while it was
+    // open and runs opts.discard() (the page's close path), so an open that
+    // finished after the user said "stop" is closed instead of adopted.
+    function createReconnectSupervisor(opts) {
+      const delays = opts.delaysMs || [500, 1000, 1500, 2000, 3000, 4000, 5000, 5000, 5000, 5000];
+      const rebootDelays = opts.rebootDelaysMs || delays.concat([5000, 5000, 5000, 5000, 5000, 5000]);
+      const log = typeof opts.log === "function" ? opts.log : () => {};
+      // generations <= cancelBefore are cancelled; inFlightGen is the generation of the attempt in flight
+      const sup = { active: false, identity: null, attempt: 0, expected: false, suppressed: false, timer: null, generation: 0, inFlight: false, retryAfter: false, cancelBefore: 0, inFlightGen: 0 };
+      const cancelled = (gen) => gen <= sup.cancelBefore;
+      const cancelCurrent = () => { sup.cancelBefore = sup.generation; };
+      const clearTimer = () => { if (sup.timer) { clearTimeout(sup.timer); sup.timer = null; } };
+      const schedule = (gen, ms) => { clearTimer(); sup.timer = setTimeout(() => { sup.timer = null; attempt(gen); }, ms); };
+      async function attempt(gen) {
+        if (gen !== sup.generation || !sup.active) return;
+        if (sup.inFlight) { sup.retryAfter = true; return; } // serialized: retry once the current attempt settles
+        if (opts.gate && opts.gate.isBusy()) { schedule(gen, 250); return; } // a manual / auto-connect open is in progress: wait, not an attempt
+        if (!opts.enabled()) { sup.stop("auto-reconnect is off"); return; }
+        const plan = sup.expected ? rebootDelays : delays;
+        sup.attempt++;
+        let ok = false;
+        sup.inFlight = true; sup.inFlightGen = gen; sup.retryAfter = false;
+        const token = { cancelled: () => cancelled(gen) };
+        try { ok = await opts.reconnect(sup.identity, sup.attempt, token); }
+        catch (e) { if (!cancelled(gen)) log("warn", "reconnect attempt " + sup.attempt + " failed: " + (e && e.message ? e.message : e)); }
+        finally { sup.inFlight = false; }
+        if (cancelled(gen) && ok) {
+          // stop() / a newer loss happened while the open was pending and the
+          // open succeeded anyway: it must not stay adopted (the page's
+          // connected() was ignored). An attempt that opened nothing (lookup
+          // failed, returned false) has nothing to discard; running the page's
+          // disconnect then would drop a manual connection made meanwhile.
+          if (typeof opts.discard === "function") { try { await opts.discard(); } catch (_) {} }
+        }
+        if (gen !== sup.generation) {
+          // stale: a newer loss owns the supervisor now. Its timer may already
+          // have fired into our in-flight attempt (retryAfter) and left no timer
+          // behind, so re-arm it here or auto-reconnect would stall for good.
+          const pending = sup.retryAfter; sup.retryAfter = false;
+          if (sup.active && !sup.timer && pending) schedule(sup.generation, 100);
+          return;
+        }
+        if (!sup.active) { sup.retryAfter = false; return; }
+        if (ok) { sup.active = false; sup.expected = false; sup.retryAfter = false; clearTimer(); return; }
+        if (sup.attempt >= plan.length) { sup.stop("gave up reconnecting after " + sup.attempt + " attempts; use Connect"); return; }
+        if (sup.retryAfter) { sup.retryAfter = false; schedule(gen, 100); return; } // the device showed up meanwhile
+        schedule(gen, plan[sup.attempt]);
+      }
+      // the page lost its connection without asking for it
+      sup.onLinkLost = (identity) => {
+        clearTimer();
+        cancelCurrent();
+        sup.generation++;
+        if (sup.suppressed) { sup.suppressed = false; sup.active = false; log("sys", "Not reconnecting: the device was asked to reboot into its bootloader (it enumerates as a different USB device; use Connect once it is back in the application)."); return; }
+        if (!opts.enabled() || !identity) { sup.active = false; return; }
+        sup.active = true; sup.identity = identity; sup.attempt = 0;
+        const plan = sup.expected ? rebootDelays : delays;
+        log("sys", (sup.expected ? "Device is rebooting — reconnecting to " : "Link lost — trying to reconnect to ") + describeIdentity(identity) + " (auto-reconnect; uncheck to stop)…");
+        schedule(sup.generation, plan[0]);
+      };
+      // a permitted device re-appeared (navigator.usb / navigator.serial
+      // "connect"): only the device being recovered wakes the supervisor — an
+      // unrelated arrival would otherwise burn one of the bounded retries
+      sup.onDeviceAppeared = (identity) => {
+        if (!sup.active || !identityMatches(sup.identity, identity)) return;
+        if (sup.inFlight) sup.retryAfter = true; else schedule(sup.generation, 100);
+      };
+      sup.expectReboot = () => { sup.expected = true; sup.suppressed = false; };
+      sup.suppress = () => { sup.suppressed = true; sup.expected = false; };
+      // a connection was established (manually or by a successful attempt)
+      sup.connected = () => {
+        if (sup.inFlight && cancelled(sup.inFlightGen)) return; // a cancelled attempt's open: it is about to be discarded
+        clearTimer(); sup.generation++; sup.active = false; sup.expected = false; sup.suppressed = false; sup.attempt = 0; sup.retryAfter = false; };
+      sup.stop = (reason) => { clearTimer(); cancelCurrent(); sup.generation++; const was = sup.active; sup.active = false; sup.expected = false; sup.retryAfter = false; if (was && reason) log("sys", "Auto-reconnect stopped: " + reason + "."); };
+      sup.isActive = () => sup.active;
+      return sup;
+    }
+    // Forward the platform "a permitted device was (re)attached" events to the
+    // supervisor, with the arriving device's identity, so a reboot is caught
+    // the moment the device enumerates (and other devices are ignored).
+    function watchDeviceArrivals(sup) {
+      if (typeof navigator === "undefined") return;
+      if (navigator.usb && typeof navigator.usb.addEventListener === "function")
+        navigator.usb.addEventListener("connect", (ev) => sup.onDeviceAppeared(ev && ev.device ? usbIdentity(ev.device) : null));
+      if (navigator.serial && typeof navigator.serial.addEventListener === "function")
+        navigator.serial.addEventListener("connect", (ev) => { const port = ev && (ev.port || ev.target); sup.onDeviceAppeared(port ? serialIdentity(port) : null); });
+    }
+    // App -> hub notice that an app released its device (manual disconnect or
+    // page closed), so a hub that handed the device off can offer to reconnect.
+    // Same-origin pages only (BroadcastChannel); best effort everywhere.
+    function openDeviceChannel() {
+      let channel = null;
+      try { channel = typeof BroadcastChannel === "function" ? new BroadcastChannel("espp-device") : null; } catch (_) { return null; }
+      // Close the channel when the page goes away (no late deliveries to a page
+      // that is unloading, no leaked channel across rapid reloads). The listener
+      // is registered on a later task so it runs AFTER the page's own pagehide
+      // handler, which still needs the channel to post its released notice.
+      if (channel && typeof window !== "undefined" && typeof window.addEventListener === "function")
+        setTimeout(() => window.addEventListener("pagehide", () => { try { channel.close(); } catch (_) {} }, { once: true }), 0);
+      return channel;
+    }
+    function postReleased(channel, identity) {
+      if (!channel || !identity) return;
+      try { channel.postMessage({ type: "released", identity: identity, page: (typeof location !== "undefined" ? location.pathname : "").split("/").pop() }); } catch (_) {}
+    }
+    // --- end connection helpers ---
+    // --- begin app navigation (shared; byte-identical in every web app, see web/test/resolve_module_id_test.js) ---
+    // Links back to the Device Hub (primary) and the apps page. The static hrefs
+    // in the HTML are the hosted copies (always valid, also when this script
+    // never runs — a file:// page whose ES-module import is blocked). In the
+    // hosted apps directory (…/apps/ on the documentation site, or a local
+    // server in docs/apps) hub and apps page are siblings of every app, so the
+    // links are rewritten to the sibling files there; anywhere else — file://,
+    // a source tree served from http://localhost (where the haptics console is
+    // example/webapp/index.html itself) — they stay on the hosted copies.
+    const ESPP_APPS_BASE = "https://esp-cpp.github.io/espp/apps/";
+    function inHostedAppsDir(loc) {
+      if (!loc || !/^https?:$/.test(loc.protocol)) return false;
+      const dir = String(loc.pathname || "").replace(/[^/]*$/, "");
+      return /\/apps\/$/.test(dir);
+    }
+    function navHref(file) {
+      return inHostedAppsDir(typeof location !== "undefined" ? location : null) ? file : ESPP_APPS_BASE + file;
+    }
+    // Wire the #navHub / #navApps hrefs (every app). Returns the hub link.
+    function installAppNav() {
+      const hub = typeof document !== "undefined" ? document.getElementById("navHub") : null;
+      const apps = typeof document !== "undefined" ? document.getElementById("navApps") : null;
+      if (apps) apps.href = navHref("index.html");
+      if (hub) hub.href = navHref("dispatcher_hub.html");
+      return hub;
+    }
+    // --- end app navigation ---
+    // --- begin app hand-back (shared; byte-identical in every dispatcher-module console, see web/test/resolve_module_id_test.js) ---
+    // The auto-connect query (no module) a hand-back carries so the hub opens the
+    // device the app just released, without a chooser.
+    function hubConnectQuery(identity) {
+      const q = new URLSearchParams();
+      if (!identity || (identity.transport !== "usb" && identity.transport !== "serial")) return "";
+      q.set("autoconnect", "1");
+      q.set("transport", identity.transport);
+      if (identity.vid != null) q.set("vid", "0x" + identity.vid.toString(16).padStart(4, "0"));
+      if (identity.pid != null) q.set("pid", "0x" + identity.pid.toString(16).padStart(4, "0"));
+      if (identity.serial) q.set("serial", identity.serial);
+      return q.toString();
+    }
+    // A plain left click on "Device Hub" while connected hands the device back.
+    // handover.connected() says whether the page holds a device;
+    // handover.handBack() closes it the way a manual Disconnect does (stop the
+    // supervisor, close, then post the released notice) and resolves the
+    // device's identity; the tab then navigates to the hub with the auto-connect
+    // query. The href stays the plain hub URL, so middle-click / open-in-new-tab
+    // / modified clicks keep working and never close anything. One hand-back at
+    // a time: a second click while the first is closing is swallowed (the guard
+    // is never cleared on success — the page navigates away — and cleared on
+    // failure). The chooser-less pick-up on the hub needs the same origin (the
+    // device grant is per origin); a console on another origin still lands on
+    // the hub with the identity in the URL, and the hub offers Connect.
+    function installAppHandBack(handover) {
+      const hub = typeof document !== "undefined" ? document.getElementById("navHub") : null;
+      if (!hub) return;
+      let handingBack = false;
+      hub.addEventListener("click", (ev) => {
+        if (ev.defaultPrevented || ev.button !== 0 || ev.metaKey || ev.ctrlKey || ev.shiftKey || ev.altKey) return;
+        if (handingBack) { ev.preventDefault(); return; }
+        if (!handover.connected()) return;
+        ev.preventDefault();
+        handingBack = true;
+        const target = hub.href;
+        Promise.resolve().then(() => handover.handBack()).then(
+          (identity) => { const q = hubConnectQuery(identity); location.assign(target + (q ? "?" + q : "")); },
+          () => { handingBack = false; location.assign(target); });
+      });
+    }
+    // --- end app hand-back ---
+    // Adopt the linkage module id from a discovery reply (null = none) -- every
+    // linkage frame built / matched from here on uses it.
+    function adoptModule(info) {
+      MODULE_IDENT.override = moduleOverrideFromQuery(location.search);
+      const r = resolveModuleId(info, MODULE_IDENT);
+      moduleLinkage = r.id;
+      moduleReady = true;
+      logLine("sys", describeModuleChoice("PEAR linkage", r, MODULE_IDENT, info));
+      for (const w of r.warnings) logLine("warn", w + ".");
+      for (const n of r.notes) logLine("sys", n + ".");
+    }
+    // Ask the device which dispatcher modules it serves and adopt the linkage
+    // module's id from the answer (adoptModule). No discovery reply (older
+    // firmware) -> the default id; the normal STATUS request still surfaces a
+    // genuinely missing module.
+    async function checkModulePresent() {
+      const t = transport;
+      if (!t) return;
+      const payload = await new Promise((resolve) => {
+        let timer = null;
+        // settle guards the shared resolver: only clear it if it is still ours,
+        // so a prior probe's timeout can't cancel a newer probe's resolver.
+        const settle = (p) => { clearTimeout(timer); if (discoveryResolve === settle) discoveryResolve = null; resolve(p); };
+        timer = setTimeout(() => settle(null), DISCOVERY_TIMEOUT_MS);
+        discoveryResolve = settle;
+        t.send(buildFrame(T_LIST_MODULES, null, MODULE_DISCOVERY)).catch(() => settle(null));
+      });
+      // this probe belongs to the transport it sent on: if that connection was
+      // closed or replaced while we waited, its result (a reply or, more
+      // likely, the timeout) must not be adopted into the current one
+      if (t !== transport) return;
+      let info = null;
+      if (payload) { try { info = parseDiscovery(payload); } catch (_) { info = null; } }
+      adoptModule(info);
+    }
+    // ===================== Kinematics (port of main/five_bar.cpp) =====================
+    // Must solve exactly what the device solves: the pose previewed here is the
+    // pose the device commands.
+    const deg = (r) => r * 180 / Math.PI, rad = (d) => d * Math.PI / 180;
+    function normDeg(a) { let r = a % 360; if (r > 180) r -= 360; if (r <= -180) r += 360; return r; }
+    const cross = (a, b, c) => (b[0]-a[0])*(c[1]-a[1]) - (b[1]-a[1])*(c[0]-a[0]);
+    function segmentsIntersect(a, b, c, d) {
+      const d1 = cross(c, d, a), d2 = cross(c, d, b), d3 = cross(a, b, c), d4 = cross(a, b, d);
+      if (((d1 > 0 && d2 < 0) || (d1 < 0 && d2 > 0)) && ((d3 > 0 && d4 < 0) || (d3 < 0 && d4 > 0))) return true;
+      const on = (p, q, r) => Math.min(p[0], q[0]) - 1e-6 <= r[0] && r[0] <= Math.max(p[0], q[0]) + 1e-6 && Math.min(p[1], q[1]) - 1e-6 <= r[1] && r[1] <= Math.max(p[1], q[1]) + 1e-6;
+      if (Math.abs(d1) < 1e-6 && on(c, d, a)) return true;
+      if (Math.abs(d2) < 1e-6 && on(c, d, b)) return true;
+      if (Math.abs(d3) < 1e-6 && on(a, b, c)) return true;
+      if (Math.abs(d4) < 1e-6 && on(a, b, d)) return true;
+      return false;
+    }
+    // Assembly "open" (port of fivebar::loop_is_open): the loop M1 -> J2 -> J3 -> J1 -> M2 is a simple
+    // polygon - no two non-adjacent links touch - and the end-effector arm past J3 crosses neither crank
+    // nor the ground. Testing the cranks alone let through poses where the bar or the coupler folded
+    // back across a crank, or the loop turned inside out, with the cranks still apart.
+    function loopIsOpen(g, m1, m2, j1, j2, j3) {
+      if (segmentsIntersect(m1, j2, m2, j1)) return false; // crank 1 - crank 2
+      if (segmentsIntersect(m1, j2, j3, j1)) return false; // crank 1 - coupler
+      if (segmentsIntersect(j2, j3, m2, j1)) return false; // bar - crank 2
+      if (segmentsIntersect(j2, j3, m2, m1)) return false; // bar - ground (between the motor mounts)
+      if (segmentsIntersect(j3, j1, m2, m1)) return false; // coupler - ground
+      if (g.ee_extension !== 0 || g.ee_offset !== 0) {
+        const bx = j3[0] - j2[0], by = j3[1] - j2[1], b = Math.hypot(bx, by);
+        if (b > 1e-9) {
+          const ux = bx / b, uy = by / b;
+          const m3 = [j2[0] + (g.bar + g.ee_extension) * ux - g.ee_offset * uy, j2[1] + (g.bar + g.ee_extension) * uy + g.ee_offset * ux];
+          if (segmentsIntersect(j3, m3, m1, j2) || segmentsIntersect(j3, m3, m2, j1) || segmentsIntersect(j3, m3, m2, m1)) return false;
+        }
+      }
+      return true;
+    }
+    function assemblyOk(g, m1, m2, j1, j2, j3) {
+      if (g.assembly === 1) return cross(m1, j2, j1) > 0 && cross(m2, j1, j2) < 0;
+      if (g.assembly === 2) return loopIsOpen(g, m1, m2, j1, j2, j3);
+      return true;
+    }
+    function couplerSideOk(g, j1, j2, j3) { const c = cross(j1, j2, j3); return g.coupler_side === 0 ? c > 0 : c < 0; }
+    function isValidGeometry(g) {
+      if (!(g.crank1 > 0) || !(g.crank2 > 0) || !(g.bar > 0) || !(g.coupler > 0)) return false;
+      for (const k of ["m2_x", "m2_y", "ee_extension", "ee_offset"]) if (!Number.isFinite(g[k])) return false;
+      const base = Math.hypot(g.m2_x, g.m2_y); if (base < 1e-6) return false;
+      return base <= (g.crank1 + g.bar) + (g.crank2 + g.coupler);
+    }
+    function complete(g, m1, m2, j1, j2, j3) {
+      const bx = j3[0]-j2[0], by = j3[1]-j2[1], b = Math.hypot(bx, by); if (b < 1e-9) return null;
+      const ux = bx/b, uy = by/b, nx = -uy, ny = ux, along = g.bar + g.ee_extension;
+      return { j1, j2, j3, m3: [j2[0] + along*ux + g.ee_offset*nx, j2[1] + along*uy + g.ee_offset*ny],
+        theta1: deg(Math.atan2(j2[1]-m1[1], j2[0]-m1[0])), theta2: deg(Math.atan2(j1[1]-m2[1], j1[0]-m2[0])), barAngle: deg(Math.atan2(uy, ux)) };
+    }
+    function solveFk(t1, t2, g) {
+      if (!isValidGeometry(g) || !Number.isFinite(t1) || !Number.isFinite(t2)) return null;
+      const m1 = [0, 0], m2 = [g.m2_x, g.m2_y];
+      const j2 = [g.crank1*Math.cos(rad(t1)), g.crank1*Math.sin(rad(t1))];
+      const j1 = [m2[0] + g.crank2*Math.cos(rad(t2)), m2[1] + g.crank2*Math.sin(rad(t2))];
+      const dx = j2[0]-j1[0], dy = j2[1]-j1[1], d = Math.hypot(dx, dy);
+      if (d < 1e-9 || d > g.coupler + g.bar + 1e-3 || d < Math.abs(g.coupler - g.bar) - 1e-3) return null;
+      const a = (d*d + g.coupler*g.coupler - g.bar*g.bar) / (2*d), h = Math.sqrt(Math.max(g.coupler*g.coupler - a*a, 0));
+      const vx = dx/d, vy = dy/d, side = g.coupler_side === 0 ? 1 : -1;
+      if (h < 1e-6) return null;
+      const j3 = [j1[0] + a*vx - side*h*vy, j1[1] + a*vy + side*h*vx];
+      if (!assemblyOk(g, m1, m2, j1, j2, j3)) return null;
+      return complete(g, m1, m2, j1, j2, j3);
+    }
+    function solveIk(x, y, g, ref1, ref2) {
+      if (!isValidGeometry(g) || !Number.isFinite(x) || !Number.isFinite(y)) return null;
+      const m1 = [0, 0], m2 = [g.m2_x, g.m2_y];
+      const along = g.bar + g.ee_extension, R = Math.hypot(along, g.ee_offset), gamma = Math.atan2(g.ee_offset, along);
+      if (R < 1e-9) return null;
+      const r = Math.hypot(x, y);
+      let cosBeta = 0, alpha = 0;
+      if (r < 1e-9) { if (Math.abs(R - g.crank1) > 1e-3) return null; cosBeta = 1; }
+      else { const dot = (g.crank1*g.crank1 - R*R - r*r) / (2*R); if (Math.abs(dot / r) > 1 + 1e-5) return null; cosBeta = Math.max(-1, Math.min(1, dot / r)); alpha = Math.atan2(y, x); }
+      const beta = Math.acos(cosBeta);
+      let best = null, bestScore = Infinity;
+      for (const va of [alpha + beta, alpha - beta]) {
+        const j2 = [x + R*Math.cos(va), y + R*Math.sin(va)];
+        const ua = va + Math.PI - gamma;
+        const j3 = [j2[0] + g.bar*Math.cos(ua), j2[1] + g.bar*Math.sin(ua)];
+        const dx = j3[0]-m2[0], dy = j3[1]-m2[1], d = Math.hypot(dx, dy); if (d < 1e-9) continue;
+        const a = (d*d + g.crank2*g.crank2 - g.coupler*g.coupler) / (2*d), hsq = g.crank2*g.crank2 - a*a; if (hsq < -1e-2) continue;
+        const h = Math.sqrt(Math.max(hsq, 0)), vx = dx/d, vy = dy/d;
+        for (const s of [1, -1]) {
+          const j1 = [m2[0] + a*vx - s*h*vy, m2[1] + a*vy + s*h*vx];
+          if (!assemblyOk(g, m1, m2, j1, j2, j3) || !couplerSideOk(g, j1, j2, j3)) continue;
+          const c = complete(g, m1, m2, j1, j2, j3); if (!c) continue;
+          // Open-band guard (mirror of fivebar::Geometry::differential_max_deg):
+          // reject inward-folded assemblies by the crank differential, so a large
+          // target jump cannot flip the preview inward. ?? keeps older device
+          // geometries (no fields) unbounded.
+          const diff = normDeg(c.theta1 - c.theta2);
+          if (diff < (g.differential_min_deg ?? -1e6) || diff > (g.differential_max_deg ?? 1e6)) continue;
+          const score = Math.abs(normDeg(c.theta1 - ref1)) + Math.abs(normDeg(c.theta2 - ref2));
+          if (score < bestScore) { best = c; bestScore = score; }
+        }
+      }
+      return best;
+    }
+    // motor <-> crank (linkage_protocol::MotorSettings)
+    const motorToTheta = (m, motorDeg) => normDeg(m.theta_at_zero + m.direction * motorDeg);
+    const thetaToMotor = (m, theta) => m.direction * normDeg(theta - m.theta_at_zero);
+    const LIMIT_TOL = 1e-3; // float round-off at a limit (linkage_protocol::MotorSettings)
+    const withinLimits = (m, motorDeg) => motorDeg >= m.min - LIMIT_TOL && motorDeg <= m.max + LIMIT_TOL;
+
+    // ===================== Settings (form <-> object <-> payload) =====================
+    const SETTINGS_SIZE = 95, SETTINGS_VERSION = 1;
+    function defaultSettings() {
+      return { geometry: { m2_x: 200, m2_y: 0, crank1: 150, crank2: 150, bar: 250, coupler: 250, ee_extension: 0, ee_offset: 0, assembly: 2, coupler_side: 0, differential_min_deg: -1e6, differential_max_deg: 15 },
+               home_theta1: -90, home_theta2: -90,
+               motors: [ { node_id: 1, direction: 1, min: -90, max: 90, theta_at_zero: -90, torque_limit: 300 },
+                         { node_id: 2, direction: 1, min: -90, max: 90, theta_at_zero: -90, torque_limit: 300 } ],
+               profile: { velocity: 30, accel: 20, decel: 20 } };
+    }
+    let settings = defaultSettings();      // what the drawing / preview uses (the form)
+    let deviceSettings = null;             // the device's active settings (last SETTINGS reply)
+    let info = null;                       // the device's INFO reply
+    function encodeSettings(s) {
+      const b = new Uint8Array(SETTINGS_SIZE), dv = new DataView(b.buffer); let i = 0;
+      b[i++] = SETTINGS_VERSION;
+      for (const k of ["m2_x", "m2_y", "crank1", "crank2", "bar", "coupler", "ee_extension", "ee_offset"]) { dv.setFloat32(i, s.geometry[k], true); i += 4; }
+      b[i++] = s.geometry.assembly & 0xFF; b[i++] = s.geometry.coupler_side & 0xFF;
+      dv.setFloat32(i, s.home_theta1, true); i += 4; dv.setFloat32(i, s.home_theta2, true); i += 4;
+      for (const m of s.motors) {
+        b[i++] = m.node_id & 0xFF; dv.setInt8(i, m.direction); i += 1; i += 2;
+        dv.setFloat32(i, m.min, true); i += 4; dv.setFloat32(i, m.max, true); i += 4; dv.setFloat32(i, m.theta_at_zero, true); i += 4;
+        dv.setUint16(i, m.torque_limit & 0xFFFF, true); i += 2; i += 2;
+      }
+      dv.setFloat32(i, s.profile.velocity, true); i += 4; dv.setFloat32(i, s.profile.accel, true); i += 4; dv.setFloat32(i, s.profile.decel, true); i += 4;
+      return b;
+    }
+    function decodeSettings(p) {
+      if (p.length < SETTINGS_SIZE || p[0] !== SETTINGS_VERSION) return null;
+      const dv = new DataView(p.buffer, p.byteOffset, p.byteLength); let i = 1;
+      const f = () => { const v = dv.getFloat32(i, true); i += 4; return v; };
+      const s = { geometry: {}, motors: [], profile: {} };
+      for (const k of ["m2_x", "m2_y", "crank1", "crank2", "bar", "coupler", "ee_extension", "ee_offset"]) s.geometry[k] = f();
+      s.geometry.assembly = p[i++]; s.geometry.coupler_side = p[i++];
+      s.home_theta1 = f(); s.home_theta2 = f();
+      for (let k = 0; k < 2; k++) {
+        const m = { node_id: p[i], direction: dv.getInt8(i + 1) }; i += 4;
+        m.min = f(); m.max = f(); m.theta_at_zero = f(); m.torque_limit = dv.getUint16(i, true); i += 4;
+        s.motors.push(m);
+      }
+      s.profile.velocity = f(); s.profile.accel = f(); s.profile.decel = f();
+      return s;
+    }
+    const num = (el, fallback = 0) => { const v = Number(el.value); return Number.isFinite(v) ? v : fallback; };
+    function settingsFromForm() {
+      return { geometry: { m2_x: num(els.gM2x), m2_y: num(els.gM2y), crank1: num(els.gCrank1), crank2: num(els.gCrank2), bar: num(els.gBar), coupler: num(els.gCoupler),
+                           ee_extension: num(els.gExt), ee_offset: num(els.gOff), assembly: Number(els.gAssembly.value), coupler_side: Number(els.gSide.value) },
+               home_theta1: num(els.hTheta1), home_theta2: num(els.hTheta2),
+               motors: [1, 2].map((k) => ({ node_id: Math.round(num(els["mNode" + k])), direction: Number(els["mDir" + k].value), min: num(els["mMin" + k]), max: num(els["mMax" + k]),
+                                             theta_at_zero: num(els["mZeroTheta" + k]), torque_limit: torqueInputPermille(k) })),
+               profile: { velocity: num(els.pVel), accel: num(els.pAcc), decel: num(els.pDec) } };
+    }
+    function settingsToForm(s) {
+      const g = s.geometry, set = (el, v, digits) => { el.value = typeof digits === "number" ? String(Number(v.toFixed(digits))) : String(v); };
+      set(els.gM2x, g.m2_x, 2); set(els.gM2y, g.m2_y, 2); set(els.gCrank1, g.crank1, 2); set(els.gCrank2, g.crank2, 2); set(els.gBar, g.bar, 2); set(els.gCoupler, g.coupler, 2);
+      set(els.gExt, g.ee_extension, 2); set(els.gOff, g.ee_offset, 2); els.gAssembly.value = String(g.assembly); els.gSide.value = String(g.coupler_side);
+      set(els.hTheta1, s.home_theta1, 2); set(els.hTheta2, s.home_theta2, 2);
+      s.motors.forEach((m, idx) => { const k = idx + 1; set(els["mNode" + k], m.node_id); els["mDir" + k].value = String(m.direction); set(els["mMin" + k], m.min, 2); set(els["mMax" + k], m.max, 2); set(els["mZeroTheta" + k], m.theta_at_zero, 2); setTorqueInput(k, m.torque_limit); });
+      set(els.pVel, s.profile.velocity, 2); set(els.pAcc, s.profile.accel, 2); set(els.pDec, s.profile.decel, 2);
+    }
+    function validateSettings(s) {
+      if (!isValidGeometry(s.geometry)) return "geometry: every length must be positive and the loop closable";
+      for (let k = 0; k < 2; k++) {
+        const m = s.motors[k], who = "motor " + (k + 1) + ": ";
+        if (m.node_id < 0 || m.node_id > 127) return who + "node id must be 0 (none) or 1..127";
+        if (m.min > m.max) return who + "limits must have min <= max";
+        if (info && m.torque_limit > info.maxTorque) return who + "torque limit " + m.torque_limit + " ‰ of rated is above the device's maximum of " + info.maxTorque + " ‰" + (ratedCnm[idx] ? " (" + (info.maxTorque * ratedCnm[idx] / 1e5).toFixed(2) + " Nm)" : "");
+      }
+      if (s.motors[0].node_id && s.motors[0].node_id === s.motors[1].node_id) return "the two motors cannot share a node id";
+      if (!(s.profile.velocity > 0) || !(s.profile.accel > 0) || !(s.profile.decel > 0)) return "profile values must be positive";
+      return null;
+    }
+    // every edit previews at once (drawing, workspace, target check)
+    for (const id of ["mNode1", "mNode2"]) els[id].addEventListener("input", refreshNodeNotes);
+    for (const id of ["gM2x","gM2y","gCrank1","gCrank2","gBar","gCoupler","gExt","gOff","gAssembly","gSide","hTheta1","hTheta2","mNode1","mDir1","mMin1","mMax1","mZeroTheta1","mTorque1","mNode2","mDir2","mMin2","mMax2","mZeroTheta2","mTorque2","pVel","pAcc","pDec"])
+      els[id].addEventListener("input", () => { settings = settingsFromForm(); const why = validateSettings(settings); els.settingsNote.textContent = why ? why : "Edits preview in the drawing at once; Apply sends them to the device, which validates and stores them."; els.settingsNote.style.color = why ? "var(--danger)" : "var(--text-muted)"; onGeometryChanged(); });
+    els.hUseCurrentBtn.addEventListener("click", () => { if (!lastStatus || !Number.isFinite(lastStatus.theta1)) { logLine("warn", "no measured crank angles yet"); return; } els.hTheta1.value = lastStatus.theta1.toFixed(2); els.hTheta2.value = lastStatus.theta2.toFixed(2); els.hTheta1.dispatchEvent(new Event("input")); });
+    els.settingsApplyBtn.addEventListener("click", () => {
+      settings = settingsFromForm(); const why = validateSettings(settings);
+      if (why) { logLine("err", "settings not sent: " + why); return; }
+      logLine("tx", "apply settings"); send(T_SET_SETTINGS, encodeSettings(settings));
+    });
+    els.settingsReloadBtn.addEventListener("click", () => send(T_GET_SETTINGS));
+    let resetArmed = false;
+    els.settingsResetBtn.addEventListener("click", () => {
+      if (!resetArmed) { resetArmed = true; els.settingsNote.textContent = "Reset the device's settings to the firmware defaults? Click again within 5 s to confirm."; els.settingsNote.style.color = "var(--warn)"; setTimeout(() => { if (resetArmed) { resetArmed = false; els.settingsNote.textContent = ""; } }, 5000); return; }
+      resetArmed = false; els.settingsNote.textContent = ""; logLine("tx", "reset settings to the defaults"); send(T_RESET_SETTINGS);
+    });
+
+    // ===================== Payload encode / decode =====================
+    function encU8(v) { return new Uint8Array([v & 0xFF]); }
+    function encStream(enable, periodMs) { const b = new Uint8Array(3); b[0] = enable ? 1 : 0; new DataView(b.buffer).setUint16(1, periodMs & 0xFFFF, true); return b; }
+    function encPoint(x, y) { const b = new Uint8Array(8); const dv = new DataView(b.buffer); dv.setFloat32(0, x, true); dv.setFloat32(4, y, true); return b; }
+    function encSetMotor(motor, degrees) { const b = new Uint8Array(5); b[0] = motor; new DataView(b.buffer).setFloat32(1, degrees, true); return b; }
+    function encZero(motor, mode, value) { const b = new Uint8Array(6); b[0] = motor; b[1] = mode; new DataView(b.buffer).setFloat32(2, value, true); return b; }
+    // STATUS (87 B): see linkage_protocol::Status
+    function parseStatus(p) {
+      if (p.length < 87) return null;
+      const dv = new DataView(p.buffer, p.byteOffset, p.byteLength);
+      const f = p[0];
+      const s = { streamEnabled: !!(f & 1), canOk: !!(f & 2), poseValid: !!(f & 4), targetValid: !!(f & 8), commOk: !!(f & 16), enabled: !!(f & 32), faulted: !!(f & 64), moving: !!(f & 128),
+        seq: dv.getUint32(1, true), timeMs: dv.getUint32(5, true), periodMs: dv.getUint16(9, true),
+        x: dv.getFloat32(11, true), y: dv.getFloat32(15, true), theta1: dv.getFloat32(19, true), theta2: dv.getFloat32(23, true), barAngle: dv.getFloat32(27, true),
+        targetX: dv.getFloat32(31, true), targetY: dv.getFloat32(35, true), motors: [] };
+      let i = 39;
+      for (let k = 0; k < 2; k++, i += 24) {
+        const mf = p[i + 1];
+        s.motors.push({ node: p[i], commOk: !!(mf & 1), enabled: !!(mf & 2), faulted: !!(mf & 4), targetReached: !!(mf & 8), zeroSet: !!(mf & 16), present: !!(mf & 32),
+          statusword: dv.getUint16(i + 2, true), errorCode: dv.getUint16(i + 4, true), angle: dv.getFloat32(i + 8, true), velocity: dv.getFloat32(i + 12, true),
+          torque: dv.getInt16(i + 16, true), current: dv.getInt16(i + 18, true), torqueLimit: dv.getUint16(i + 20, true), ratedTorqueCnm: dv.getUint16(i + 22, true) });
+      }
+      // v2: the CAN controller block (21 B) after the motors; a v1 device sends nothing there
+      if (p.length >= i + 21) s.can = { state: p[i], tec: dv.getUint16(i + 1, true), rec: dv.getUint16(i + 3, true), busErrors: dv.getUint32(i + 5, true),
+        busOffCount: dv.getUint32(i + 9, true), signalErrors: dv.getUint32(i + 13, true), ackErrors: dv.getUint32(i + 17, true) };
+      return s;
+    }
+    function parseInfo(p) {
+      if (p.length < 6) return null;
+      const dv = new DataView(p.buffer, p.byteOffset, p.byteLength);
+      let i = 6; const str = () => { const n = p[i++]; const s = new TextDecoder().decode(p.subarray(i, i + n)); i += n; return s; };
+      const info = { protocolVersion: p[0], motorCount: p[1], maxTorque: dv.getUint16(2, true), pollMs: dv.getUint16(4, true), project: str(), version: str(), build: str(), defaultNodeIds: null, nodeIdsFromMenuconfig: false };
+      if (p.length >= i + 3) { info.defaultNodeIds = [p[i], p[i + 1]]; info.nodeIdsFromMenuconfig = p[i + 2] !== 0; } // v2
+      return info;
+    }
+    function parseIkResult(p) {
+      if (p.length < 58) return null;
+      const dv = new DataView(p.buffer, p.byteOffset, p.byteLength);
+      return { x: dv.getFloat32(0, true), y: dv.getFloat32(4, true), reachable: p[8] !== 0, withinLimits: p[9] !== 0, theta1: dv.getFloat32(10, true), theta2: dv.getFloat32(14, true), m1: dv.getFloat32(18, true), m2: dv.getFloat32(22, true) };
+    }
+    function ds402Name(sw) {
+      if ((sw & 0x4F) === 0x00) return "Not ready to switch on";
+      if ((sw & 0x4F) === 0x40) return "Switch on disabled";
+      if ((sw & 0x6F) === 0x21) return "Ready to switch on";
+      if ((sw & 0x6F) === 0x23) return "Switched on";
+      if ((sw & 0x6F) === 0x27) return "Operation enabled";
+      if ((sw & 0x6F) === 0x07) return "Quick stop active";
+      if ((sw & 0x4F) === 0x0F) return "Fault reaction active";
+      if ((sw & 0x4F) === 0x08) return "Fault";
+      return "Unknown (0x" + sw.toString(16).padStart(4, "0") + ")";
+    }
+
+    // ===================== Drawing (SVG) =====================
+    const NS = "http://www.w3.org/2000/svg";
+    const svg = els.canvas;
+    const layers = {};
+    for (const name of ["workspace", "grid", "ground", "home", "target", "current", "labels"]) { const g = document.createElementNS(NS, "g"); g.id = "L_" + name; svg.appendChild(g); layers[name] = g; }
+    function el(tag, attrs, parent) { const e = document.createElementNS(NS, tag); for (const [k, v] of Object.entries(attrs)) e.setAttribute(k, v); (parent || svg).appendChild(e); return e; }
+    const S = (p) => [p[0], -p[1]]; // linkage frame (y up) -> SVG (y down)
+    function line(p, q, color, width, parent, extra = {}) { const a = S(p), b = S(q); return el("line", { x1: a[0], y1: a[1], x2: b[0], y2: b[1], stroke: color, "stroke-width": width, "stroke-linecap": "round", ...extra }, parent); }
+    function dot(p, r, color, parent, extra = {}) { const a = S(p); return el("circle", { cx: a[0], cy: a[1], r, fill: color, ...extra }, parent); }
+    function text(p, s, parent, extra = {}) { const a = S(p); const t = el("text", { x: a[0] + 6, y: a[1] - 6, fill: "#c9d1d9", "font-size": fontSize(), "font-family": "ui-sans-serif, system-ui, sans-serif", ...extra }, parent); t.textContent = s; return t; }
+    function clear(g) { while (g.firstChild) g.removeChild(g.firstChild); }
+    let view = { x0: -300, y0: -300, w: 800, h: 600 }; // in linkage frame units (y0 = bottom)
+    const fontSize = () => Math.max(8, view.w / 60);
+    const strokeW = (k) => Math.max(1, view.w / 160) * k;
+    function setView(x0, x1, y0, y1) {
+      const margin = 0.08 * Math.max(x1 - x0, y1 - y0, 100);
+      x0 -= margin; x1 += margin; y0 -= margin; y1 += margin;
+      // keep a 4:3 frame so the text / strokes scale predictably
+      let w = x1 - x0, h = y1 - y0;
+      if (w / h < 4 / 3) { const nw = h * 4 / 3; x0 -= (nw - w) / 2; w = nw; } else { const nh = w * 3 / 4; y0 -= (nh - h) / 2; h = nh; }
+      view = { x0, y0, w, h };
+      svg.setAttribute("viewBox", x0 + " " + (-(y0 + h)) + " " + w + " " + h);
+    }
+    // the workspace: a grid of points, each ik-tested with the current reference
+    let workspace = null; // { cells: [{x, y, ok (within limits)}], step }
+    let workspaceRef = null;
+    function referenceThetas() {
+      if (lastStatus && lastStatus.poseValid && Number.isFinite(lastStatus.theta1)) return [lastStatus.theta1, lastStatus.theta2];
+      return [settings.home_theta1, settings.home_theta2];
+    }
+    function computeWorkspace() {
+      const g = settings.geometry;
+      if (!isValidGeometry(g)) { workspace = null; return; }
+      const reach = Math.max(g.crank1 + g.bar + Math.abs(g.ee_extension) + Math.abs(g.ee_offset), Math.hypot(g.m2_x, g.m2_y) + g.crank2 + g.coupler + Math.abs(g.ee_extension) + Math.abs(g.ee_offset));
+      const xmin = Math.min(0, g.m2_x) - reach, xmax = Math.max(0, g.m2_x) + reach, ymin = Math.min(0, g.m2_y) - reach, ymax = Math.max(0, g.m2_y) + reach;
+      const n = 70, step = Math.max(xmax - xmin, ymax - ymin) / n;
+      const ref = referenceThetas(); workspaceRef = ref;
+      const cells = []; let bx0 = Infinity, bx1 = -Infinity, by0 = Infinity, by1 = -Infinity;
+      for (let x = xmin + step / 2; x < xmax; x += step) for (let y = ymin + step / 2; y < ymax; y += step) {
+        const s = solveIk(x, y, g, ref[0], ref[1]); if (!s) continue;
+        const ok = withinLimits(settings.motors[0], thetaToMotor(settings.motors[0], s.theta1)) && withinLimits(settings.motors[1], thetaToMotor(settings.motors[1], s.theta2));
+        cells.push({ x, y, ok });
+        bx0 = Math.min(bx0, x); bx1 = Math.max(bx1, x); by0 = Math.min(by0, y); by1 = Math.max(by1, y);
+      }
+      workspace = { cells, step };
+      // the frame: the reachable region plus the base, else the reach circle
+      if (cells.length) setView(Math.min(bx0, 0, g.m2_x), Math.max(bx1, 0, g.m2_x), Math.min(by0, 0, g.m2_y), Math.max(by1, 0, g.m2_y));
+      else setView(xmin, xmax, ymin, ymax);
+    }
+    function drawWorkspace() {
+      clear(layers.workspace);
+      if (!workspace) return;
+      const r = workspace.step * 0.42;
+      for (const c of workspace.cells) { const a = S([c.x, c.y]); el("rect", { x: a[0] - r, y: a[1] - r, width: 2 * r, height: 2 * r, fill: c.ok ? "#2563eb" : "#6b7280", opacity: c.ok ? 0.28 : 0.12 }, layers.workspace); }
+    }
+    function drawStatic() {
+      clear(layers.grid); clear(layers.ground);
+      const g = settings.geometry;
+      // grid every 50 or 100 mm depending on the frame
+      const gs = view.w > 1500 ? 200 : view.w > 700 ? 100 : 50;
+      const x0 = Math.floor(view.x0 / gs) * gs, x1 = view.x0 + view.w, y0 = Math.floor(view.y0 / gs) * gs, y1 = view.y0 + view.h;
+      for (let x = x0; x <= x1; x += gs) line([x, view.y0], [x, y1], x === 0 ? "#3a4a5c" : "#182028", strokeW(0.5), layers.grid);
+      for (let y = y0; y <= y1; y += gs) line([view.x0, y], [x1, y], y === 0 ? "#3a4a5c" : "#182028", strokeW(0.5), layers.grid);
+      text([view.x0 + gs * 0.2, view.y0 + gs * 0.3], "grid " + gs + " mm", layers.grid, { fill: "#4b5866" });
+      // the base line and the motors
+      line([0, 0], [g.m2_x, g.m2_y], "#9aa6ba", strokeW(1.2), layers.ground, { "stroke-dasharray": "8 6" });
+      dot([0, 0], strokeW(2.5), "#e6edf3", layers.ground); text([0, 0], "M1", layers.ground, { "font-weight": 600 });
+      dot([g.m2_x, g.m2_y], strokeW(2.5), "#e6edf3", layers.ground); text([g.m2_x, g.m2_y], "M2", layers.ground, { "font-weight": 600 });
+    }
+    function drawPose(layer, s, opts) {
+      clear(layer);
+      if (!s) return;
+      const g = settings.geometry, m1 = [0, 0], m2 = [g.m2_x, g.m2_y];
+      const op = opts.opacity, w = strokeW(opts.width), extra = opts.dash ? { opacity: op, "stroke-dasharray": strokeW(5) + " " + strokeW(4) } : { opacity: op };
+      const c1 = opts.bad ? "var(--danger)" : "var(--link1)", c2 = opts.bad ? "var(--danger)" : "var(--link2)", c3 = opts.bad ? "var(--danger)" : "var(--link3)", c4 = opts.bad ? "var(--danger)" : "var(--link4)";
+      line(m1, s.j2, c1, w, layer, extra); line(m2, s.j1, c2, w, layer, extra);
+      line(s.j1, s.j3, c3, w, layer, extra); line(s.j2, s.j3, c4, w, layer, extra);
+      if (g.ee_extension !== 0 || g.ee_offset !== 0) line(s.j3, s.m3, c4, w * 0.7, layer, extra);
+      for (const [name, p] of [["J1", s.j1], ["J2", s.j2], ["J3", s.j3]]) { dot(p, strokeW(1.6), "#e6edf3", layer, extra); if (opts.labels) text(p, name, layer); }
+      // the end effector: a wheel-ish circle
+      dot(s.m3, strokeW(opts.handle ? 3.4 : 2.6), opts.bad ? "var(--danger)" : "var(--ee)", layer, { opacity: Math.min(1, op + 0.3), stroke: "#0b0f13", "stroke-width": strokeW(0.5) });
+      el("circle", { cx: S(s.m3)[0], cy: S(s.m3)[1], r: Math.max(6, view.w * 0.045), fill: "none", stroke: opts.bad ? "var(--danger)" : "var(--ee)", "stroke-width": strokeW(0.6), opacity: op * 0.7 }, layer);
+      if (opts.labels) text(s.m3, "M3", layer, { "font-weight": 600 });
+    }
+    // The home pose, from the settings' home crank angles: always on the drawing
+    // (dashed), so that while each motor is jogged into position before its zero
+    // is set, the real linkage can be matched to it by eye.
+    function drawHome() {
+      const h = solveFk(settings.home_theta1, settings.home_theta2, settings.geometry);
+      drawPose(layers.home, h, { opacity: 0.45, width: 1.4, handle: false, bad: false, labels: false, dash: true });
+      if (h) text(h.m3, "home", layers.home, { fill: "#9aa6ba", "font-style": "italic" });
+    }
+    function onGeometryChanged() { lastTargetTheta = null; computeWorkspace(); drawWorkspace(); drawStatic(); drawHome(); refreshCurrent(); refreshTarget(target.x, target.y); }
+
+    // ===================== State =====================
+    let lastStatus = null, currentSolution = null;
+    let target = { x: 0, y: 0 }, targetSolution = null, targetOk = false, targetMotors = null;
+    // IK branch continuity: the previously solved target angles, used as the
+    // reference for the next solve so dragging the target CONTINUES one assembly
+    // instead of snapping each pose independently toward a fixed reference (which
+    // flips branches whenever the solution crosses that reference angle - e.g. at
+    // M2's home - and can jump to the cranks-toward-each-other assembly). Null =
+    // no continuation yet; seed from the device/home reference. Reset on a
+    // geometry change (the branch meaning changes with it).
+    let lastTargetTheta = null;
+    let dragging = false, liveTimer = null, liveDirty = false;
+    let streamRequestPending = false, rxTimes = [];
+
+    function refreshTarget(x, y) {
+      target = { x, y };
+      // Continue from the last solved target pose when we have one, so a drag
+      // tracks a single assembly; otherwise seed from the device pose, or home.
+      const ref = lastTargetTheta || referenceThetas();
+      const s = solveIk(x, y, settings.geometry, ref[0], ref[1]);
+      // Advance the continuity reference only on a real solution; a momentary
+      // unreachable excursion must not reset which branch we are tracking.
+      if (s) lastTargetTheta = [s.theta1, s.theta2];
+      targetSolution = s;
+      targetMotors = s ? [thetaToMotor(settings.motors[0], s.theta1), thetaToMotor(settings.motors[1], s.theta2)] : null;
+      targetOk = !!s && withinLimits(settings.motors[0], targetMotors[0]) && withinLimits(settings.motors[1], targetMotors[1]);
+      drawPose(layers.target, s, { opacity: 0.5, width: 1.6, handle: true, bad: !targetOk, labels: false });
+      if (!s) dot([x, y], strokeW(3), "var(--danger)", layers.target, { opacity: 0.8 });
+      if (document.activeElement !== els.targetX) els.targetX.value = x.toFixed(1);
+      if (document.activeElement !== els.targetY) els.targetY.value = y.toFixed(1);
+      els.targetXY.textContent = x.toFixed(1) + " / " + y.toFixed(1) + " mm";
+      els.targetStatus.className = "v " + (targetOk ? "good" : "bad");
+      els.targetStatus.textContent = !s ? "unreachable" : (targetOk ? "ok · θ " + s.theta1.toFixed(1) + "° / " + s.theta2.toFixed(1) + "° · motors " + targetMotors.map(v => v.toFixed(1)).join(" / ") + "°"
+        : "outside the motor limits (motors " + targetMotors.map(v => v.toFixed(1)).join(" / ") + "°)");
+      els.moveToBtn.disabled = !transport || !moduleReady || !targetOk;
+    }
+    function refreshCurrent() {
+      const st = lastStatus;
+      currentSolution = (st && Number.isFinite(st.theta1) && Number.isFinite(st.theta2)) ? solveFk(st.theta1, st.theta2, settings.geometry) : null;
+      drawPose(layers.current, currentSolution, { opacity: 1, width: 2.4, handle: false, bad: !!(st && !st.poseValid), labels: true });
+      // the device's own target marker
+      clear(layers.labels);
+      if (st && st.targetValid && Number.isFinite(st.targetX)) { const a = S([st.targetX, st.targetY]); const r = strokeW(3); el("path", { d: "M" + (a[0]-r) + " " + a[1] + "L" + (a[0]+r) + " " + a[1] + "M" + a[0] + " " + (a[1]-r) + "L" + a[0] + " " + (a[1]+r), stroke: "var(--target)", "stroke-width": strokeW(0.6), opacity: 0.9 }, layers.labels); }
+      if (currentSolution) {
+        const s = currentSolution;
+        els.poseXY.textContent = s.m3[0].toFixed(1) + " / " + s.m3[1].toFixed(1) + " mm";
+        els.poseThetas.textContent = s.theta1.toFixed(2) + "° / " + s.theta2.toFixed(2) + "°";
+        els.poseBar.textContent = s.barAngle.toFixed(2) + "°";
+      } else {
+        els.poseXY.textContent = st && Number.isFinite(st.theta1) ? "(no fk solution: wrong assembly / lengths?)" : "-";
+        els.poseThetas.textContent = st && Number.isFinite(st.theta1) ? st.theta1.toFixed(2) + "° / " + st.theta2.toFixed(2) + "°" : "-";
+        els.poseBar.textContent = "-";
+      }
+      els.poseMotors.textContent = st && st.motors[0].commOk && st.motors[1].commOk ? st.motors[0].angle.toFixed(2) + "° / " + st.motors[1].angle.toFixed(2) + "°" : "-";
+    }
+    // pointer -> linkage frame
+    function pointerToWorld(ev) { const pt = new DOMPoint(ev.clientX, ev.clientY).matrixTransform(svg.getScreenCTM().inverse()); return [pt.x, -pt.y]; }
+    svg.addEventListener("pointerdown", (ev) => {
+      if (ev.button !== 0) return;
+      svg.setPointerCapture(ev.pointerId); dragging = true; svg.classList.add("dragging"); svg.focus();
+      const p = pointerToWorld(ev); refreshTarget(p[0], p[1]);
+      if (els.liveDrag.checked && transport) { liveDirty = true; if (!liveTimer) liveTimer = setInterval(() => { if (liveDirty && targetOk) { liveDirty = false; sendMoveTo(); } }, 250); }
+    });
+    svg.addEventListener("pointermove", (ev) => { if (!dragging) return; const p = pointerToWorld(ev); refreshTarget(p[0], p[1]); liveDirty = true; });
+    const endDrag = () => {
+      if (!dragging) return; dragging = false; svg.classList.remove("dragging");
+      if (liveTimer) { clearInterval(liveTimer); liveTimer = null; }
+      if (transport && moduleReady && els.moveOnRelease.checked) { if (targetOk) sendMoveTo(); else logLine("warn", "target not sent: " + els.targetStatus.textContent); }
+    };
+    svg.addEventListener("pointerup", endDrag); svg.addEventListener("pointercancel", endDrag);
+    svg.addEventListener("keydown", (ev) => {
+      const step = Math.max(0.01, num(els.jogStep, 5));
+      const d = { ArrowUp: [0, step], ArrowDown: [0, -step], ArrowLeft: [-step, 0], ArrowRight: [step, 0] }[ev.key];
+      if (!d) return; ev.preventDefault(); jog(d[0], d[1]);
+    });
+    for (const input of [els.targetX, els.targetY]) {
+      input.addEventListener("input", () => refreshTarget(num(els.targetX), num(els.targetY)));
+      input.addEventListener("keydown", (e) => { if (e.key === "Enter" && !els.moveToBtn.disabled) els.moveToBtn.click(); });
+    }
+    els.jogStep.addEventListener("input", () => { els.jogStepLabel.textContent = num(els.jogStep, 5) + " mm"; });
+
+    // ===================== Motors panel =====================
+    const motorEls = [];
+    function buildMotorsPanel() {
+      els.motors.innerHTML = ""; motorEls.length = 0;
+      for (let k = 0; k < 2; k++) {
+        const card = document.createElement("div"); card.className = "motor";
+        card.innerHTML =
+          '<div class="head"><b>Motor ' + (k + 1) + '</b> <span class="muted">crank ' + (k + 1) + ', node <span data-r="node">-</span></span> <span class="state-badge" data-r="state">-</span><span class="muted" data-r="err"></span></div>' +
+          '<div class="vals">' +
+            '<span><span class="k">motor angle</span><span class="v" data-r="angle">-</span></span>' +
+            '<span><span class="k">crank θ</span><span class="v" data-r="theta">-</span></span>' +
+            '<span><span class="k">speed</span><span class="v" data-r="vel">-</span></span>' +
+            '<span><span class="k">torque / limit</span><span class="v" data-r="torque">-</span></span>' +
+            '<span><span class="k">current</span><span class="v" data-r="current">-</span></span>' +
+            '<span><span class="k">zero</span><span class="v" data-r="zero">-</span></span>' +
+            '<span title="The motor angle this motor reads at the home pose (settings: home crank angle, direction, crank angle at zero). Jog the real crank to the dashed home pose, then Zero here (or \'crank is at\' with the home angle)."><span class="k">at home</span><span class="v" data-r="athome">-</span></span>' +
+          '</div>' +
+          '<div class="btns">' +
+            '<button class="small ok" data-b="enable" disabled>Enable</button><button class="small" data-b="disable" disabled>Disable</button>' +
+            '<button class="small" data-b="reset" disabled>Reset fault</button><button class="small danger" data-b="halt" disabled>Halt</button>' +
+          '</div>' +
+          '<div class="btns" style="align-items:center;">' +
+            '<label>motor <input type="number" class="tiny" data-i="set" value="0" step="1"> °</label><button class="small primary" data-b="set" disabled title="This crank\'s motor to an absolute motor angle (within its limits)">Set</button>' +
+            '<span class="spacer"></span>' +
+            '<button class="small" data-b="zeroHere" disabled title="The motor reads 0 here (volatile until saved)">Zero here</button>' +
+            '<label>crank is at <input type="number" class="tiny" data-i="crank" value="0" step="1"> °</label><button class="small" data-b="zeroCrank" disabled title="Tell the device where the crank physically is now (linkage frame, CCW from +x): it sets the motor\'s zero accordingly, using the configured direction and crank angle at zero">Set</button>' +
+            '<button class="small" data-b="saveZero" disabled title="Persist this motor\'s software zero on the device (NVS, per node id)">Save zero</button>' +
+            '<button class="small" data-b="loadZero" disabled title="Reload the saved software zero">Load zero</button>' +
+          '</div>' +
+          '<div class="btns" style="align-items:center;" title="Jog: move this motor by the step from where it is, ignoring the position limits (which a pre-zero encoder angle is usually outside of). For bringing the real linkage to the dashed home pose before zeroing. Needs the drive enabled; at most ' + JOG_MAX_DEG + '° per press.">' +
+            '<span class="k">jog</span>' +
+            '<button class="small" data-b="jogM5" disabled>-5°</button><button class="small" data-b="jogM1" disabled>-1°</button>' +
+            '<label><input type="number" class="tiny" data-i="jog" value="0.5" min="0.01" max="' + JOG_MAX_DEG + '" step="0.1"> °</label>' +
+            '<button class="small" data-b="jogMinus" disabled>-step</button><button class="small" data-b="jogPlus" disabled>+step</button>' +
+            '<button class="small" data-b="jogP1" disabled>+1°</button><button class="small" data-b="jogP5" disabled>+5°</button>' +
+            '<span class="muted">pre-zero positioning (limits ignored)</span>' +
+          '</div>';
+        els.motors.appendChild(card);
+        const r = {}; card.querySelectorAll("[data-r]").forEach((e) => { r[e.dataset.r] = e; });
+        const b = {}; card.querySelectorAll("[data-b]").forEach((e) => { b[e.dataset.b] = e; });
+        const i = {}; card.querySelectorAll("[data-i]").forEach((e) => { i[e.dataset.i] = e; });
+        motorEls.push({ card, r, b, i });
+        b.enable.addEventListener("click", () => { logLine("tx", "enable motor " + (k + 1)); send(T_ENABLE, encU8(k)); });
+        b.disable.addEventListener("click", () => { logLine("tx", "disable motor " + (k + 1)); send(T_DISABLE, encU8(k)); });
+        b.reset.addEventListener("click", () => { logLine("tx", "reset fault motor " + (k + 1)); send(T_RESET_FAULT, encU8(k)); });
+        b.halt.addEventListener("click", () => { logLine("tx", "halt motor " + (k + 1)); send(T_HALT, encU8(k)); });
+        b.set.addEventListener("click", () => { const v = num(i.set); logLine("tx", "motor " + (k + 1) + " -> " + v.toFixed(2) + "°"); send(T_SET_MOTOR, encSetMotor(k, v)); });
+        i.set.addEventListener("keydown", (e) => { if (e.key === "Enter" && !b.set.disabled) b.set.click(); });
+        const jog = (d) => { if (!(Math.abs(d) <= JOG_MAX_DEG) || d === 0) { logLine("err", "jog step must be 0.01.." + JOG_MAX_DEG + "°"); return; } logLine("tx", "motor " + (k + 1) + " jog " + (d > 0 ? "+" : "") + d.toFixed(2) + "° (limits ignored)"); send(T_JOG_MOTOR, encSetMotor(k, d)); };
+        b.jogM5.addEventListener("click", () => jog(-5)); b.jogP5.addEventListener("click", () => jog(5));
+        b.jogM1.addEventListener("click", () => jog(-1)); b.jogP1.addEventListener("click", () => jog(1));
+        b.jogMinus.addEventListener("click", () => jog(-Math.abs(num(i.jog, 0.5)))); b.jogPlus.addEventListener("click", () => jog(Math.abs(num(i.jog, 0.5))));
+        b.zeroHere.addEventListener("click", () => { logLine("tx", "motor " + (k + 1) + ": zero here"); send(T_ZERO_MOTOR, encZero(k, 0, 0)); });
+        b.zeroCrank.addEventListener("click", () => { const v = num(i.crank); logLine("tx", "motor " + (k + 1) + ": the crank is at " + v.toFixed(2) + "°"); send(T_ZERO_MOTOR, encZero(k, 2, v)); });
+        b.saveZero.addEventListener("click", () => { logLine("tx", "motor " + (k + 1) + ": save zero"); send(T_SAVE_ZERO, encU8(k)); });
+        b.loadZero.addEventListener("click", () => { logLine("tx", "motor " + (k + 1) + ": load zero"); send(T_LOAD_ZERO, encU8(k)); });
+      }
+    }
+    function renderMotors(st) {
+      for (let k = 0; k < 2; k++) {
+        const m = st ? st.motors[k] : null, e = motorEls[k], cfg = settings.motors[k];
+        const connected = !!transport && moduleReady;
+        if (!m) { for (const key of Object.keys(e.r)) e.r[key].textContent = key === "err" ? "" : "-"; e.r.state.className = "state-badge"; for (const key of Object.keys(e.b)) e.b[key].disabled = true; continue; }
+        e.r.node.textContent = m.present ? String(m.node) : "none";
+        const state = !m.present ? { t: "no motor", c: "" } : !m.commOk ? { t: "no communication", c: "fault" } : m.faulted ? { t: "FAULT", c: "fault" } : m.enabled ? { t: "Operation enabled", c: "enabled" } : { t: ds402Name(m.statusword), c: "idle" };
+        e.r.state.textContent = state.t; e.r.state.className = "state-badge " + state.c;
+        e.r.err.textContent = m.commOk && m.errorCode ? " error 0x" + m.errorCode.toString(16).padStart(4, "0") : "";
+        const ok = m.present && m.commOk;
+        e.r.angle.textContent = ok ? m.angle.toFixed(2) + "°" + (m.targetReached ? "" : " ●") : "-";
+        e.r.theta.textContent = ok ? motorToTheta(cfg, m.angle).toFixed(2) + "°" : "-";
+        e.r.vel.textContent = ok ? m.velocity.toFixed(1) + " °/s" : "-";
+        e.r.torque.textContent = !ok ? "-" : m.ratedTorqueCnm ? (m.torque * m.ratedTorqueCnm / 1e5).toFixed(2) + " / " + (m.torqueLimit * m.ratedTorqueCnm / 1e5).toFixed(2) + " Nm (" + m.torque + " / " + m.torqueLimit + " ‰)" : m.torque + " / " + m.torqueLimit + " ‰";
+        e.r.current.textContent = ok ? m.current + " ‰" : "-";
+        e.r.zero.textContent = m.present ? (m.zeroSet ? "set" : "not set (absolute encoder)") : "-";
+        e.b.enable.disabled = !connected || !ok || m.enabled || m.faulted;
+        e.b.disable.disabled = !connected || !ok || !m.enabled;
+        e.b.reset.disabled = !connected || !ok || !m.faulted;
+        e.b.halt.disabled = !connected || !ok || !m.enabled;
+        e.b.set.disabled = !connected || !ok || !m.enabled || m.faulted;
+        for (const jb of ["jogM5", "jogM1", "jogMinus", "jogPlus", "jogP1", "jogP5"]) e.b[jb].disabled = e.b.set.disabled;
+        // inverse of motorToTheta: the motor angle at the settings' home crank angle
+        e.r.athome.textContent = cfg ? (normDeg((k === 0 ? settings.home_theta1 : settings.home_theta2) - cfg.theta_at_zero) * cfg.direction).toFixed(2) + "°" : "-";
+        e.b.zeroHere.disabled = e.b.zeroCrank.disabled = !connected || !ok;
+        e.b.saveZero.disabled = e.b.loadZero.disabled = !connected || !m.present;
+        e.i.set.min = cfg.min; e.i.set.max = cfg.max;
+      }
+    }
+    buildMotorsPanel();
+
+    // ===================== Status handling =====================
+    function applyStatus(st) {
+      const prev = lastStatus;
+      lastStatus = st;
+      refreshTorqueUnits(st.motors); // Nm inputs once each crank's drive reported its rated torque
+      rxTimes.push(performance.now()); while (rxTimes.length && rxTimes[0] < performance.now() - 2000) rxTimes.shift();
+      els.rxRate.textContent = rxTimes.length > 1 ? (rxTimes.length / 2).toFixed(1) + " Hz" : "-";
+      const state = !st.canOk ? { t: "CAN down", c: "fault" } : !st.commOk ? { t: "a motor is not answering", c: "fault" } : st.faulted ? { t: "FAULT", c: "fault" } : st.enabled ? { t: "enabled", c: "enabled" } : { t: "disabled", c: "idle" };
+      els.linkState.textContent = state.t; els.linkState.className = "state-badge " + state.c;
+      if (st.can) {
+        const c = st.can, busOff = c.state === 4;
+        els.devCan.textContent = !st.canOk ? "DOWN" : (CAN_STATE[c.state] || "?") + (c.busOffCount ? " · bus-off " + c.busOffCount + "×" : "");
+        els.devCan.style.color = busOff || !st.canOk ? "var(--danger)" : (c.state === 2 || c.state === 3) ? "var(--warn, #d29922)" : "";
+        const hints = []; if (c.signalErrors) hints.push("signal integrity"); if (c.ackErrors) hints.push("not acknowledged");
+        els.devCanErrors.textContent = "(TEC " + c.tec + " REC " + c.rec + " · bus errors " + c.busErrors + " · stuff/form/bit " + c.signalErrors + " · ack " + c.ackErrors + (hints.length ? " — " + hints.join(", ") : "") + ")";
+        els.canRecoverBtn.style.display = busOff ? "" : "none"; els.canRecoverBtn.disabled = !busOff;
+      } else { els.devCan.textContent = st.canOk ? "up" : "DOWN"; els.devCanErrors.textContent = ""; els.canRecoverBtn.style.display = "none"; }
+      els.motion.textContent = st.moving ? "moving" : "idle"; els.motion.className = "v " + (st.moving ? "good" : "");
+      els.deviceTarget.textContent = st.targetValid ? st.targetX.toFixed(1) + " / " + st.targetY.toFixed(1) + " mm" : "none";
+      // the shaded workspace follows the measured pose's branch; recompute when it moved far from the reference it was shaded with
+      const ref = referenceThetas();
+      if (!workspaceRef || Math.abs(normDeg(ref[0] - workspaceRef[0])) > 15 || Math.abs(normDeg(ref[1] - workspaceRef[1])) > 15) { computeWorkspace(); drawWorkspace(); drawStatic(); }
+      refreshCurrent();
+      if (!dragging) refreshTarget(target.x, target.y); // the branch reference may have changed
+      renderMotors(st);
+      const can = st.canOk && st.commOk;
+      els.enableAllBtn.disabled = !can || st.enabled;
+      els.disableAllBtn.disabled = !can || !(st.motors[0].enabled || st.motors[1].enabled);
+      els.resetAllBtn.disabled = !can || !st.faulted;
+      els.haltAllBtn.disabled = !can;
+      els.homeBtn.disabled = !can || !st.enabled;
+      for (const b of [els.jogUp, els.jogDown, els.jogLeft, els.jogRight]) b.disabled = !can || !st.enabled;
+      if (st.streamEnabled !== els.liveStream.checked && !streamRequestPending) els.liveStream.checked = st.streamEnabled;
+      streamRequestPending = false;
+      if (prev === null) logLine("sys", "first status: cranks " + (Number.isFinite(st.theta1) ? st.theta1.toFixed(1) + "° / " + st.theta2.toFixed(1) + "°" : "unknown") + ", motors " + st.motors.map(m => m.present ? "node " + m.node + (m.commOk ? "" : " (no answer)") : "none").join(" / "));
+    }
+    // Beside each node id: the firmware's default (menuconfig) when the saved
+    // settings differ from it - the usual reason "I changed menuconfig and the
+    // device still shows the old ids" (saved settings win unless the firmware
+    // was built with LINKAGE_NODE_IDS_FROM_MENUCONFIG).
+    function refreshNodeNotes() {
+      for (const k of [1, 2]) {
+        const el = els["mNodeNote" + k]; if (!el) continue;
+        const def = info && info.defaultNodeIds ? info.defaultNodeIds[k - 1] : null, cur = Math.round(num(els["mNode" + k]));
+        if (def === null || !Number.isFinite(cur) || def === cur) { el.textContent = ""; el.title = ""; el.style.color = ""; continue; }
+        el.textContent = "default " + def;
+        el.title = "The firmware's default node id (menuconfig) is " + def + (info.nodeIdsFromMenuconfig ? ": it overrides this one at the next boot (LINKAGE_NODE_IDS_FROM_MENUCONFIG)" : ": Reset settings adopts it; the saved settings win otherwise");
+        el.style.color = "var(--warn, #d29922)";
+      }
+    }
+    function applySettingsReply(s) {
+      deviceSettings = s; settings = s; settingsToForm(s);
+      els.settingsNote.textContent = "Device settings loaded."; els.settingsNote.style.color = "var(--text-muted)";
+      logLine("sys", "settings: motors " + s.motors.map(m => m.node_id || "none").join(" / ") + ", cranks " + s.geometry.crank1 + " / " + s.geometry.crank2 + " mm, bar " + s.geometry.bar + ", coupler " + s.geometry.coupler + " mm, M3 +" + s.geometry.ee_extension + " / " + s.geometry.ee_offset + " mm");
+      onGeometryChanged();
+      refreshNodeNotes();
+    }
+    // The torque limit inputs are in Nm once the motor on that crank has reported
+    // its rated torque (STATUS rated_torque_cnm), in ‰ of rated before; the
+    // settings on the wire and in NVS stay ‰.
+    const ratedCnm = [0, 0]; // per crank, from the latest STATUS
+    function torqueNm(k) { return ratedCnm[k - 1] > 0; }
+    function torqueInputPermille(k) { const v = num(els["mTorque" + k]); return torqueNm(k) ? Math.round(v * 1e5 / ratedCnm[k - 1]) : Math.round(v); }
+    function setTorqueInput(k, permille) { const el = els["mTorque" + k]; el.value = torqueNm(k) ? String(Number((permille * ratedCnm[k - 1] / 1e5).toFixed(2))) : String(permille); }
+    function refreshTorqueUnits(motors) {
+      for (const k of [1, 2]) {
+        const was = torqueNm(k), pm = torqueInputPermille(k);
+        ratedCnm[k - 1] = (motors[k - 1] && motors[k - 1].ratedTorqueCnm) || 0;
+        if (torqueNm(k) !== was) {
+          els["mTorqueUnit" + k].textContent = torqueNm(k) ? "Nm" : "‰";
+          els["mTorque" + k].step = torqueNm(k) ? "0.1" : "10";
+          els["mTorque" + k].max = info && info.maxTorque ? (torqueNm(k) ? String(Number((info.maxTorque * ratedCnm[k - 1] / 1e5).toFixed(2))) : String(info.maxTorque)) : "";
+          if (els["mTorque" + k].value !== "") setTorqueInput(k, pm); // same limit, new unit
+        }
+      }
+    }
+    function applyInfo(i) {
+      info = i;
+      els.devFw.textContent = i.project + " " + i.version; els.devFw.title = "built " + i.build;
+      els.devMaxTorque.textContent = i.maxTorque + " ‰" + (ratedCnm[0] ? " (" + (i.maxTorque * ratedCnm[0] / 1e5).toFixed(2) + " Nm)" : "");
+      for (const k of [1, 2]) els["mTorque" + k].max = torqueNm(k) ? String(Number((i.maxTorque * ratedCnm[k - 1] / 1e5).toFixed(2))) : String(i.maxTorque);
+      logLine("sys", "info: " + i.project + " " + i.version + " (" + i.build + ") · protocol v" + i.protocolVersion + " · torque ceiling " + i.maxTorque + " ‰ · poll " + i.pollMs + " ms");
+      if (i.protocolVersion < CONSOLE_PROTOCOL_VERSION) logLine("warn", "device protocol v" + i.protocolVersion + " is older than this console (v" + CONSOLE_PROTOCOL_VERSION + "): no CAN counters, Nm torque, bus-off recovery or drive re-addressing");
+      for (const k of [1, 2]) els["mProgram" + k].disabled = i.protocolVersion < 2;
+      refreshNodeNotes();
+    }
+
+    // ===================== Incoming frame handling =====================
+    function onIncoming(chunk) {
+      let frames; try { frames = parser.feed(chunk); } catch(e) { logLine("err", "parse error: " + (e && e.message ? e.message : e)); return; }
+      for (const f of frames) {
+        if (f.module === MODULE_DISCOVERY && f.reply && f.type === T_LIST_MODULES) {
+          if (discoveryResolve) { discoveryResolve(f.payload); discoveryResolve = null; }
+          continue;
+        }
+        if (f.module !== moduleLinkage) continue;
+        const dv = new DataView(f.payload.buffer, f.payload.byteOffset, f.payload.length);
+        if (f.type === T_STATUS) {
+          const s = parseStatus(f.payload);
+          if (s) applyStatus(s); else logLine("warn", "short status payload (" + f.payload.length + " bytes)");
+        } else if (f.type === T_SETTINGS) {
+          const s = decodeSettings(f.payload);
+          if (s) applySettingsReply(s); else logLine("warn", "settings payload of an unknown version / size (" + f.payload.length + " bytes)");
+        } else if (f.type === T_INFO) {
+          const i = parseInfo(f.payload);
+          if (i) applyInfo(i); else logLine("warn", "short info payload");
+        } else if (f.type === T_IK_RESULT) {
+          const r = parseIkResult(f.payload);
+          if (r) logLine("sys", "device ik (" + r.x.toFixed(1) + ", " + r.y.toFixed(1) + "): " + (r.reachable ? (r.withinLimits ? "reachable, within limits" : "reachable, OUTSIDE limits") + " · θ " + r.theta1.toFixed(2) + "° / " + r.theta2.toFixed(2) + "° · motors " + r.m1.toFixed(2) + "° / " + r.m2.toFixed(2) + "°" : "unreachable"));
+        } else if (f.type === T_OK) {
+          const rt = f.payload.length ? f.payload[0] : 0;
+          logLine("rx", "ok: " + (REQ_NAME[rt] || ("0x" + rt.toString(16))));
+          if (rt !== T_GET_STATUS && rt !== T_GET_SETTINGS && rt !== T_GET_INFO && rt !== T_SOLVE_IK) send(T_GET_STATUS);
+        } else if (f.type === T_ERROR) {
+          const rt = f.payload.length ? f.payload[0] : 0;
+          const code = f.payload.length >= 5 ? dv.getUint32(1, true) : 0;
+          let msg = ""; try { msg = new TextDecoder().decode(f.payload.subarray(5)); } catch(_){}
+          logLine("err", (REQ_NAME[rt] || ("0x" + rt.toString(16))) + " failed [" + code + "]: " + msg);
+          if (rt === T_SET_STREAM) streamRequestPending = false;
+          if (rt !== T_GET_STATUS) send(T_GET_STATUS);
+        }
+      }
+    }
+
+    // ===================== Connect / disconnect =====================
+    if (!navigator.usb) els.connectUsbBtn.disabled = true;
+    if (!navigator.serial) els.connectSerialBtn.disabled = true;
+    if (!navigator.usb && !navigator.serial) els.unsupported.style.display = "block";
+    els.connectUsbBtn.addEventListener("click", () => connect("usb"));
+    els.connectSerialBtn.addEventListener("click", () => connect("serial"));
+    els.disconnectBtn.addEventListener("click", () => disconnect());
+
+    async function connect(kind, preset) {
+      return openGate.run(() => connectLocked(kind, preset));
+    }
+    async function connectLocked(kind, preset) {
+      if (transport) return;
+      const t = kind === "usb" ? new UsbTransport() : new SerialTransport();
+      try { if (kind === "usb") await t.open(els.anyDevice.checked, preset); else await t.open(preset); }
+      catch (e) { if (e && e.name === "NotFoundError" && !preset) logLine("sys", "Device selection cancelled."); else logLine("err", "Connect failed: " + (e && e.message ? e.message : e)); try { await t.close(); } catch(_){} return; }
+      transport = t; connIdentity = t.identity(); reconnect.connected(); parser.reset(); moduleReady = false;
+      const name = t.describe(); setStatus("connected", "Connected"); els.devInfo.textContent = name; logLine("sys", "Connected: " + name);
+      t.readLoop(onIncoming).catch((e) => { if (transport === t) { logLine("err", "Read loop error: " + (e && e.message ? e.message : e)); onLinkLost(); } });
+      try { await checkModulePresent(); } catch (_) {}
+      if (transport !== t) return;
+      setConnectedUI(true);
+      send(T_GET_INFO); send(T_GET_SETTINGS); send(T_GET_STATUS);
+      if (els.liveStream.checked) startStream();
+      startStatusPoll();
+    }
+    async function disconnect() {
+      if (!transport) return; logLine("sys", "Disconnecting..."); stopStatusPoll(); stopStream();
+      const t = transport; transport = null;
+      reconnect.stop(); const released = connIdentity; connIdentity = null; try { await t.close(); } catch(_){}
+      postReleased(deviceChannel, released);
+      setConnectedUI(false); setStatus("", "Disconnected");
+    }
+    function onLinkLost() {
+      if (!transport) return; stopStatusPoll(); const t = transport; transport = null; t.close().catch(()=>{});
+      setConnectedUI(false); setStatus("error", "Disconnected");
+      reconnect.onLinkLost(connIdentity);
+    }
+    if (navigator.usb && navigator.usb.addEventListener) navigator.usb.addEventListener("disconnect", (e) => { if (transport instanceof UsbTransport && e.device === transport.device) { logLine("err", "Device disconnected."); onLinkLost(); } });
+    if (navigator.serial && navigator.serial.addEventListener) {
+      navigator.serial.addEventListener("disconnect", (e) => {
+        const eventPort = e.port ?? e.target;
+        if (transport instanceof SerialTransport && eventPort === transport.port) { logLine("err", "Serial device disconnected."); onLinkLost(); }
+      });
+    }
+    function setConnectedUI(connected) {
+      els.connectUsbBtn.disabled = connected || !navigator.usb;
+      els.connectSerialBtn.disabled = connected || !navigator.serial;
+      els.disconnectBtn.disabled = !connected; els.anyDevice.disabled = connected;
+      els.refreshBtn.disabled = els.settingsApplyBtn.disabled = els.settingsReloadBtn.disabled = els.settingsResetBtn.disabled = !connected;
+      if (!connected) {
+        els.devInfo.textContent = "Not connected. Default WebUSB filter: VID 0x1209 (espp default).";
+        els.linkState.textContent = "-"; els.linkState.className = "state-badge";
+        for (const id of ["devCan", "devFw", "devMaxTorque", "rxRate", "deviceTarget", "motion"]) els[id].textContent = "-";
+        els.devCanErrors.textContent = ""; els.canRecoverBtn.style.display = "none";
+        for (const b of [els.enableAllBtn, els.disableAllBtn, els.resetAllBtn, els.haltAllBtn, els.homeBtn, els.moveToBtn, els.jogUp, els.jogDown, els.jogLeft, els.jogRight]) b.disabled = true;
+        lastStatus = null; rxTimes = []; info = null; deviceSettings = null; resetArmed = false;
+        renderMotors(null); refreshCurrent();
+      }
+    }
+
+    // ---- controls ----
+    function sendMoveTo() { logLine("tx", "move to (" + target.x.toFixed(1) + ", " + target.y.toFixed(1) + ")"); send(T_MOVE_TO, encPoint(target.x, target.y)); }
+    function jog(dx, dy) { if (!transport || !moduleReady) return; logLine("tx", "move by (" + dx.toFixed(1) + ", " + dy.toFixed(1) + ")"); send(T_MOVE_BY, encPoint(dx, dy)); }
+    els.refreshBtn.addEventListener("click", () => send(T_GET_STATUS));
+    els.moveToBtn.addEventListener("click", () => { refreshTarget(num(els.targetX), num(els.targetY)); if (targetOk) sendMoveTo(); else logLine("warn", "not sent: " + els.targetStatus.textContent); });
+    els.homeBtn.addEventListener("click", () => { logLine("tx", "home"); send(T_HOME); });
+    els.jogUp.addEventListener("click", () => jog(0, num(els.jogStep, 5)));
+    els.jogDown.addEventListener("click", () => jog(0, -num(els.jogStep, 5)));
+    els.jogLeft.addEventListener("click", () => jog(-num(els.jogStep, 5), 0));
+    els.jogRight.addEventListener("click", () => jog(num(els.jogStep, 5), 0));
+    els.enableAllBtn.addEventListener("click", () => { logLine("tx", "enable both motors"); send(T_ENABLE, encU8(ALL_MOTORS)); });
+    els.disableAllBtn.addEventListener("click", () => { logLine("tx", "disable both motors"); send(T_DISABLE, encU8(ALL_MOTORS)); });
+    els.resetAllBtn.addEventListener("click", () => { logLine("tx", "reset faults"); send(T_RESET_FAULT, encU8(ALL_MOTORS)); });
+    els.canRecoverBtn.addEventListener("click", () => { logLine("tx", "CAN bus-off recovery"); send(T_RECOVER_CAN); });
+    for (const k of [1, 2]) els["mProgram" + k].addEventListener("click", () => {
+      const m = lastStatus && lastStatus.motors[k - 1], cur = m ? m.node : null, id = Math.round(num(els["mNewNode" + k]));
+      if (!(id >= 1 && id <= 127)) { logLine("err", "type the new node id (1..127) in the 're-address drive to' box"); return; }
+      if (!m || !m.present) { logLine("err", "crank " + k + " has no motor configured: set its node id and Apply first"); return; }
+      if (!m.commOk) { logLine("err", "the drive on crank " + k + " (node " + cur + ") does not answer, so it cannot be re-addressed: fix the node id above (the id it answers on) and Apply, or its power / wiring"); return; }
+      if (cur === id) { logLine("warn", "the drive on crank " + k + " already is node " + id); return; }
+      if (!window.confirm("Re-address the drive on crank " + k + " from node " + cur + " to " + id + "? It writes the drive's Node-ID objects and saves them (~5 s); the node id above follows on success.")) return;
+      logLine("tx", "program drive on crank " + k + ": node " + cur + " -> " + id); send(T_SET_DRIVE_NODE_ID, new Uint8Array([k - 1, id]));
+    });
+    els.haltAllBtn.addEventListener("click", () => { logLine("tx", "HALT"); send(T_HALT, encU8(ALL_MOTORS)); });
+
+    // ---- device-side status streaming + status polling ----
+    function startStream() { streamRequestPending = true; send(T_SET_STREAM, encStream(true, Number(els.streamPeriod.value) || 100)); }
+    function stopStream() { if (transport) { streamRequestPending = true; send(T_SET_STREAM, encStream(false, Number(els.streamPeriod.value) || 100)); } }
+    els.liveStream.addEventListener("change", () => { if (!transport) return; els.liveStream.checked ? startStream() : stopStream(); });
+    els.streamPeriod.addEventListener("change", () => { if (transport && els.liveStream.checked) startStream(); });
+    let statusTimer = null;
+    function startStatusPoll() { stopStatusPoll(); statusTimer = setInterval(() => { if (transport && moduleReady && !(lastStatus && lastStatus.streamEnabled)) send(T_GET_STATUS); }, STATUS_POLL_MS); }
+    function stopStatusPoll() { if (statusTimer) { clearInterval(statusTimer); statusTimer = null; } }
+
+    // ---- auto-connect (?autoconnect=1&transport=&vid=&pid=&serial=) + auto-reconnect ----
+    const connectParams = parseConnectParams(location.search);
+    let connIdentity = null;
+    const deviceChannel = openDeviceChannel();
+    els.autoReconnect.checked = loadAutoReconnect();
+    els.autoReconnect.addEventListener("change", () => {
+      saveAutoReconnect(els.autoReconnect.checked);
+      if (!els.autoReconnect.checked) reconnect.stop("auto-reconnect is off");
+    });
+    const openGate = createOpenGate({ connected: () => !!transport });
+    const reconnect = createReconnectSupervisor({ gate: openGate, discard: () => disconnect(), enabled: () => els.autoReconnect.checked, log: logLine, reconnect: reconnectAttempt });
+    watchDeviceArrivals(reconnect);
+    async function reconnectAttempt(identity, attempt, token) {
+      if (transport) return true;
+      const preset = identity.transport === "usb" ? await findPermittedUsbDevice(identity) : await findPermittedSerialPort(identity);
+      if (token.cancelled() || transport) return false;
+      if (!preset) return false;
+      await connect(identity.transport, preset);
+      return !!transport;
+    }
+    async function autoConnect() {
+      const want = connectParams;
+      for (const kind of want.transport ? [want.transport] : ["usb", "serial"]) {
+        const preset = kind === "usb" ? await findPermittedUsbDevice(want) : await findPermittedSerialPort(want);
+        if (!preset) continue;
+        logLine("sys", "Auto-connecting to " + describeIdentity(kind === "usb" ? usbIdentity(preset) : serialIdentity(preset)) + "…");
+        await connect(kind, preset);
+        return;
+      }
+      logLine("warn", "Auto-connect: no permitted " + describeIdentity(want) + " found — use Connect (the browser only lists devices this page was already granted).");
+    }
+    window.addEventListener("pagehide", () => { if (transport) postReleased(deviceChannel, connIdentity); });
+
+    // Offline: the drawing works as a visualizer with the form's geometry.
+    settingsToForm(settings);
+    setConnectedUI(false);
+    onGeometryChanged();
+    { const h = solveFk(settings.home_theta1, settings.home_theta2, settings.geometry); if (h) refreshTarget(h.m3[0], h.m3[1]); }
+    installAppNav();
+    installAppHandBack({ connected: () => !!transport, handBack: async () => { const id = connIdentity; await disconnect(); return id; } });
+    if (connectParams.autoconnect) autoConnect();
+    logLine("sys", "Ready. Connect a device, or edit the geometry and drag in the drawing to explore the kinematics offline.");
+  </script>
+</body>
+</html>
