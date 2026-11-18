@@ -41,6 +41,13 @@ duplicateExpression
 // initializers (the espp Config pattern); they intentionally have no ctor.
 uninitMemberVarNoCtor
 
+// A few sites carry inline "// cppcheck-suppress <id>" comments whose id is
+// also suppressed globally above. Depending on the cppcheck version the inline
+// comment is then reported as an unmatched suppression (and attached to the
+// file, so it would count); suppressing unmatchedSuppression disables that
+// meta-report so global and inline suppressions can overlap harmlessly.
+unmatchedSuppression
+
 // --- vendored / external / generated trees (not our source) ---
 *:*/managed_components/*
 *:*/components/espp/*
