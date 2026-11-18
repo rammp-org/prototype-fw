@@ -322,6 +322,46 @@ void test_continuity_across_m2_home() {
         "a fixed home reference drifts off the branch far more than continuation");
 }
 
+// The differential guard (Geometry::differential_max_deg): for this 5-bar, up/down
+// motion moves the crank differential (theta1-theta2) and left/right moves the
+// common mode, so bounding the differential keeps the mechanism in its open band
+// no matter how large a target jump is - it rejects the inward-folded assemblies
+// that loop_is_open() accepts, regardless of the IK reference. This proves that a
+// reference sitting ON the inward fold still yields the open assembly once guarded.
+void test_differential_keeps_open() {
+  fivebar::Geometry g{};
+  g.m2_x = 200.0f;
+  g.crank1 = g.crank2 = 150.0f;
+  g.bar = g.coupler = 250.0f;
+  g.assembly = fivebar::Assembly::Open;
+  g.coupler_side = fivebar::CouplerSide::Ccw;
+  const fivebar::Point m1 = {0.0f, 0.0f}, m2 = {g.m2_x, g.m2_y};
+  const float tx = 100.0f, ty = -280.0f;
+  const float fold_ref1 = -13.0f, fold_ref2 = -52.0f; // a reference on the inward fold
+
+  // Unbounded (default): a fold-biased reference selects the inward-folded
+  // assembly (D>0) - a simple polygon loop_is_open() does not reject.
+  fivebar::Pose unguarded{};
+  check(fivebar::solve_ik(tx, ty, g, fold_ref1, fold_ref2, unguarded), "unguarded ik solves");
+  const float d_unguarded =
+      fivebar::normalize_angle_deg(unguarded.theta1_deg - unguarded.theta2_deg);
+  check(d_unguarded > 0.0f, "without the guard a fold-biased reference picks the inward fold (D>0)");
+  check(fivebar::loop_is_open(g, m1, m2, unguarded.j1, unguarded.j2, unguarded.j3),
+        "the inward fold is a simple loop (loop_is_open alone does not catch it)");
+
+  // Guarded: the SAME fold-biased reference must yield the open assembly (D<0),
+  // still reaching the target.
+  g.differential_max_deg = 15.0f; // ~ home differential (0) + margin
+  fivebar::Pose guarded{};
+  check(fivebar::solve_ik(tx, ty, g, fold_ref1, fold_ref2, guarded), "guarded ik still solves");
+  const float d_guarded = fivebar::normalize_angle_deg(guarded.theta1_deg - guarded.theta2_deg);
+  check(d_guarded < 0.0f, "guard selects the open assembly (D<0) despite a fold-biased reference");
+  check_near(guarded.m3[0], tx, 0.05f, "guarded solution still reaches the target x");
+  check_near(guarded.m3[1], ty, 0.05f, "guarded solution still reaches the target y");
+  std::printf("differential guard: unguarded D=%.1f (inward fold), guarded D=%.1f (open)\n",
+              d_unguarded, d_guarded);
+}
+
 void test_normalize() {
   check_near(fivebar::normalize_angle_deg(190.0f), -170.0f, 1e-4f, "normalize 190");
   check_near(fivebar::normalize_angle_deg(-190.0f), 170.0f, 1e-4f, "normalize -190");
@@ -340,6 +380,7 @@ int main() {
   test_classic_round_trip(fivebar::CouplerSide::Cw);
   test_offset_end_effector();
   test_continuity_across_m2_home();
+  test_differential_keeps_open();
   if (failures) {
     std::printf("%d failure(s)\n", failures);
     return EXIT_FAILURE;

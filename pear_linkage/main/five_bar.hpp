@@ -71,6 +71,23 @@ struct Geometry {
   // actually built crossed.
   Assembly assembly{Assembly::Open};
   CouplerSide coupler_side{CouplerSide::Ccw};
+  /// Open-band guard on the crank differential (theta1 - theta2). solve_ik()
+  /// discards candidate poses whose differential falls outside
+  /// [differential_min_deg, differential_max_deg]. This is the robust way to keep
+  /// the linkage open: for this 5-bar, pure up/down end-effector motion moves the
+  /// differential while pure left/right motion moves the common mode
+  /// (theta1+theta2) by the same amount, so bounding the differential keeps the
+  /// mechanism in its open operating band no matter how large a commanded jump is,
+  /// WITHOUT relying on solution continuity. It catches exactly the inward-folded
+  /// assemblies that loop_is_open() misses - both cranks tipped toward each other
+  /// form a simple polygon (so Assembly::Open accepts them) yet collide for
+  /// finite-width bars. For the symmetric default geometry the open region is
+  /// D<=0 (home is D=0 at the bottom of travel; the wheel raises with D<0) and the
+  /// inward fold is D>0, so differential_max_deg just above 0 excludes it. Defaults
+  /// are unbounded (no guard), so other geometries and the host tests are
+  /// unaffected; the stored/configured geometry sets the band for the real build.
+  float differential_min_deg{-1.0e6f};
+  float differential_max_deg{1.0e6f};
 };
 
 /// A solved pose: every joint, the crank angles and the bar's direction.

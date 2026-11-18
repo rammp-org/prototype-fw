@@ -164,7 +164,13 @@ struct Settings {
   static constexpr uint8_t kVersion = 1;
   static constexpr size_t kSize = 1 + 34 + 8 + 2 * 20 + 12; // 95
 
-  fivebar::Geometry geometry{};
+  // Open the differential guard for the default build: home is theta1=theta2 (a
+  // differential of 0) at the bottom of travel and the wheel raises with the
+  // differential going negative, so the inward fold is differential > 0; bound it
+  // just above 0 (margin for numerical slack / slight over-travel). Not part of
+  // the serialized wire format, so a persisted Settings keeps this default across
+  // load (parse() leaves non-serialized geometry fields at the Settings default).
+  fivebar::Geometry geometry{.differential_max_deg = 15.0f};
   /// The Home pose and the ik's branch reference without a measured pose
   /// (default: both cranks hanging straight down, the wheel below the base).
   float home_theta1_deg{-90.0f};

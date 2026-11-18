@@ -1046,6 +1046,12 @@
           const j1 = [m2[0] + a*vx - s*h*vy, m2[1] + a*vy + s*h*vx];
           if (!assemblyOk(g, m1, m2, j1, j2, j3) || !couplerSideOk(g, j1, j2, j3)) continue;
           const c = complete(g, m1, m2, j1, j2, j3); if (!c) continue;
+          // Open-band guard (mirror of fivebar::Geometry::differential_max_deg):
+          // reject inward-folded assemblies by the crank differential, so a large
+          // target jump cannot flip the preview inward. ?? keeps older device
+          // geometries (no fields) unbounded.
+          const diff = normDeg(c.theta1 - c.theta2);
+          if (diff < (g.differential_min_deg ?? -1e6) || diff > (g.differential_max_deg ?? 1e6)) continue;
           const score = Math.abs(normDeg(c.theta1 - ref1)) + Math.abs(normDeg(c.theta2 - ref2));
           if (score < bestScore) { best = c; bestScore = score; }
         }
@@ -1061,7 +1067,7 @@
     // ===================== Settings (form <-> object <-> payload) =====================
     const SETTINGS_SIZE = 95, SETTINGS_VERSION = 1;
     function defaultSettings() {
-      return { geometry: { m2_x: 200, m2_y: 0, crank1: 150, crank2: 150, bar: 250, coupler: 250, ee_extension: 0, ee_offset: 0, assembly: 2, coupler_side: 0 },
+      return { geometry: { m2_x: 200, m2_y: 0, crank1: 150, crank2: 150, bar: 250, coupler: 250, ee_extension: 0, ee_offset: 0, assembly: 2, coupler_side: 0, differential_min_deg: -1e6, differential_max_deg: 15 },
                home_theta1: -90, home_theta2: -90,
                motors: [ { node_id: 1, direction: 1, min: -90, max: 90, theta_at_zero: -90, torque_limit: 300 },
                          { node_id: 2, direction: 1, min: -90, max: 90, theta_at_zero: -90, torque_limit: 300 } ],

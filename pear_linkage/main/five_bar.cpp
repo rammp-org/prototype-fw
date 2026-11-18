@@ -228,6 +228,14 @@ bool solve_ik(float x, float y, const Geometry &g, float reference_theta1_deg,
       Pose candidate{};
       if (!complete(g, m1, m2, j1, j2, j3, candidate))
         continue;
+      // Open-band guard (Geometry::differential_max_deg): reject inward-folded
+      // assemblies by the crank differential. assembly_ok()/loop_is_open() let a
+      // simple-polygon inward fold through; bounding theta1-theta2 is what keeps
+      // the mechanism open regardless of the reference, so a large commanded jump
+      // cannot flip it inward.
+      const float diff = normalize_angle_deg(candidate.theta1_deg - candidate.theta2_deg);
+      if (diff < g.differential_min_deg || diff > g.differential_max_deg)
+        continue;
       const float score =
           std::fabs(normalize_angle_deg(candidate.theta1_deg - reference_theta1_deg)) +
           std::fabs(normalize_angle_deg(candidate.theta2_deg - reference_theta2_deg));
