@@ -3,14 +3,14 @@
 <head>
   <meta charset="utf-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1" />
-  <title>STEM Linkage Console (WebUSB / Web Serial)</title>
-  <meta name="description" content="Drive the STEM 5-bar seat linkage over USB: live linkage drawing from the firmware's tracked pose, drag the end effector (M3) to move, direct pose / pair commands and motor telemetry. Talks to the STEM module (7) of an espp dispatcher device; OTA and core dumps use the stock espp consoles.">
+  <title>STEM Linkage Console</title>
+  <meta name="description" content="Drive the STEM 5-bar seat linkage over USB: to-scale linkage drawing from the firmware's tracked pose, drag the seat axis (M3) to move, per-motor torque readouts. Talks to the STEM module (7) over WebUSB or Web Serial." />
   <style>
     :root {
       --bg: #0f1418; --panel: #161d24; --panel2: #1d262f; --line: #2a3540;
       --fg: #e6edf3; --muted: #8a97a6; --accent: #4aa8ff; --ok: #3fb950; --warn: #d29922; --err: #f85149;
       --radius: 10px;
-      --link1: #e5484d; --link2: #f5d90a; --link3: #46c56b; --link4: #b46cf0; --spring: #9aa4ad;
+      --link1: #e5484d; --link2: #f5d90a; --link3: #46c56b; --link4: #b46cf0; --seat: #6f8fb0; --ground: #7d8790;
     }
     * { box-sizing: border-box; }
     body { margin: 0; background: var(--bg); color: var(--fg);
@@ -18,7 +18,6 @@
     header { display: flex; flex-wrap: wrap; gap: 10px; align-items: center;
       padding: 12px 18px; border-bottom: 1px solid var(--line); background: var(--panel); }
     h1 { font-size: 17px; margin: 0; font-weight: 650; }
-    h1 .muted { font-weight: 400; }
     h2 { font-size: 13px; margin: 0 0 10px; text-transform: uppercase; letter-spacing: .08em; color: var(--muted); }
     .muted { color: var(--muted); }
     .spacer { flex: 1; }
@@ -29,37 +28,50 @@
     button:disabled { opacity: 0.45; cursor: default; }
     button.primary { background: var(--accent); border-color: var(--accent); color: #06121f; font-weight: 600; }
     button.danger { background: #3a1d1d; border-color: var(--err); color: #ffb4ae; font-weight: 600; }
-    input[type=number] { width: 96px; font-variant-numeric: tabular-nums; }
+    input[type=number] { width: 90px; font-variant-numeric: tabular-nums; }
     label.inline { display: inline-flex; align-items: center; gap: 6px; }
     .status-pill { padding: 4px 11px; border-radius: 999px; font-size: 12px; border: 1px solid var(--line); color: var(--muted); }
     .status-pill.ok { color: var(--ok); border-color: var(--ok); }
     .status-pill.err { color: var(--err); border-color: var(--err); }
     .status-pill.busy { color: var(--accent); border-color: var(--accent); }
-    main { max-width: 1400px; margin: 0 auto; padding: 16px 18px 28px; display: grid;
-      grid-template-columns: minmax(360px, 1.3fr) minmax(320px, 1fr); gap: 16px; }
-    @media (max-width: 900px) { main { grid-template-columns: 1fr; } }
+    main { max-width: 860px; margin: 0 auto; padding: 16px 18px 28px; display: flex; flex-direction: column; gap: 14px; }
     .panel { background: var(--panel); border: 1px solid var(--line); border-radius: var(--radius); padding: 14px 16px; }
-    .stack { display: flex; flex-direction: column; gap: 14px; }
-    .row { display: flex; flex-wrap: wrap; gap: 8px; align-items: center; }
+    .row { display: flex; flex-wrap: wrap; gap: 8px; align-items: center; justify-content: center; }
     .row + .row { margin-top: 8px; }
     .kv { display: grid; grid-template-columns: auto 1fr; gap: 2px 12px; font-variant-numeric: tabular-nums; }
     .kv .k { color: var(--muted); }
-    svg#canvas { display: block; width: 100%; height: auto; max-height: 72vh; margin: 0 auto; background: #0b0f13;
+    .good { color: var(--ok); } .bad { color: var(--err); } .warn { color: var(--warn); }
+    #targetLine { text-align: center; margin-top: 8px; font-variant-numeric: tabular-nums; font-size: 13px; }
+    svg#canvas { display: block; width: 100%; height: auto; max-height: 78vh; margin: 0 auto; background: #0b0f13;
       border: 1px solid var(--line); border-radius: 8px; touch-action: none; cursor: crosshair; user-select: none; }
-    .readout { display: grid; grid-template-columns: repeat(auto-fit, minmax(150px, 1fr)); gap: 6px 14px; margin-top: 10px;
-      font-variant-numeric: tabular-nums; }
-    .readout div { display: flex; justify-content: space-between; gap: 8px; border-bottom: 1px dotted var(--line); }
-    .readout .k { color: var(--muted); }
-    .readout .bad { color: var(--err); }
-    .readout .good { color: var(--ok); }
-    table { width: 100%; border-collapse: collapse; font-variant-numeric: tabular-nums; font-size: 13px; }
-    th, td { text-align: right; padding: 4px 6px; border-bottom: 1px solid var(--line); }
+    /* per-motor torque readouts */
+    .torques { display: grid; grid-template-columns: repeat(3, 1fr); gap: 10px; }
+    @media (max-width: 640px) { .torques { grid-template-columns: 1fr; } }
+    .tpair { border: 1px solid var(--line); border-radius: 8px; padding: 8px 10px; background: var(--panel2); }
+    .tpair .pname { font-size: 12px; color: var(--muted); text-transform: uppercase; letter-spacing: .06em; margin-bottom: 4px; }
+    .tgrid { display: grid; grid-template-columns: auto 1fr 1fr; gap: 2px 10px; font-variant-numeric: tabular-nums; align-items: baseline; }
+    .tgrid .h { font-size: 11px; color: var(--muted); text-align: right; }
+    .tgrid .id { font-weight: 650; }
+    .tgrid .v { text-align: right; font-size: 15px; }
+    .tgrid .axis { color: var(--muted); font-size: 12px; border-top: 1px dotted var(--line); padding-top: 2px; }
+    .tgrid .axis.v { font-size: 12px; }
+    /* measure mode */
+    #measurePanel.on { border-color: var(--warn); box-shadow: 0 0 0 1px var(--warn) inset; }
+    .mpill { padding: 3px 10px; border-radius: 999px; font-size: 12px; border: 1px solid var(--line); color: var(--muted); }
+    .mpill.on { color: var(--warn); border-color: var(--warn); }
+    #trend { display: block; width: 100%; height: 190px; background: #0b0f13; border: 1px solid var(--line); border-radius: 8px; margin-top: 10px; }
+    .tlegend { display: flex; gap: 14px; justify-content: center; font-size: 12px; color: var(--muted); margin-top: 4px; }
+    .tlegend i { display: inline-block; width: 14px; height: 3px; border-radius: 2px; vertical-align: middle; margin-right: 5px; }
+    #captures td, #captures th { font-size: 12px; }
+    table { width: 100%; border-collapse: collapse; font-variant-numeric: tabular-nums; font-size: 13px; table-layout: fixed; }
+    th, td { text-align: right; padding: 4px 6px; border-bottom: 1px solid var(--line); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
     th:first-child, td:first-child { text-align: left; }
     th { color: var(--muted); font-weight: 500; }
-    td.bad { color: var(--err); }
-    .pairs { display: grid; grid-template-columns: auto 1fr auto auto auto auto; gap: 6px 10px; align-items: center;
-      font-variant-numeric: tabular-nums; }
+    td.bad { color: var(--err); } td.warn { color: var(--warn); }
+    .pairs { display: grid; grid-template-columns: auto auto auto auto auto auto; gap: 6px 10px; align-items: center;
+      justify-content: center; font-variant-numeric: tabular-nums; }
     .pairs .name { font-weight: 600; text-transform: capitalize; }
+    .pairs .val { min-width: 70px; text-align: right; }
     #unsupported { display: none; background: #3a1d1d; border: 1px solid var(--err); border-radius: 8px;
       padding: 12px 16px; margin: 0 18px; }
     #log { background: #0b0f13; border: 1px solid var(--line); border-radius: 8px; padding: 8px 10px; height: 170px;
@@ -67,141 +79,123 @@
     #log .t { color: var(--muted); }
     #log .err { color: var(--err); }
     #log .warn { color: var(--warn); }
-    .warn { color: var(--warn); }
     #log .ok { color: var(--ok); }
     #log .sys { color: var(--accent); }
     a.pill { display: inline-block; text-decoration: none; color: var(--fg); background: var(--panel2);
       border: 1px solid var(--line); padding: 5px 10px; border-radius: 999px; font-size: 12px; }
     a.pill:hover { border-color: var(--accent); }
-    .legend { display: flex; flex-wrap: wrap; gap: 4px 14px; font-size: 12px; color: var(--muted); margin-top: 6px; }
-    .legend i { display: inline-block; width: 18px; height: 4px; border-radius: 2px; vertical-align: middle; margin-right: 5px; }
-    .hint { font-size: 12px; color: var(--muted); }
   </style>
 </head>
 <body>
   <header>
-    <h1>STEM Linkage Console <span class="muted">(WebUSB / Web Serial)</span></h1>
+    <h1>STEM Linkage Console</h1>
     <div class="spacer"></div>
     <label class="inline muted" style="font-size:12px;"><input type="checkbox" id="anyDevice" /> any device</label>
     <button id="connectUsbBtn" class="primary">Connect (WebUSB)</button>
     <button id="connectSerialBtn">Connect (Web Serial)</button>
     <button id="disconnectBtn" disabled>Disconnect</button>
+    <button id="releaseBtn" disabled title="Toggle: release the brakes (drives on, holding the seat) / engage them (stop, drives off, nothing moves)">Release brakes</button>
     <span id="status" class="status-pill">idle</span>
   </header>
   <div id="unsupported">This browser supports neither WebUSB nor Web Serial. Use a Chromium-based browser (Chrome / Edge) over HTTPS or localhost.</div>
 
   <main>
-    <section class="stack">
-      <div class="panel">
-        <h2>Linkage <span class="muted" style="text-transform:none;letter-spacing:0">— analysis frame, mm (origin M1, +x toward M2, +y up)</span></h2>
-        <svg id="canvas" viewBox="-160 -770 600 860" preserveAspectRatio="xMidYMid meet" aria-label="5-bar linkage drawing"></svg>
-        <div class="legend">
-          <span><i style="background:var(--link1)"></i>link1 M1→J2</span>
-          <span><i style="background:var(--link2)"></i>link2 M2→J1</span>
-          <span><i style="background:var(--link3)"></i>link3 J1→J3</span>
-          <span><i style="background:var(--link4)"></i>link4 bar M3–J3–J5–J2</span>
-          <span><i style="background:var(--spring)"></i>gas spring J4→J5</span>
-          <span><i style="background:var(--accent);opacity:.6"></i>target (drag)</span>
-          <span><i style="background:var(--muted);height:1px;border-top:1px dashed var(--muted);border-radius:0"></i>design travel</span>
-        </div>
-        <div class="readout">
-          <div><span class="k">tracked pose x_rel / y_rel</span><span id="poseRel">–</span></div>
-          <div><span class="k">tracked plate x / y</span><span id="posePlate">–</span></div>
-          <div><span class="k">target x_rel / y_rel</span><span id="targetRel">–</span></div>
-          <div><span class="k">target status</span><span id="targetStatus">–</span></div>
-          <div><span class="k">crank θ1 / θ2 (abs)</span><span id="thetas">–</span></div>
-          <div><span class="k">motion</span><span id="motion">–</span></div>
-        </div>
-        <p class="hint">Drag anywhere in the drawing to place the target (M3). The ghost turns red when the point is unreachable or a pair would leave its limits; the firmware applies the same checks and rejects such moves.</p>
+    <div class="panel">
+      <h2>Pose command <span class="muted" style="text-transform:none;letter-spacing:0">— mm from CAD home</span></h2>
+      <div class="row">
+        <label class="inline">x_rel <input id="xInput" type="number" step="1" value="0" /></label>
+        <label class="inline">y_rel <input id="yInput" type="number" step="1" value="0" /></label>
+        <label class="inline">rpm <input id="rpmInput" type="number" step="0.5" min="0" value="2" style="width:70px" /></label>
+        <label class="inline"><span id="torqueUnit">torque limit Nm</span> <input id="torqueInput" type="number" step="0.1" min="0" value="" style="width:80px" /></label>
+        <button id="torqueBtn" disabled>Apply</button>
       </div>
+      <div class="row">
+        <button id="moveBtn" class="primary" disabled>Move to target</button>
+        <button id="homeBtn" disabled>Home (0, 0)</button>
+        <button id="stopBtn" class="danger" disabled>STOP</button>
+        <label class="inline"><input type="checkbox" id="moveOnRelease" checked /> move on release</label>
+        <label class="inline"><input type="checkbox" id="liveDrag" /> live drag</label>
+      </div>
+      <div id="targetLine"><span id="targetStatus">–</span> · <span class="muted">now</span> <span id="poseRel">–</span> · <span id="motion" class="muted">–</span> · <span id="torqueNow" class="muted">limit –</span></div>
+    </div>
 
-      <div class="panel">
-        <h2>Log</h2>
-        <div id="log"></div>
-      </div>
-    </section>
+    <div class="panel" style="padding:10px">
+      <svg id="canvas" viewBox="-200 -700 660 800" preserveAspectRatio="xMidYMid meet" aria-label="5-bar linkage drawing, to scale"></svg>
+    </div>
 
-    <section class="stack">
-      <div class="panel">
-        <h2>Pose command</h2>
-        <div class="row">
-          <label class="inline">x_rel <input id="xInput" type="number" step="1" value="0" /></label>
-          <label class="inline">y_rel <input id="yInput" type="number" step="1" value="0" /></label>
-          <label class="inline">rpm <input id="rpmInput" type="number" step="0.5" min="0" value="2" style="width:70px" /></label>
-        </div>
-        <div class="row">
-          <button id="moveBtn" class="primary" disabled>Move to target</button>
-          <button id="homeBtn" disabled>Home (0, 0)</button>
-          <button id="stopBtn" class="danger" disabled>STOP</button>
-        </div>
-        <div class="row">
-          <label class="inline"><input type="checkbox" id="moveOnRelease" checked /> move when the drag is released</label>
-          <label class="inline"><input type="checkbox" id="liveDrag" /> live (send while dragging, 4 Hz)</label>
-        </div>
+    <div class="panel" id="measurePanel">
+      <h2>Measure mode <span class="muted" style="text-transform:none;letter-spacing:0">— brakes hold the pose, output sensors read the load</span></h2>
+      <div class="row">
+        <button id="measureBtn" disabled>Enter measure mode</button>
+        <label class="inline muted">drive mode while measuring
+          <select id="measureMode"><option value="13">13 · force control (CSF)</option><option value="1">1 · profile position</option></select></label>
+        <span id="measureState" class="mpill">off</span>
       </div>
+      <canvas id="trend" width="800" height="190"></canvas>
+      <div class="tlegend"><span><i style="background:var(--link1)"></i>left axis</span><span><i style="background:var(--link2)"></i>right axis</span><span><i style="background:var(--link4)"></i>seat axis</span><span>sensor Nm (primary − secondary), last 30 s</span></div>
+      <div class="row" style="margin-top:10px">
+        <button id="captureBtn" disabled>Capture (1 s average)</button>
+        <button id="copyCsvBtn" disabled>Copy CSV</button>
+        <button id="clearCapBtn" disabled>Clear</button>
+      </div>
+      <table id="captures" style="margin-top:8px; display:none">
+        <thead><tr><th>#</th><th>x_rel</th><th>y_rel</th><th>tilt °</th><th>left Nm</th><th>right Nm</th><th>seat Nm</th></tr></thead>
+        <tbody></tbody>
+      </table>
+    </div>
 
-      <div class="panel">
-        <h2>Actuator pairs <span class="muted" style="text-transform:none;letter-spacing:0">— measured position, deg</span></h2>
-        <p class="hint" style="margin-top:0">Per pair: the measured angle, then <b>Set &lt;pair&gt;</b> drives that pair alone to the typed angle (no IK, same as the CLI <code>set &lt;pair&gt; &lt;deg&gt;</code>) — the way to bring the linkage into the calibration pose before <b>Zero</b>; <b>Zero</b> marks the current position as 0 without moving; <b>Zero-align</b> moves to the encoder zero first.</p>
-        <div class="pairs" id="pairs"></div>
-        <div class="row" style="margin-top:10px">
-          <button id="zeroAllBtn" disabled>Zero all (no align)</button>
-          <button id="zeroAlignAllBtn" disabled>Zero-align all</button>
-          <button id="releaseBtn" class="danger" disabled>Release brakes</button>
-          <button id="resetFaultBtn" disabled title="Clear the DS402 fault of every faulted motor and re-enable its pair (CLI reset_fault). Enabled while a motor reports Fault.">Reset fault</button>
-        </div>
-        <div class="row" style="margin-top:10px">
-          <label class="inline">seat tilt ° <input id="tiltInput" type="number" step="1" value="0" style="width:80px" /></label>
-          <button id="tiltBtn" disabled>Apply tilt</button>
-          <span id="tiltNow" class="muted">device: –</span>
-        </div>
-        <div class="row" style="margin-top:10px">
-          <label class="inline"><span id="torqueUnit">torque limit Nm</span> <input id="torqueInput" type="number" step="0.1" min="0" value="" style="width:90px" /></label>
-          <button id="torqueBtn" disabled>Apply limit</button>
-          <span id="torqueNow" class="muted">device: –</span>
-        </div>
-        <p class="hint">Positions are read live from each Eyou motor's CANopen encoder (object 0x6064, relative to the saved zero); the pose above is the FK of the live pair positions. "moving" follows the DS402 target-reached bit.
-          <b>Zero</b> marks the current position as 0 without moving (CLI <code>zero</code>); <b>Zero-align</b> first drives each motor to its encoder zero (the motors move), then zeros (CLI <code>zero_align</code>) — do this once per power-up after reaching the calibration pose.
-          <b>Seat tilt</b> is an offset the firmware adds to the IK's level seat angle on every move, so it persists as the linkage moves (positive = positive seat-pair rotation).
-          <b>Torque limit</b> is every motor's Max torque (CANopen 0x6072), set here in Nm through the rated torque the firmware reads from the motors (the drive stores it as per-thousand of rated; the console falls back to ‰ until a motor has answered): no move pushes harder than this, which is how mechanical limits are found without breaking a linkage. The firmware refuses a value above the ceiling it was built with (menuconfig). <b>STOP</b> halts the drives with the profile deceleration and holds the linkage there (drives stay enabled); a pair that does not confirm the halt is disabled and coasts. <b>Reset fault</b> clears a motor's DS402 fault and re-enables its pair; a fault that comes straight back has its cause still present (overload, a hard stop, the limit): see the motor's error code below.</p>
-      </div>
+    <div class="panel">
+      <h2>Torque <span class="muted" style="text-transform:none;letter-spacing:0">— Nm · motor = 0x6077 (motor side) · sensor = 0x27BD (output)</span></h2>
+      <div class="torques" id="torques"></div>
+    </div>
 
-      <div class="panel">
-        <h2>Motor telemetry</h2>
-        <table>
-          <thead><tr><th>motor</th><th>pair</th><th>ok</th><th>DS402 state</th><th>statusword</th><th>error</th><th>position °</th><th id="torqueCol">torque</th><th>velocity °/s</th></tr></thead>
-          <tbody id="motors"></tbody>
-        </table>
-        <div class="row" style="margin-top:8px">
-          <label class="inline"><input type="checkbox" id="stream" checked /> stream telemetry</label>
-          <label class="inline">period ms <input id="periodInput" type="number" min="50" max="5000" step="50" value="200" style="width:80px" /></label>
-          <span id="telemAge" class="muted"></span>
-        </div>
-        <div class="kv" style="margin-top:8px">
-          <span class="k">CAN controller</span><span id="canState">–</span>
-          <span class="k">CAN errors</span><span id="canCounters">–</span>
-        </div>
-        <p class="hint">The CAN controller's TWAI error state and counters, as the CLI <code>can</code> prints them: stuff/form/bit errors are signal integrity (120 Ω termination at both ends only, every node's isolated CAN ground tied to the bus ground, short stubs, a node at another bitrate); ACK errors mean nobody heard a frame we sent (bus open / nodes off); with no errors, a motor that does not answer is off, at another id or not on this bus. Bus-off recovers automatically (CLI <code>can_recover</code> starts it by hand).</p>
+    <div class="panel">
+      <h2>Actuator pairs <span class="muted" style="text-transform:none;letter-spacing:0">— measured, deg</span></h2>
+      <div class="pairs" id="pairs"></div>
+      <div class="row" style="margin-top:12px">
+        <label class="inline">seat tilt ° <input id="tiltInput" type="number" step="1" value="0" style="width:80px" /></label>
+        <button id="tiltBtn" disabled>Apply tilt</button>
+        <span id="tiltNow" class="muted">device: –</span>
       </div>
+      <div class="row">
+        <button id="zeroAllBtn" disabled>Zero all (no align)</button>
+        <button id="zeroAlignAllBtn" disabled>Zero-align all</button>
+        <button id="resetFaultBtn" disabled title="Clear the DS402 fault of every faulted motor and re-enable its pair (CLI reset_fault)">Reset fault</button>
+      </div>
+    </div>
 
-      <div class="panel">
-        <h2>Device</h2>
-        <div class="kv">
-          <span class="k">device</span><span id="devName">not connected</span>
-          <span class="k">firmware</span><span id="devFw">–</span>
-          <span class="k">built</span><span id="devBuild">–</span>
-          <span class="k">IDF</span><span id="devIdf">–</span>
-          <span class="k">modules</span><span id="devModules">–</span>
-        </div>
-        <div class="row" style="margin-top:10px">
-          <a class="pill" href="dispatcher_hub.html" target="_blank" rel="noopener">Device Hub</a>
-          <a class="pill" href="ota_console.html" target="_blank" rel="noopener">OTA console</a>
-          <a class="pill" href="coredump_console.html" target="_blank" rel="noopener">Core dump console</a>
-          <a class="pill" href="https://esp-cpp.github.io/espp/apps/index.html" target="_blank" rel="noopener">espp apps (hosted)</a>
-        </div>
-        <p class="hint">The local links expect the espp consoles next to this file (see README.md). Each console opens its own USB connection: disconnect here first, or use the CDC (Web Serial) stream for one and WebUSB for the other.</p>
+    <div class="panel">
+      <h2>Motors</h2>
+      <table>
+        <colgroup><col style="width:12%"><col style="width:30%"><col style="width:14%"><col style="width:22%"><col style="width:22%"></colgroup>
+        <thead><tr><th>motor</th><th>DS402 state</th><th>error</th><th>position °</th><th>velocity °/s</th></tr></thead>
+        <tbody id="motors"></tbody>
+      </table>
+      <div class="row" style="margin-top:10px; justify-content:flex-start">
+        <label class="inline"><input type="checkbox" id="stream" checked /> stream</label>
+        <label class="inline">period ms <input id="periodInput" type="number" min="50" max="5000" step="50" value="200" style="width:80px" /></label>
+        <span id="telemAge" class="muted"></span>
       </div>
-    </section>
+      <div class="kv" style="margin-top:8px">
+        <span class="k">CAN</span><span id="canState">–</span>
+        <span class="k">CAN errors</span><span id="canCounters">–</span>
+      </div>
+    </div>
+
+    <div class="panel">
+      <h2>Device &amp; log</h2>
+      <div class="kv">
+        <span class="k">device</span><span id="devName">not connected</span>
+        <span class="k">firmware</span><span><span id="devFw">–</span> <span class="muted">· built <span id="devBuild">–</span> · IDF <span id="devIdf">–</span></span></span>
+        <span class="k">modules</span><span id="devModules">–</span>
+      </div>
+      <div class="row" style="margin:10px 0; justify-content:flex-start">
+        <a class="pill" href="dispatcher_hub.html" target="_blank" rel="noopener">Device Hub</a>
+        <a class="pill" href="ota_console.html" target="_blank" rel="noopener">OTA console</a>
+        <a class="pill" href="coredump_console.html" target="_blank" rel="noopener">Core dump console</a>
+      </div>
+      <div id="log"></div>
+    </div>
   </main>
 
   <script>
@@ -214,12 +208,12 @@
     const MODULE_DISCOVERY = 0xFF, T_LIST_MODULES = 0x00;
 
     // ======================= STEM protocol (main/stem_protocol.hpp) =======================
-    const MODULE = 7, PROTOCOL_VERSION = 2;
+    const MODULE = 7, PROTOCOL_VERSION = 3;
     const T = { GET_INFO: 0x10, GET_STATE: 0x11, MOVE_TO: 0x12, SET_PAIR: 0x13, HOME: 0x14, STOP: 0x15,
-                RELEASE: 0x16, ZERO: 0x17, SET_STREAMING: 0x18, SOLVE_IK: 0x19, SET_SEAT_TILT: 0x1A, SET_TORQUE_LIMIT: 0x1B, RESET_FAULT: 0x1C,
+                RELEASE: 0x16, ZERO: 0x17, SET_STREAMING: 0x18, SOLVE_IK: 0x19, SET_SEAT_TILT: 0x1A, SET_TORQUE_LIMIT: 0x1B, RESET_FAULT: 0x1C, SET_MEASURE: 0x1D, ENGAGE: 0x1E,
                 OK: 0x81, ERROR: 0x82, INFO: 0x90, STATE: 0x91, MOVED: 0x92, IK_RESULT: 0x93, TELEMETRY: 0x94 };
     const REQ_NAME = {}; for (const [k, v] of Object.entries(T)) REQ_NAME[v] = k;
-    const FLAG = { STREAMING: 1, TARGET_VALID: 2, POSE_VALID: 4, MOTORS_OK: 8, CAN_OK: 16, CAN_BUS_OFF: 32 };
+    const FLAG = { STREAMING: 1, TARGET_VALID: 2, POSE_VALID: 4, MOTORS_OK: 8, CAN_OK: 16, CAN_BUS_OFF: 32, MEASURING: 64, BRAKES: 128 };
     // v2 CAN block: the controller's TWAI error state (stem_protocol.hpp can_state::)
     const CAN_STATE = { 0: "not started", 1: "error active", 2: "error warning", 3: "error passive", 4: "BUS OFF", 255: "?" };
     const PAIR_NAMES = ["left", "right", "seat"], ALL_PAIRS = 0xFF;
@@ -227,9 +221,9 @@
 
     const els = {};
     for (const id of ["status","connectUsbBtn","connectSerialBtn","disconnectBtn","anyDevice","unsupported","canvas",
-      "poseRel","posePlate","targetRel","targetStatus","thetas","motion","log","xInput","yInput","rpmInput","moveBtn",
+      "poseRel","targetStatus","motion","torques","log","xInput","yInput","rpmInput","moveBtn",
       "homeBtn","stopBtn","moveOnRelease","liveDrag","pairs","zeroAllBtn","zeroAlignAllBtn","releaseBtn","resetFaultBtn","tiltInput","tiltBtn","tiltNow","motors","stream","periodInput",
-      "telemAge","devName","devFw","devBuild","devIdf","devModules","torqueInput","torqueBtn","torqueNow","torqueUnit","canState","canCounters"]) els[id] = document.getElementById(id);
+      "telemAge","devName","devFw","devBuild","devIdf","devModules","torqueInput","torqueBtn","torqueNow","torqueUnit","canState","canCounters","measurePanel","measureBtn","measureMode","measureState","trend","captureBtn","copyCsvBtn","clearCapBtn","captures"]) els[id] = document.getElementById(id);
 
     function logLine(cls, text) {
       const line = document.createElement("div");
@@ -375,11 +369,31 @@
     // Geometry.md defaults; replaced by the device's INFO reply when connected.
     let geometry = { m1_x: 0, m1_y: 0, m2_x: 170, m2_y: 0, j4_x: -38, j4_y: 8, bar_m3_j2: 270, bar_m3_j3: 100,
                      bar_m3_j5: 200, bar_j1_j3: 270, j5_perp: 12, crank1: 310, crank2: 270 };
-    let reference = { x: 170, y: 230, m1: -0.16, m2: 143.74, m3: 121.23 };
-    let limits = { min: -60, max: 60 };
+    let reference = { x: 170, y: 230, m1: -11.27, m2: 169.18, m3: 146.24 }; // offline default; the device's INFO replaces it
+    // Per-pair hard limits (primary motor, Pair order); the device's INFO replaces these defaults.
+    let pairLimits = [{ min: -95, max: -1 }, { min: -17, max: 52 }, { min: -55, max: 155 }];
+    // Operable range - must match STEM_V3/main/operable_range.hpp (v3.1 reach study, Rev C):
+    // a = enc101 = -left pair, b = enc103 = -right pair (calibrated zero); seat tilt from level.
+    const OPERABLE = { aMin: 6, aMax: 90, tiltMin: -20, tiltMax: 50,
+      bLo: (a) => Math.max(-47, 0.6 * a - 96), bHi: (a) => Math.min(12, 1.9 * a - 34, 70 - 1.25 * a) };
+    const inOperableBase = (a, b) => a >= OPERABLE.aMin && a <= OPERABLE.aMax && b >= OPERABLE.bLo(a) && b <= OPERABLE.bHi(a);
     const PLATE_Y_OFFSET = 151.5; // y_plate = M3_y + 151.5 (Geometry.md section 2)
     const DESIGN = { x: [-34, 266], yPlate: [290, 720] };
-    const EDGE_POSES = [["home",66,360],["full down",66,290],["full up",66,720],["max fwd",266,360],["max rear",-34,360]];
+    const EDGE_POSES = [["full down",66,290],["full up",66,720],["max fwd",266,360],["max rear",-34,360]];
+    // x_rel / y_rel in this console are measured from the CAD home (plate frame (66, 360) -> M3 at analysis (66, 208.5)).
+    // The firmware's move_to frame is relative to its IK reference (INFO reference.x/y): the console converts on send.
+    const CAD_HOME = [66, 360 - PLATE_Y_OFFSET];
+    const toDevice = (x, y) => [x + CAD_HOME[0] - reference.x, y + CAD_HOME[1] - reference.y];
+    const fromDevice = (x, y) => [x - CAD_HOME[0] + reference.x, y - CAD_HOME[1] + reference.y];
+    // M3 inside the design travel: max rear .. max fwd, at or below full up
+    const inDesignBox = (m3) => m3[0] >= DESIGN.x[0] - 1e-6 && m3[0] <= DESIGN.x[1] + 1e-6 && m3[1] <= DESIGN.yPlate[1] - PLATE_Y_OFFSET + 1e-6;
+    // Operable range as M3 positions (analysis frame): the Rev C encoder bounds + pair limits evaluated through this
+    // file's IK on a 1 mm grid, clipped to the design box (generated offline, calibrated zero -11.27 / 169.18).
+    const REGION = [[44.5,148.0],[14.5,178.0],[12.5,178.0],[3.5,187.0],[1.5,187.0],[-0.5,190.0],[-2.5,190.0],[-4.5,193.0],[-6.5,193.0],[-8.5,196.0],[-10.5,196.0],[-11.5,198.0],[-13.5,198.0],[-15.5,200.0],[-17.5,210.0],[-18.5,210.0],[-18.5,214.0],[-19.5,214.0],[-20.5,223.0],[-21.5,223.0],[-21.5,228.0],[-22.5,228.0],[-22.5,232.0],[-23.5,232.0],[-23.5,237.0],[-24.5,237.0],[-24.5,242.0],[-25.5,242.0],[-25.5,247.0],[-26.5,247.0],[-26.5,252.0],[-27.5,252.0],[-27.5,257.0],[-28.5,257.0],[-28.5,263.0],[-29.5,263.0],[-29.5,268.0],[-30.5,268.0],[-32.5,286.0],[-33.5,286.0],[-34.0,482.0],[-28.5,502.0],[-26.5,504.0],[-26.5,507.0],[-24.5,509.0],[-24.5,512.0],[-23.5,512.0],[-20.5,520.0],[-18.5,521.0],[-16.5,527.0],[-11.5,532.0],[-11.5,534.0],[-8.5,536.0],[-8.5,538.0],[3.5,550.0],[5.5,550.0],[7.5,553.0],[9.5,553.0],[10.5,555.0],[12.5,555.0],[13.5,557.0],[15.5,557.0],[16.5,559.0],[18.5,559.0],[18.5,560.0],[20.5,560.0],[24.5,563.0],[27.5,563.0],[29.5,565.0],[42.5,568.5],[119.5,568.0],[119.5,567.0],[124.5,567.0],[124.5,566.0],[128.5,566.0],[128.5,565.0],[133.5,565.0],[133.5,564.0],[149.5,561.0],[149.5,560.0],[156.5,559.0],[156.5,558.0],[159.5,558.0],[159.5,557.0],[163.5,557.0],[163.5,556.0],[166.5,556.0],[166.5,555.0],[170.5,555.0],[170.5,554.0],[173.5,554.0],[173.5,553.0],[176.5,553.0],[176.5,552.0],[179.5,552.0],[179.5,551.0],[182.5,551.0],[182.5,550.0],[197.5,546.0],[199.5,544.0],[205.5,543.0],[207.5,541.0],[210.5,541.0],[212.5,539.0],[215.5,539.0],[217.5,537.0],[220.5,537.0],[222.5,535.0],[225.5,535.0],[229.5,532.0],[234.5,531.0],[233.5,527.0],[234.5,527.0],[235.5,523.0],[237.5,522.0],[237.5,520.0],[239.5,519.0],[239.5,517.0],[241.5,516.0],[241.5,514.0],[243.5,513.0],[243.5,511.0],[245.5,510.0],[245.5,508.0],[247.5,507.0],[247.5,505.0],[251.5,501.0],[252.5,497.0],[254.5,496.0],[255.5,492.0],[257.5,491.0],[257.5,489.0],[258.5,489.0],[260.5,483.0],[262.5,482.0],[262.5,480.0],[263.5,480.0],[266.0,474.0],[265.5,238.0],[235.5,232.0],[235.5,231.0],[225.5,229.0],[225.5,228.0],[219.5,227.0],[217.5,225.0],[211.5,224.0],[211.5,223.0],[206.5,222.0],[204.5,220.0],[201.5,220.0],[201.5,219.0],[199.5,219.0],[199.5,218.0],[197.5,218.0],[193.5,215.0],[190.5,215.0],[190.5,214.0],[184.5,212.0],[183.5,210.0],[173.5,206.0],[172.5,204.0],[168.5,203.0],[167.5,201.0],[160.5,198.0],[156.5,194.0],[125.5,195.0],[125.5,194.0],[113.5,193.0],[113.5,192.0],[109.5,192.0],[109.5,191.0],[105.5,191.0],[105.5,190.0],[93.5,187.0],[93.5,186.0],[91.5,186.0],[87.5,183.0],[84.5,183.0],[83.5,181.0],[77.5,179.0],[76.5,177.0],[72.5,176.0],[67.5,171.0],[65.5,171.0],[62.5,167.0],[60.5,167.0],[48.5,155.0],[48.5,153.0],[44.5,150.0]];
+    // To-scale side views (XY projection) of the v3.1 CAD ("5-Bar_Mechanism_v3.1_software_zero.STEP"), mm, each in its
+    // body frame (origin at the pivot, +x along the link, SVG y down): link1 M1->J2, link2 M2->J1, link3 J1->J3,
+    // link4 M3->J2, seat = top plate + M3 mounts/motors about M3 (level), ground = base plate + M1/M2 mounts/motors.
+    const BODIES = {"link1":{"plate":"M-45 0.0 L-44.5 -6.7 L-43 -13.3 L-40.5 -19.5 L-37.2 -25.3 L-33 -30.6 L-28.1 -35.2 L-22.5 -39.0 L-16.5 -41.9 L-10 -43.9 L-3.4 -44.9 L3.3 -44.9 L311.6 -21.9 L314.8 -21.5 L320.8 -19.2 L325.9 -15.3 L327.9 -12.8 L330.8 -7.1 L332 -0.8 L331.9 2.4 L330.2 8.6 L326.9 14.1 L322.1 18.3 L319.3 19.9 L313.2 21.8 L86.2 22.2 L78.6 23.6 L12.8 43.1 L6.5 44.5 L0.1 45.0 L-10 43.9 L-18.6 41.0 L-24.3 37.9 L-28.1 35.2 L-33 30.6 L-37.2 25.3 L-40.9 18.7 L-43.2 12.7 L-44.5 6.7ZM304 0.0 L304.5 2.6 L306.2 4.7 L307.8 5.6 L310.4 6.0 L312.2 5.6 L314.4 4.1 L315.5 2.6 L316 -0.0 L315.5 -2.6 L314.4 -4.1 L312.2 -5.6 L309.6 -6.0 L307.8 -5.6 L305.6 -4.1 L304.2 -1.8ZM35.8 -8.4 L35.7 -6.9 L37 -5.5 L38.5 -5.5 L39.7 -6.6 L39.8 -8.1 L38.5 -9.5 L37 -9.5ZM35.7 8.1 L37 9.5 L38.5 9.5 L39.7 8.4 L39.8 6.9 L38.8 5.6 L37 5.5 L35.8 6.6ZM30.2 -22.6 L29.9 -21.1 L30.9 -19.5 L32.5 -19.3 L33.8 -20.2 L34.1 -21.7 L33.1 -23.2 L31.5 -23.5ZM31.5 19.3 L30.2 20.2 L30 22.0 L30.9 23.3 L32.5 23.5 L33.8 22.6 L34.1 20.8 L33.1 19.5ZM-11 -27.9 L-15 -26.0 L-18.7 -23.5 L-22 -20.4 L-24.8 -16.9 L-27 -13.0 L-28.7 -8.8 L-29.7 -4.5 L-30 0.0 L-29.7 4.5 L-28.7 8.8 L-27 13.0 L-24.8 16.9 L-22 20.4 L-18.7 23.5 L-15 26.0 L-11 27.9 L-6.7 29.2 L0.4 29.9 L6.7 29.2 L11 27.9 L15 26.0 L18.7 23.5 L22 20.4 L24.8 16.9 L27 13.0 L28.7 8.8 L29.7 4.5 L30 -0.0 L29.7 -4.5 L28.7 -8.8 L27 -13.0 L24.8 -16.9 L22 -20.4 L18.7 -23.5 L15 -26.0 L11 -27.9 L6.7 -29.2 L-0.4 -29.9 L-6.7 -29.2ZM21.2 -34.2 L19.8 -33.5 L19.2 -32.0 L20 -30.3 L21.6 -29.9 L23 -30.5 L23.5 -32.0 L22.7 -33.7ZM23.4 32.6 L23.3 31.1 L21.9 29.9 L20.3 30.1 L19.3 31.4 L19.5 32.9 L20.9 34.1 L22.5 33.9ZM7.7 -35.6 L9.3 -36.5 L9.6 -38.1 L8.9 -39.4 L7.4 -39.9 L5.9 -39.2 L5.4 -37.4 L6.2 -36.1ZM8 35.7 L6.2 36.0 L5.4 37.4 L5.7 39.0 L7 39.9 L8.6 39.6 L9.6 38.1 L9.3 36.5ZM-5.6 -38.7 L-6.7 -39.8 L-8.6 -39.6 L-9.6 -38.4 L-9.4 -36.8 L-8.3 -35.8 L-6.4 -35.9 L-5.5 -37.1ZM-9.1 36.3 L-9.7 37.8 L-8.9 39.4 L-7.4 39.9 L-5.9 39.2 L-5.4 37.8 L-6.2 36.1 L-7.7 35.6ZM-23 -30.6 L-21.6 -29.9 L-20 -30.3 L-19.2 -32.0 L-19.8 -33.5 L-21.2 -34.2 L-22.7 -33.7 L-23.5 -32.2ZM-23.3 31.1 L-23.4 32.6 L-22.5 33.9 L-20.6 34.0 L-19.5 32.9 L-19.3 31.4 L-20.3 30.1 L-21.9 29.9ZM-31.5 -23.5 L-33.1 -23.2 L-34.1 -21.7 L-33.8 -20.2 L-32.5 -19.3 L-30.9 -19.5 L-29.9 -21.1 L-30.2 -22.6ZM-30.1 20.5 L-31.2 19.4 L-33.1 19.5 L-34.1 20.8 L-33.9 22.3 L-32.8 23.4 L-30.9 23.3 L-30 22.0ZM-38.5 -9.5 L-39.7 -8.4 L-39.7 -6.6 L-38.5 -5.5 L-37 -5.5 L-35.8 -6.6 L-35.8 -8.4 L-37 -9.5ZM-35.9 6.4 L-37.3 5.4 L-38.8 5.7 L-39.9 7.2 L-39.5 8.7 L-38.2 9.6 L-36.7 9.4 L-35.7 8.1Z"},"link2":{"plate":"M288.6 -11.8 L291.2 -5.7 L292 0.8 L290.8 7.2 L287.7 13.0 L225.7 75.7 L219.8 80.9 L213.2 85.3 L206 88.8 L198.5 91.4 L190.7 92.9 L182.8 93.4 L116.1 92.9 L104.2 92.1 L92.5 90.1 L81 86.9 L69.9 82.4 L-19.1 40.8 L-24.7 37.6 L-29.8 33.7 L-34.3 29.2 L-38.1 24.0 L-41.1 18.4 L-43.3 12.3 L-44.6 6.1 L-45 -0.3 L-44.5 -7.0 L-42.9 -13.4 L-40.5 -19.6 L-37.2 -25.4 L-33 -30.6 L-28.2 -35.1 L-22.7 -38.9 L-16.7 -41.8 L-10.4 -43.8 L-3.8 -44.8 L2.8 -44.9 L9.4 -44.0 L15.8 -42.1 L21.8 -39.3 L27.4 -35.7 L32.4 -31.3 L98 36.7 L102 40.3 L106.3 43.3 L111.1 45.7 L116.1 47.5 L121.2 48.5 L126.5 48.9 L173 49.3 L178.3 49.0 L183.5 48.0 L188.5 46.3 L193.3 43.9 L197.7 41.0 L201.7 37.5 L254.4 -15.5 L259.7 -19.4 L265.9 -21.6 L272.4 -21.9 L275.6 -21.3 L281.7 -18.7 L286.6 -14.4ZM-30.2 22.1 L-30.1 20.5 L-31.4 19.2 L-32.9 19.1 L-34.1 20.2 L-34.2 21.8 L-33.3 23.0 L-31.4 23.2ZM-19.5 32.2 L-19.8 30.7 L-21.4 29.7 L-23 30.2 L-23.7 31.5 L-23.4 33.1 L-21.8 34.0 L-20.3 33.5ZM-35.9 8.2 L-35.8 6.6 L-37 5.2 L-38.6 5.2 L-39.7 6.3 L-39.9 7.8 L-38.9 9.1 L-37 9.2ZM-8.6 35.7 L-9.7 36.8 L-9.8 38.3 L-8.6 39.7 L-7 39.7 L-5.9 38.7 L-5.7 37.1 L-7 35.7ZM24.7 17.1 L26.9 13.2 L28.6 9.1 L29.6 4.7 L30 0.2 L29.7 -4.3 L28.7 -8.6 L27.1 -12.8 L24.9 -16.7 L22.1 -20.2 L18.9 -23.3 L15.2 -25.9 L11.2 -27.8 L6.9 -29.2 L2.5 -29.9 L-2 -29.9 L-6.5 -29.3 L-10.8 -28.0 L-14.8 -26.1 L-18.5 -23.6 L-21.8 -20.6 L-24.7 -17.1 L-26.9 -13.2 L-28.6 -9.1 L-29.6 -4.7 L-30 -0.2 L-29.7 4.3 L-28.7 8.6 L-27.1 12.8 L-24.9 16.7 L-22.1 20.2 L-18.9 23.3 L-15.2 25.9 L-11.2 27.8 L-6.9 29.2 L-2.5 29.9 L2 29.9 L6.5 29.3 L10.8 28.0 L14.8 26.1 L18.5 23.6 L21.8 20.6ZM-36.9 -5.8 L-35.8 -6.8 L-35.6 -8.4 L-36.9 -9.8 L-38.5 -9.8 L-39.6 -8.7 L-39.8 -7.2 L-38.5 -5.8ZM7.7 39.9 L9 39.0 L9.3 37.2 L8.3 36.0 L6.8 35.7 L5.5 36.6 L5.2 38.4 L6.1 39.7ZM-29.8 -21.0 L-29.9 -22.5 L-31.1 -23.6 L-32.9 -23.5 L-33.9 -22.3 L-33.8 -20.7 L-32.6 -19.6 L-30.8 -19.8ZM23.1 33.1 L23.2 31.6 L22.2 30.3 L20.4 30.2 L19.2 31.2 L19.1 32.8 L20.1 34.0 L21.9 34.2ZM-19 -32.2 L-19.6 -33.6 L-21 -34.3 L-22.7 -33.6 L-23.3 -32.2 L-22.7 -30.7 L-21 -30.0 L-19.6 -30.7ZM33.4 23.1 L34 21.6 L33.4 20.2 L31.7 19.5 L30.3 20.2 L29.7 21.6 L30.5 23.3 L32 23.8ZM-5.4 -39.0 L-6.7 -39.9 L-8.6 -39.5 L-9.4 -38.2 L-9 -36.6 L-7.7 -35.7 L-5.9 -36.1 L-5.1 -37.5ZM39.8 8.4 L39.6 6.9 L38.5 5.8 L36.6 5.9 L35.7 7.1 L35.8 8.7 L37.2 9.9 L38.8 9.7ZM9.8 -37.1 L9.7 -38.6 L8.6 -39.7 L6.7 -39.6 L5.7 -38.4 L5.8 -36.8 L7 -35.7 L8.6 -35.7ZM39.9 -7.5 L39.2 -8.9 L37.4 -9.3 L36 -8.5 L35.7 -6.9 L36.5 -5.6 L38 -5.1 L39.6 -6.0ZM19.7 -30.9 L20.8 -29.9 L22.4 -29.8 L23.7 -31.2 L23.6 -32.8 L22.4 -33.8 L20.9 -33.9 L19.6 -32.5ZM32.6 -19.1 L33.9 -19.9 L34.3 -21.5 L33.3 -23.0 L31.7 -23.3 L30.4 -22.4 L30 -20.8 L31.1 -19.3ZM271.3 5.9 L273 5.3 L275 3.4 L276 0.9 L276 -0.9 L275 -3.4 L273.1 -5.2 L271.4 -5.9 L268.7 -5.9 L267 -5.3 L265 -3.4 L264 -0.9 L264 0.9 L265 3.4 L266.9 5.2 L268.6 5.9Z"},"link3":{"plate":"M-22 0.0 L-21.1 -6.3 L-18.4 -12.1 L-14.1 -16.9 L-8.7 -20.2 L71.8 -42.0 L82.6 -44.3 L93.6 -45.5 L104.6 -45.6 L115.6 -44.6 L276.4 -21.1 L282.3 -18.2 L287.1 -13.8 L290.4 -8.2 L291.4 -5.0 L291.9 1.5 L290.5 7.9 L287.3 13.6 L285.1 16.0 L279.7 19.8 L273.4 21.7 L270.1 22.0 L109.3 -1.1 L100.6 -1.7 L91.8 -1.2 L83.2 0.5 L5.7 21.3 L-0.4 22.0 L-3.5 21.7 L-9.4 19.9 L-14.6 16.5 L-18.6 11.8 L-20.1 9.0 L-21.8 3.1ZM258.4 -7.9 L256.6 -4.1 L256 -0.0 L256.1 2.1 L256.6 4.1 L258.4 7.9 L261.2 11.0 L264.9 13.1 L266.9 13.7 L269 14.0 L273.1 13.7 L277 12.2 L280.3 9.6 L281.6 7.9 L282.7 6.1 L283.9 2.1 L283.9 -2.1 L283.4 -4.1 L281.6 -7.9 L278.8 -11.0 L275.1 -13.1 L273.1 -13.7 L271 -14.0 L266.9 -13.7 L263 -12.2 L259.7 -9.6ZM78.8 -33.5 L76.1 -30.6 L74 -25.2 L74.5 -19.5 L76.2 -15.9 L80.4 -12.0 L86 -10.3 L89.8 -10.6 L95.1 -13.1 L98.7 -17.6 L99.8 -21.4 L99.4 -27.1 L96.5 -32.2 L93.5 -34.6 L87.9 -36.3 L82.2 -35.4ZM-7 -12.2 L-10.3 -9.6 L-12.7 -6.1 L-13.9 -2.1 L-13.9 2.1 L-13.4 4.1 L-12.7 6.1 L-10.3 9.6 L-7 12.2 L-3.1 13.7 L-1 14.0 L1.1 14.0 L5.1 13.1 L8.8 11.0 L10.3 9.6 L12.7 6.1 L13.9 2.1 L13.9 -2.1 L13.4 -4.1 L12.7 -6.1 L10.3 -9.6 L7 -12.2 L3.1 -13.7 L1 -14.0 L-3.1 -13.7Z"},"link4":{"plate":"M-22.9 38.8 L-28.3 34.9 L-33.2 30.4 L-37.3 25.1 L-40.6 19.4 L-43 13.1 L-44.5 6.6 L-45 -0.0 L-44.5 -6.6 L-43 -13.1 L-40.6 -19.3 L-37.4 -25.1 L-33.3 -30.3 L-28.4 -34.9 L-23 -38.7 L-17 -41.7 L-10.7 -43.7 L-4.2 -44.8 L2.5 -44.9 L181.4 -35.0 L184.9 -34.6 L191.6 -32.2 L201.8 -24.8 L204.3 -23.6 L209.7 -22.2 L273.3 -21.8 L279.5 -19.8 L285 -16.1 L287.2 -13.7 L290.5 -8.0 L291.9 -1.6 L291.4 4.9 L289.1 11.0 L287.2 13.7 L282.4 18.2 L276.5 21.0 L270 22.0 L137.5 22.2 L132.6 23.4 L130.3 24.5 L72.2 56.9 L65.2 59.5 L61.5 60.0 L54.1 59.4 L-10.6 43.7 L-16.9 41.7ZM283.9 -2.1 L282.7 -6.1 L280.3 -9.6 L278.8 -11.0 L277 -12.2 L273.1 -13.7 L268.9 -14.0 L264.9 -13.1 L263 -12.2 L261.2 -11.0 L258.4 -7.9 L256.6 -4.1 L255.9 -0.0 L256.1 2.1 L256.6 4.1 L258.4 7.9 L261.2 11.0 L263 12.2 L266.9 13.7 L271.1 14.0 L275.1 13.1 L277 12.2 L280.3 9.6 L282.7 6.1 L283.4 4.1 L283.9 2.1ZM192.9 -11.9 L191.8 -15.7 L188.1 -20.2 L182.9 -22.7 L179 -23.0 L173.5 -21.3 L169.2 -17.4 L167.5 -13.8 L167.1 -8.1 L169.2 -2.7 L171.9 0.2 L177.1 2.7 L181 3.0 L186.5 1.3 L189.6 -1.1 L192.5 -6.2ZM106 -0.9 L105.4 -2.6 L103.8 -4.7 L101.3 -5.9 L99.5 -6.0 L97 -5.2 L95 -3.4 L94.2 -1.8 L94 0.9 L94.6 2.6 L96.2 4.7 L98.6 5.9 L100.5 6.0 L103 5.2 L104.4 4.1 L105.8 1.8ZM23.5 -32.3 L22.7 -33.7 L21.2 -34.2 L19.6 -33.2 L19.3 -31.7 L20 -30.3 L21.6 -29.9 L23 -30.6ZM9.6 -38.1 L8.9 -39.4 L7.3 -39.9 L5.7 -39.0 L5.4 -37.4 L6.2 -36.1 L7.7 -35.6 L9.1 -36.3ZM29.9 -21.7 L30.2 -20.2 L31.8 -19.2 L33.4 -19.7 L34.1 -21.1 L33.8 -22.6 L32.2 -23.5 L30.7 -23.1ZM-8 -39.9 L-9.3 -39.0 L-9.6 -37.1 L-8.6 -35.9 L-7 -35.7 L-5.7 -36.6 L-5.5 -38.4 L-6.4 -39.6ZM-24.8 -16.9 L-27 -13.0 L-28.7 -8.8 L-29.7 -4.5 L-30 -0.0 L-29.7 4.5 L-28.7 8.8 L-27 13.0 L-24.8 16.9 L-22 20.4 L-18.7 23.5 L-15 26.0 L-11 27.9 L-6.7 29.2 L-2.2 29.9 L2.2 29.9 L6.7 29.2 L11 27.9 L15 26.0 L18.7 23.5 L22 20.4 L24.8 16.9 L27 13.0 L28.7 8.8 L29.7 4.5 L30 -0.0 L29.7 -4.5 L28.7 -8.8 L27 -13.0 L24.8 -16.9 L22 -20.4 L18.7 -23.5 L15 -26.0 L11 -27.9 L6.7 -29.2 L2.2 -29.9 L-2.2 -29.9 L-6.7 -29.2 L-11 -27.9 L-15 -26.0 L-18.7 -23.5 L-22 -20.4ZM39.1 -9.2 L37.6 -9.7 L36.2 -9.0 L35.6 -7.2 L36.4 -5.8 L37.9 -5.4 L39.3 -6.1 L39.9 -7.8ZM-21.2 -34.2 L-22.7 -33.7 L-23.5 -32.3 L-23 -30.6 L-21.6 -29.9 L-20 -30.3 L-19.3 -31.7 L-19.8 -33.5ZM36.2 6.0 L35.6 7.5 L36.4 9.2 L37.9 9.7 L39.3 9.0 L39.9 7.5 L39.1 5.8 L37.6 5.4ZM59 22.0 L53.5 23.7 L50.4 26.1 L47.5 31.2 L47.1 36.9 L48.2 40.7 L51.9 45.2 L57.1 47.7 L61 48.0 L66.5 46.3 L69.6 43.9 L72.5 38.8 L72.9 33.1 L71.8 29.3 L68.1 24.8 L64.1 22.7ZM-32.5 -23.5 L-33.8 -22.6 L-34.1 -20.8 L-33.1 -19.5 L-31.5 -19.3 L-30.2 -20.2 L-30 -22.0 L-30.9 -23.3ZM34.1 21.1 L33.4 19.7 L31.8 19.2 L30.2 20.2 L29.9 21.7 L30.7 23.1 L32.2 23.5 L33.6 22.8ZM-38.8 -9.4 L-39.8 -8.1 L-39.5 -6.3 L-38.2 -5.4 L-36.7 -5.6 L-35.7 -6.9 L-36 -8.7 L-37.3 -9.6ZM23.5 31.7 L22.7 30.3 L21.2 29.9 L19.6 30.8 L19.3 32.3 L20 33.7 L21.6 34.2 L23 33.5ZM-39.5 6.3 L-39.9 7.8 L-38.8 9.4 L-37.3 9.6 L-36 8.7 L-35.6 7.2 L-36.7 5.7 L-38.2 5.4ZM9.6 37.4 L8.9 36.1 L7.3 35.6 L5.7 36.5 L5.4 38.1 L6.2 39.4 L7.7 39.9 L9.1 39.2ZM-29.9 21.1 L-30.7 19.7 L-32.2 19.2 L-33.8 20.2 L-34.1 21.7 L-33.4 23.1 L-31.8 23.5 L-30.4 22.8ZM-8.9 36.1 L-9.6 37.4 L-9.1 39.2 L-7.7 39.9 L-6.2 39.4 L-5.4 38.1 L-5.9 36.3 L-7.4 35.6ZM-23.3 31.1 L-23.4 32.6 L-22.2 34.0 L-20.6 34.0 L-19.5 32.9 L-19.3 31.4 L-20.6 30.0 L-22.2 30.0Z"},"seat":{"plate":"M-60 -64.0 L-57.8 -64.0 L-137.6 -64.0 L-137.6 -76.0 L152.4 -76.0 L152.4 -64.0 L60 -64.0 L60 -0.0 L59.3 8.9 L57.3 17.7 L54.1 26.0 L49.6 33.8 L44 40.8 L37.4 46.9 L30 52.0 L21.9 55.9 L13.4 58.5 L4.5 59.8 L-4.5 59.8 L-13.4 58.5 L-21.9 55.9 L-30 52.0 L-37.4 46.9 L-44 40.8 L-49.6 33.8 L-54.1 26.0 L-57.3 17.7 L-59.3 8.9 L-60 0.0ZM47.4 -14.5 L47 -12.9 L47.9 -11.4 L49.8 -11.0 L51.1 -11.9 L51.5 -13.5 L50.7 -15.0 L48.8 -15.4ZM48.1 11.3 L47.1 12.5 L47.4 14.5 L48.8 15.4 L50.4 15.1 L51.4 13.9 L51.3 12.2 L49.8 11.0ZM-3.4 -46.0 L-10.3 -44.9 L-16.8 -42.9 L-23 -39.9 L-28.7 -36.0 L-33.8 -31.4 L-38.1 -26.0 L-41.5 -20.0 L-44.1 -13.6 L-45.6 -6.9 L-46.1 -0.0 L-45.6 6.9 L-44.1 13.6 L-41.5 20.0 L-38.1 26.0 L-33.8 31.4 L-28.7 36.0 L-23 39.9 L-16.8 42.9 L-10.3 44.9 L-3.4 46.0 L3.4 46.0 L10.3 44.9 L16.8 42.9 L23 39.9 L28.7 36.0 L33.8 31.4 L38.1 26.0 L41.5 20.0 L44.1 13.6 L45.6 6.9 L46.1 -0.0 L45.6 -6.9 L44.1 -13.6 L41.5 -20.0 L38.1 -26.0 L33.8 -31.4 L28.7 -36.0 L23 -39.9 L16.8 -42.9 L10.3 -44.9 L3.4 -46.0ZM33.9 -36.7 L34 -35.1 L35.2 -34.0 L37.2 -34.1 L38.2 -35.4 L38.1 -37.0 L36.9 -38.2 L34.9 -38.0ZM35.9 33.8 L34.4 34.5 L33.8 36.1 L34.7 37.8 L36.2 38.3 L37.7 37.6 L38.3 35.7 L37.5 34.3ZM11.3 -48.0 L12.7 -47.1 L14.3 -47.3 L15.4 -48.9 L15.1 -50.5 L13.7 -51.5 L12.1 -51.2 L11 -49.6ZM12.1 47.3 L11 48.6 L11.2 50.2 L12.7 51.5 L14.3 51.2 L15.3 49.9 L15.2 48.3 L13.7 47.1ZM-15.4 49.6 L-14.6 51.0 L-13 51.5 L-11.3 50.5 L-11 48.9 L-11.8 47.5 L-13.4 47.0 L-15.1 48.0ZM-15.1 -50.5 L-15.4 -48.9 L-14.3 -47.3 L-12.7 -47.1 L-11.3 -48.0 L-11 -49.6 L-12 -51.2 L-13.7 -51.5ZM-38.3 -35.7 L-37.5 -34.3 L-35.9 -33.8 L-34.2 -34.8 L-33.8 -36.4 L-34.7 -37.8 L-36.2 -38.3 L-37.9 -37.3ZM-36.9 34.0 L-38.1 35.1 L-38.2 36.7 L-36.9 38.2 L-35.2 38.2 L-34 37.0 L-33.9 35.4 L-35.2 34.0ZM-50.4 -15.2 L-51.4 -13.9 L-51.3 -12.2 L-49.8 -11.0 L-48.1 -11.3 L-47.1 -12.5 L-47.2 -14.2 L-48.4 -15.3ZM-47.9 11.4 L-49.4 11.0 L-50.9 11.7 L-51.5 13.5 L-50.7 15.0 L-49.1 15.4 L-47.4 14.5 L-47 12.9Z","motor":"M-55 -0.0 L-53.9 -10.8 L-52.5 -16.4 L-50.5 -21.8 L-45.7 -30.6 L-41.8 -35.7 L-37.4 -40.3 L-28.5 -47.0 L-18.6 -51.8 L-9.5 -54.2 L0 -55.0 L9.5 -54.2 L18.6 -51.8 L28.5 -47.0 L37.4 -40.3 L41.8 -35.7 L45.7 -30.6 L50.5 -21.8 L52.5 -16.4 L53.9 -10.8 L55 0.0 L53.9 10.8 L52.5 16.4 L50.5 21.8 L45.7 30.6 L41.8 35.7 L37.4 40.3 L28.5 47.0 L18.6 51.8 L9.5 54.2 L-0 55.0 L-9.5 54.2 L-18.6 51.8 L-28.5 47.0 L-37.4 40.3 L-41.8 35.7 L-45.7 30.6 L-50.5 21.8 L-52.5 16.4 L-53.9 10.8ZM-1.7 -6.3 L-3.9 -5.2 L-5.7 -3.1 L-6.4 -0.7 L-6.3 1.7 L-5.2 3.9 L-3.1 5.7 L-0.7 6.4 L1.7 6.3 L3.9 5.2 L5.7 3.1 L6.4 0.7 L6.3 -1.7 L5.2 -3.9 L3.1 -5.7 L0.7 -6.4Z","rotor":"M-42.4 2.1 L-42.3 -4.2 L-40.5 -12.8 L-37.3 -20.5 L-32.5 -27.3 L-26.3 -33.4 L-19.3 -37.9 L-11.5 -40.9 L-2.9 -42.4 L5.4 -42.2 L13.6 -40.3 L21.5 -36.7 L28.2 -31.8 L33.9 -25.6 L38.4 -18.2 L41.2 -10.3 L42.4 -2.1 L42 6.6 L39.9 14.7 L36.3 22.2 L31 29.1 L24.7 34.6 L17.5 38.7 L11.5 40.9 L2.9 42.4 L-5.4 42.2 L-13.6 40.3 L-21.5 36.7 L-28.2 31.8 L-33.9 25.6 L-38.4 18.2 L-41.2 10.3ZM-2 -6.2 L-4.1 -5.1 L-5.7 -3.1 L-6.5 -0.4 L-6.3 1.6 L-5 4.2 L-2.7 5.9 L-0.8 6.4 L2 6.2 L4.5 4.7 L5.7 3.1 L6.5 0.3 L6 -2.5 L5 -4.2 L2.7 -5.9 L-0.1 -6.5Z"},"ground":{"plate":"M-82.5 64.0 L-60 64.0 L-60 0.0 L-59.3 -8.9 L-57.3 -17.7 L-54.1 -26.0 L-49.6 -33.8 L-44 -40.8 L-37.4 -46.9 L-30 -52.0 L-21.9 -55.9 L-13.4 -58.5 L-4.5 -59.8 L4.5 -59.8 L13.4 -58.5 L21.9 -55.9 L30 -52.0 L37.4 -46.9 L44 -40.8 L49.6 -33.8 L54.1 -26.0 L57.3 -17.7 L59.3 -8.9 L60 -0.0 L60 64.0 L57.8 64.0 L110 64.0 L110 -0.0 L110.7 -8.9 L112.7 -17.7 L115.9 -26.0 L120.4 -33.8 L126 -40.8 L132.6 -46.9 L140 -52.0 L148.1 -55.9 L156.6 -58.5 L165.5 -59.8 L174.5 -59.8 L183.4 -58.5 L191.9 -55.9 L200 -52.0 L207.4 -46.9 L214 -40.8 L219.6 -33.8 L224.1 -26.0 L227.3 -17.7 L229.3 -8.9 L230 -0.0 L230 64.0 L227.8 64.0 L267.5 64.0 L267.5 73.5 L-82.5 73.5ZM47.4 11.9 L47 13.5 L47.9 15.0 L49.8 15.4 L51.1 14.5 L51.5 12.9 L50.7 11.4 L48.8 11.0ZM47.9 -15.0 L47 -13.2 L47.6 -11.7 L49.1 -11.0 L50.7 -11.4 L51.5 -12.9 L50.9 -14.7 L49.4 -15.4ZM-10.3 -44.9 L-16.8 -42.9 L-23 -39.9 L-28.7 -36.0 L-33.8 -31.4 L-38.1 -26.0 L-41.5 -20.0 L-44.1 -13.6 L-45.6 -6.9 L-46.1 0.0 L-45.6 6.9 L-44.1 13.6 L-41.5 20.0 L-38.1 26.0 L-33.8 31.4 L-28.7 36.0 L-23 39.9 L-16.8 42.9 L-10.3 44.9 L-3.4 46.0 L3.4 46.0 L10.3 44.9 L16.8 42.9 L23 39.9 L28.7 36.0 L33.8 31.4 L38.1 26.0 L41.5 20.0 L44.1 13.6 L45.6 6.9 L46.1 -0.0 L45.6 -6.9 L44.1 -13.6 L41.5 -20.0 L38.1 -26.0 L33.8 -31.4 L28.7 -36.0 L23 -39.9 L16.8 -42.9 L10.3 -44.9 L3.4 -46.0 L-3.4 -46.0ZM35.9 33.8 L34.2 34.8 L33.8 36.4 L34.7 37.8 L36.2 38.3 L37.7 37.6 L38.3 35.7 L37.5 34.3ZM33.9 -36.7 L34.2 -34.8 L35.6 -33.9 L37.2 -34.1 L38.2 -35.4 L38.1 -37.0 L36.6 -38.3 L34.9 -38.0ZM12.1 47.3 L11 48.6 L11.3 50.5 L12.7 51.5 L14.3 51.2 L15.4 49.9 L15.1 48.0 L13.7 47.1ZM11.2 -48.3 L12.4 -47.2 L14.3 -47.3 L15.3 -48.6 L15.2 -50.2 L14 -51.4 L12.1 -51.2 L11 -49.9ZM-15.4 48.6 L-15.2 50.2 L-13.7 51.5 L-12.1 51.2 L-11 49.9 L-11.2 48.3 L-12.7 47.1 L-14.3 47.3ZM-15.4 -48.9 L-14.6 -47.5 L-12.7 -47.1 L-11.3 -48.0 L-11 -49.6 L-11.8 -51.0 L-13.7 -51.5 L-15.1 -50.5ZM-36.6 33.9 L-37.9 34.8 L-38.2 36.7 L-37.2 38.0 L-35.6 38.3 L-34.2 37.3 L-33.9 35.4 L-34.9 34.1ZM-36.6 -38.3 L-37.9 -37.3 L-38.2 -35.4 L-37.2 -34.1 L-35.6 -33.9 L-34.2 -34.8 L-33.9 -36.7 L-34.9 -38.0ZM-50.4 -15.1 L-51.5 -13.5 L-51.1 -11.9 L-49.8 -11.0 L-48.1 -11.3 L-47.1 -12.5 L-47.4 -14.5 L-48.8 -15.4ZM-48.4 11.1 L-50.4 11.2 L-51.4 12.5 L-51.3 14.2 L-50.1 15.3 L-48.4 15.3 L-47.1 13.9 L-47.2 12.2ZM217.2 12.2 L217.1 13.9 L218.1 15.1 L220.1 15.3 L221.3 14.2 L221.4 12.5 L220.4 11.2 L218.4 11.1ZM217.4 -14.5 L217 -12.9 L218.1 -11.3 L219.8 -11.0 L221.1 -11.9 L221.5 -13.5 L220.4 -15.1 L218.8 -15.4ZM153.2 -42.9 L147 -39.9 L141.3 -36.0 L136.2 -31.4 L131.9 -26.0 L128.5 -20.0 L125.9 -13.6 L124.4 -6.9 L123.9 -0.0 L124.4 6.9 L125.9 13.6 L128.5 20.0 L131.9 26.0 L136.2 31.4 L141.3 36.0 L147 39.9 L153.2 42.9 L159.7 44.9 L166.6 46.0 L173.4 46.0 L180.3 44.9 L186.8 42.9 L193.1 39.9 L198.7 36.0 L203.8 31.4 L208.1 26.0 L211.5 20.0 L214.1 13.6 L215.6 6.9 L216.1 0.0 L215.6 -6.9 L214.1 -13.6 L211.5 -20.0 L208.1 -26.0 L203.8 -31.4 L198.7 -36.0 L193 -39.9 L186.8 -42.9 L180.3 -44.9 L173.4 -46.0 L166.6 -46.0 L159.7 -44.9ZM203.8 -35.7 L204.7 -34.3 L206.2 -33.8 L207.9 -34.8 L208.3 -36.4 L207.5 -37.8 L205.9 -38.3 L204.4 -37.6ZM205.6 33.9 L204.2 34.8 L203.8 36.4 L204.9 38.0 L206.6 38.3 L207.9 37.3 L208.3 35.7 L207.2 34.1ZM181.3 -48.0 L182.7 -47.1 L184.3 -47.3 L185.4 -48.9 L185.1 -50.5 L183.7 -51.5 L182.1 -51.2 L181 -49.6ZM181.8 47.5 L181 48.9 L181.3 50.5 L183 51.5 L184.6 51.0 L185.4 49.6 L185.1 48.0 L183.4 47.0ZM154.8 -48.3 L156 -47.2 L157.6 -47.2 L158.9 -48.6 L158.8 -50.2 L157.6 -51.4 L156 -51.4 L154.8 -50.2ZM154.6 48.9 L154.9 50.5 L156.3 51.5 L158.2 51.0 L159 49.6 L158.7 48.0 L157.3 47.1 L155.4 47.5ZM132.5 34.3 L131.7 35.7 L132.1 37.3 L133.8 38.3 L135.3 37.8 L136.2 36.4 L135.8 34.8 L134.1 33.8ZM132.5 -37.8 L131.7 -36.4 L132.1 -34.8 L133.8 -33.8 L135.3 -34.3 L136.2 -35.7 L135.8 -37.3 L134.4 -38.3ZM119.9 -15.3 L118.7 -14.2 L118.6 -12.4 L119.9 -11.1 L121.6 -11.1 L122.8 -12.2 L122.8 -14.2 L121.6 -15.3ZM122.7 12.2 L121.2 11.0 L119.6 11.2 L118.6 12.5 L118.7 14.2 L119.9 15.3 L121.9 15.1 L122.9 13.9Z","motor":"M-55 -0.0 L-53.9 -10.8 L-52.5 -16.4 L-50.5 -21.8 L-45.7 -30.6 L-41.8 -35.7 L-37.4 -40.3 L-28.5 -47.0 L-18.6 -51.8 L-9.5 -54.2 L0 -55.0 L9.5 -54.2 L18.6 -51.8 L28.5 -47.0 L37.4 -40.3 L41.8 -35.7 L45.7 -30.6 L50.5 -21.8 L52.5 -16.4 L53.9 -10.8 L55 -0.0 L53.9 10.8 L52.5 16.4 L50.5 21.8 L45.7 30.6 L41.8 35.7 L37.4 40.3 L28.5 47.0 L18.6 51.8 L9.5 54.2 L-0 55.0 L-9.5 54.2 L-18.6 51.8 L-28.5 47.0 L-37.4 40.3 L-41.8 35.7 L-45.7 30.6 L-50.5 21.8 L-52.5 16.4 L-53.9 10.8ZM-5.3 -3.8 L-6.4 -1.3 L-6.4 1.2 L-5.5 3.5 L-3.8 5.3 L-1.3 6.4 L1.2 6.4 L3.5 5.5 L5.3 3.8 L6.4 1.3 L6.4 -1.2 L5.5 -3.5 L3.8 -5.3 L1.3 -6.4 L-1.2 -6.4 L-3.5 -5.5ZM115 -0.0 L116.1 -10.8 L117.5 -16.4 L119.5 -21.8 L124.3 -30.6 L128.2 -35.7 L132.6 -40.3 L141.5 -47.0 L151.4 -51.8 L160.5 -54.2 L170 -55.0 L179.5 -54.2 L188.6 -51.8 L198.5 -47.0 L207.4 -40.3 L211.8 -35.7 L215.7 -30.6 L220.5 -21.8 L222.5 -16.4 L223.9 -10.8 L225 -0.0 L223.9 10.8 L222.5 16.4 L220.5 21.8 L215.7 30.6 L211.8 35.7 L207.4 40.3 L198.5 47.0 L188.6 51.8 L179.5 54.2 L170 55.0 L160.5 54.2 L151.4 51.8 L141.5 47.0 L132.6 40.3 L128.2 35.7 L124.3 30.6 L119.5 21.8 L117.5 16.4 L116.1 10.8ZM164.7 -3.8 L163.6 -1.3 L163.6 1.2 L164.5 3.5 L166.2 5.3 L168.7 6.4 L171.2 6.4 L173.5 5.5 L175.3 3.8 L176.4 1.3 L176.4 -1.2 L175.5 -3.5 L173.8 -5.3 L171.3 -6.4 L168.8 -6.4 L166.5 -5.5Z","rotor":"M127.5 1.3 L128.1 -7.0 L130.4 -15.4 L134.1 -22.8 L139.3 -29.4 L145.9 -35.0 L153.2 -39.1 L161.2 -41.6 L169.8 -42.5 L178.1 -41.7 L186.1 -39.3 L193.8 -35.2 L200.2 -29.9 L204.3 -25.0 L208.6 -17.9 L211.4 -9.6 L212.5 -1.3 L211.9 7.0 L209.6 15.4 L205.9 22.8 L200.7 29.4 L194.1 35.0 L186.8 39.1 L178.8 41.6 L170.2 42.5 L161.9 41.7 L153.9 39.3 L146.2 35.2 L139.8 29.9 L135.7 25.0 L131.4 17.9 L128.6 9.6ZM168.3 -6.3 L165.8 -5.0 L164.3 -3.0 L163.5 -0.8 L163.9 2.1 L164.8 3.8 L166.9 5.7 L169.4 6.5 L171.6 6.3 L174.2 5.0 L175.5 3.5 L176.5 0.8 L176.1 -2.1 L175.2 -3.8 L173.1 -5.7 L170.3 -6.5ZM-42.5 0.6 L-41.7 -8.1 L-39.4 -16.0 L-35.5 -23.4 L-29.9 -30.2 L-23.5 -35.4 L-16.1 -39.3 L-10.1 -41.3 L-1.4 -42.5 L6.9 -41.9 L14.9 -39.8 L22.7 -35.9 L29.3 -30.8 L34.8 -24.5 L39 -16.9 L41.6 -8.9 L42.5 -0.6 L41.7 8.1 L39.4 16.0 L35.5 23.4 L29.9 30.2 L23.5 35.4 L16.1 39.3 L7.7 41.8 L1.4 42.5 L-6.9 41.9 L-14.9 39.8 L-22.7 35.9 L-29.3 30.8 L-34.8 24.5 L-39 16.9 L-41.6 8.9ZM-1.8 -6.2 L-3.6 -5.4 L-5.6 -3.3 L-6.5 -0.6 L-6.4 1.4 L-5.1 4.0 L-2.9 5.8 L-1 6.4 L1.8 6.2 L4 5.1 L5.6 3.3 L6.5 0.6 L6.4 -1.4 L5.1 -4.0 L3.7 -5.3 L1.1 -6.4Z"}};
 
     const deg = (r) => r * 180 / Math.PI, rad = (d) => d * Math.PI / 180;
     function normDeg(a) { let r = a % 360; if (r >= 180) r -= 360; if (r < -180) r += 360; return r; }
@@ -446,13 +460,15 @@
     const torqueNm = () => ratedTorqueMnm > 0; // the control is in Nm once the rated torque is known
     const pmToNm = (pm) => pm * ratedTorqueMnm / 1e6, nmToPm = (nm) => Math.round(nm * 1e6 / ratedTorqueMnm);
     const pairsFromSolution = (s) => [-s.theta1Rel, -s.theta2Rel, -s.m3AngleRel + seatTilt];
-    const withinLimits = (pairs) => pairs.every(p => p >= limits.min && p <= limits.max);
+    const withinPairLimits = (pairs) => pairs.every((p, i) => p >= pairLimits[i].min && p <= pairLimits[i].max);
+    const withinLimits = (pairs) => withinPairLimits(pairs) && inOperableBase(-pairs[0], -pairs[1])
+      && seatTilt >= OPERABLE.tiltMin && seatTilt <= OPERABLE.tiltMax;
 
     // ======================= Drawing =======================
     const NS = "http://www.w3.org/2000/svg";
     const svg = els.canvas;
     const layers = {};
-    for (const name of ["grid", "design", "target", "current", "labels"]) { const g = document.createElementNS(NS, "g"); g.id = "L_" + name; svg.appendChild(g); layers[name] = g; }
+    for (const name of ["grid", "ground", "current", "target", "design", "labels", "markCurrent", "markTarget"]) { const g = document.createElementNS(NS, "g"); g.id = "L_" + name; svg.appendChild(g); layers[name] = g; }
     function el(tag, attrs, parent) { const e = document.createElementNS(NS, tag); for (const [k, v] of Object.entries(attrs)) e.setAttribute(k, v); (parent || svg).appendChild(e); return e; }
     const S = (p) => [p[0], -p[1]]; // analysis frame (y up) -> SVG (y down)
     function line(p, q, color, width, parent, extra = {}) { const a = S(p), b = S(q); return el("line", { x1: a[0], y1: a[1], x2: b[0], y2: b[1], stroke: color, "stroke-width": width, "stroke-linecap": "round", ...extra }, parent); }
@@ -461,34 +477,57 @@
     function clear(g) { while (g.firstChild) g.removeChild(g.firstChild); }
 
     function drawStatic() {
-      clear(layers.grid); clear(layers.design);
-      for (let x = -150; x <= 450; x += 50) line([x, -80], [x, 780], x === 0 ? "#2f3d4a" : "#182028", 1, layers.grid);
-      for (let y = -50; y <= 750; y += 50) line([-160, y], [440, y], y === 0 ? "#2f3d4a" : "#182028", 1, layers.grid);
-      // design travel box (plate frame -> analysis frame) and the five edge poses
-      const y0 = DESIGN.yPlate[0] - PLATE_Y_OFFSET, y1 = DESIGN.yPlate[1] - PLATE_Y_OFFSET;
-      const a = S([DESIGN.x[0], y1]);
-      el("rect", { x: a[0], y: a[1], width: DESIGN.x[1] - DESIGN.x[0], height: y1 - y0, fill: "none", stroke: "#4b5866", "stroke-dasharray": "6 5", "stroke-width": 1 }, layers.design);
-      for (const [name, xp, yp] of EDGE_POSES) { const p = [xp, yp - PLATE_Y_OFFSET]; dot(p, 3, "#4b5866", layers.design); text(p, name, layers.design, { fill: "#6b7885", "font-size": 11 }); }
-      // ground: M1, M2, J4
+      clear(layers.grid); clear(layers.ground); clear(layers.design);
+      for (let x = -200; x <= 450; x += 50) line([x, -74], [x, 700], x === 0 ? "#26313b" : "#141b22", 1, layers.grid);
+      for (let y = -50; y <= 700; y += 50) line([-200, y], [460, y], "#141b22", 1, layers.grid);
+      // table: the base plate's underside is at y = -74
+      const t = S([-200, -74]);
+      el("rect", { x: t[0], y: t[1], width: 660, height: 40, fill: "#1a2026", stroke: "#3a454f" }, layers.ground);
+      text([-196, -92], "table", layers.ground, { fill: "#6b7885", "font-size": 12 });
+      drawBody(layers.ground, "ground", [0, 0], 0, "var(--ground)", { fillOpacity: 0.28 });
+      // design travel edge poses, CAD home and the operable range
+      el("polygon", { points: REGION.map(p => p[0] + "," + (-p[1])).join(" "), fill: "var(--ok)", "fill-opacity": 0.1,
+                      stroke: "var(--ok)", "stroke-opacity": 0.95, "stroke-width": 2 }, layers.design);
+      text([REGION.reduce((m, p) => p[1] > m[1] ? p : m)[0] - 130, DESIGN.yPlate[1] - PLATE_Y_OFFSET - 14], "operable range", layers.design, { fill: "var(--ok)", "font-size": 12, opacity: 0.85 });
+      for (const [name, xp, yp] of EDGE_POSES) { const p = [xp, yp - PLATE_Y_OFFSET]; dot(p, 3, "#6b7885", layers.design); text(p, name, layers.design, { fill: "#6b7885", "font-size": 11 }); }
+      const h = S(CAD_HOME);
+      el("path", { d: `M${h[0]-8} ${h[1]}h16M${h[0]} ${h[1]-8}v16`, stroke: "#e6edf3", "stroke-width": 1.5 }, layers.design);
+      text(CAD_HOME, "home (0, 0)", layers.design, { fill: "#e6edf3", "font-size": 12 });
       const g = geometry;
-      dot([g.m1_x, g.m1_y], 6, "#c9d1d9", layers.design); text([g.m1_x, g.m1_y], "M1", layers.design);
-      dot([g.m2_x, g.m2_y], 6, "#c9d1d9", layers.design); text([g.m2_x, g.m2_y], "M2", layers.design);
-      dot([g.j4_x, g.j4_y], 4, "#c9d1d9", layers.design); text([g.j4_x, g.j4_y], "J4", layers.design, { x: S([g.j4_x, 0])[0] - 30 });
+      for (const [name, p] of [["M1", [g.m1_x, g.m1_y]], ["M2", [g.m2_x, g.m2_y]]]) label(p, name, layers.ground);
     }
-    function drawPose(layer, s, opts) {
+    function label(p, s, parent) { const a = S(p); const t = el("text", { x: a[0], y: a[1] + 5, fill: "#ffffff", "font-size": 14, "font-weight": 700,
+      "text-anchor": "middle", "font-family": "ui-sans-serif, system-ui, sans-serif", "paint-order": "stroke", stroke: "#0b0f13", "stroke-width": 3 }, parent); t.textContent = s; return t; }
+    // One rigid body from BODIES, placed with its pivot at p (analysis frame) and rotated CCW by angDeg.
+    function drawBody(layer, key, p, angDeg, color, o = {}) {
+      const a = S(p), g = el("g", { transform: `translate(${a[0].toFixed(2)} ${a[1].toFixed(2)}) rotate(${(-angDeg).toFixed(3)})` }, layer);
+      const ghost = !!o.ghost, b = BODIES[key];
+      const style = (kind) => ghost
+        ? { fill: "none", stroke: color, "stroke-width": 1.4, "stroke-dasharray": "5 4", opacity: 0.55 }
+        : kind === "plate" ? { fill: color, "fill-opacity": o.fillOpacity ?? 0.2, stroke: color, "stroke-width": 1.2, "stroke-opacity": 0.6 }
+        : kind === "motor" ? { fill: "#232b33", "fill-opacity": 0.75, stroke: "#9aa4ad", "stroke-width": 1, "stroke-opacity": 0.6 }
+        : { fill: "#323c46", "fill-opacity": 0.75, stroke: "#9aa4ad", "stroke-width": 0.8, "stroke-opacity": 0.6 };
+      for (const kind of ["plate", "motor", "rotor"]) if (b[kind]) el("path", { d: b[kind], "fill-rule": "evenodd", "vector-effect": "non-scaling-stroke", ...style(kind) }, g);
+      return g;
+    }
+    const angOf = (p, q) => deg(Math.atan2(q[1] - p[1], q[0] - p[0]));
+    // seat angle from level (+ = front up): the seat pair angle plus the plate (J2->M3) rotation from the reference
+    function drawPose(layer, s, tilt, opts) {
       clear(layer);
-      if (!s) return;
-      const g = geometry, m1 = [g.m1_x, g.m1_y], m2 = [g.m2_x, g.m2_y], j4 = [g.j4_x, g.j4_y];
-      const op = opts.opacity, w = opts.width, extra = { opacity: op };
-      if (opts.bad) { const c = "var(--err)"; line(m1, s.j2, c, w, layer, extra); line(m2, s.j1, c, w, layer, extra); line(s.j1, s.j3, c, w, layer, extra); line(s.j2, s.m3, c, w, layer, extra); }
-      else {
-        line(m1, s.j2, "var(--link1)", w, layer, extra); line(m2, s.j1, "var(--link2)", w, layer, extra);
-        line(s.j1, s.j3, "var(--link3)", w, layer, extra); line(s.j2, s.m3, "var(--link4)", w, layer, extra);
-        line(s.j3, s.j5, "var(--link4)", w * 0.6, layer, extra); line(j4, s.j5, "var(--spring)", 2, layer, { opacity: op, "stroke-dasharray": "7 5" });
-      }
-      for (const [name, p] of [["J1", s.j1], ["J2", s.j2], ["J3", s.j3], ["J5", s.j5]]) { dot(p, 4, "#e6edf3", layer, extra); if (opts.labels) text(p, name, layer); }
-      dot(s.m3, opts.handle ? 9 : 6, opts.bad ? "var(--err)" : (opts.handle ? "var(--accent)" : "#ffffff"), layer, { opacity: Math.min(1, op + 0.3), stroke: "#0b0f13", "stroke-width": 1.5 });
-      if (opts.labels) text(s.m3, "M3", layer, { "font-weight": 600 });
+      if (!s) { clear(opts.ghost ? layers.markTarget : layers.labels); if (!opts.ghost) clear(layers.markCurrent); return; }
+      const g = geometry, m1 = [g.m1_x, g.m1_y], m2 = [g.m2_x, g.m2_y];
+      const ghost = !!opts.ghost, bad = !!opts.bad, c = (v) => bad ? "var(--err)" : (ghost ? "var(--accent)" : v);
+      drawBody(layer, "link2", m2, angOf(m2, s.j1), c("var(--link2)"), { ghost });
+      drawBody(layer, "seat", s.m3, tilt, c("var(--seat)"), { ghost });
+      drawBody(layer, "link4", s.m3, angOf(s.m3, s.j2), c("var(--link4)"), { ghost });
+      drawBody(layer, "link1", m1, angOf(m1, s.j2), c("var(--link1)"), { ghost });
+      drawBody(layer, "link3", s.j1, angOf(s.j1, s.j3), c("var(--link3)"), { ghost });
+      if (ghost) { clear(layers.markTarget); dot(s.m3, 9, bad ? "var(--err)" : "var(--accent)", layers.markTarget, { stroke: "#ffffff", "stroke-width": 2 }); return; }
+      const L = layers.labels; clear(L); // pins and names stay above the target ghost
+      for (const p of [s.j1, s.j2, s.j3]) dot(p, 4, "#e6edf3", L, { stroke: "#0b0f13", "stroke-width": 1 });
+      text(s.j1, "J1", L, { "font-weight": 600 }); text(s.j2, "J2", L, { "font-weight": 600 });
+      text([s.m3[0] + 4, s.m3[1] + 4], "M3", L, { "font-weight": 700, "paint-order": "stroke", stroke: "#0b0f13", "stroke-width": 3 });
+      clear(layers.markCurrent); dot(s.m3, 5, "#ffffff", layers.markCurrent, { stroke: "#0b0f13", "stroke-width": 1.5 }); // where M3 is now
     }
 
     // ======================= State =======================
@@ -501,30 +540,26 @@
 
     function refreshTarget(x, y) {
       target = { x, y };
-      const s = solveIkRef(x, y);
+      const raw = solveIk(x + CAD_HOME[0], y + CAD_HOME[1]), s = raw ? applyRef(raw, reference) : null;
       targetSolution = s; targetReachable = !!s;
-      targetOk = targetReachable && withinLimits(pairsFromSolution(s));
-      drawPose(layers.target, s, { opacity: 0.55, width: 5, handle: true, bad: !targetOk, labels: false });
-      if (!s) { // unreachable: still show the handle where the pointer is
-        const p = [x + reference.x, y + reference.y]; dot(p, 9, "var(--err)", layers.target, { opacity: 0.8 });
-      }
+      const pairs = s ? pairsFromSolution(s) : null, inBox = s ? inDesignBox(s.m3) : false;
+      targetOk = targetReachable && inBox && withinLimits(pairs);
+      drawPose(layers.target, s, seatTilt, { ghost: true, bad: !targetOk });
+      if (!s) dot([x + CAD_HOME[0], y + CAD_HOME[1]], 9, "var(--err)", layers.markTarget, { stroke: "#ffffff", "stroke-width": 2 });
       els.xInput.value = x.toFixed(1); els.yInput.value = y.toFixed(1);
-      els.targetRel.textContent = x.toFixed(1) + " / " + y.toFixed(1) + " mm";
-      const pairs = s ? pairsFromSolution(s) : null;
       els.targetStatus.className = targetOk ? "good" : "bad";
-      els.targetStatus.textContent = !s ? "unreachable" : (targetOk ? "reachable · pairs " + pairs.map(v => v.toFixed(1)).join(" / ") + "°"
-        : "outside pair limits (" + pairs.map(v => v.toFixed(1)).join(" / ") + "°)");
-      els.moveBtn.disabled = !transport || !targetOk;
+      els.targetStatus.textContent = "target " + x.toFixed(0) + ", " + y.toFixed(0) + ": " + (!s ? "unreachable"
+        : targetOk ? "ok" : !inBox ? "outside design travel" : !withinPairLimits(pairs) ? "outside pair limits" : "outside operable range");
+      els.moveBtn.disabled = !transport || !targetOk || measuring || (typeof brakesEngaged !== "undefined" && brakesEngaged);
     }
     function refreshCurrent() {
       currentSolution = currentPairs ? solveFkRef(-currentPairs[0], -currentPairs[1]) : null;
-      drawPose(layers.current, currentSolution, { opacity: 1, width: 7, handle: false, labels: true });
+      const tilt = currentPairs && currentSolution ? currentPairs[2] + (currentSolution.m3Angle - reference.m3) : 0;
+      drawPose(layers.current, currentSolution, tilt, {});
       if (currentSolution) {
-        const s = currentSolution;
-        els.poseRel.textContent = (s.m3[0] - reference.x).toFixed(1) + " / " + (s.m3[1] - reference.y).toFixed(1) + " mm";
-        els.posePlate.textContent = s.m3[0].toFixed(1) + " / " + (s.m3[1] + PLATE_Y_OFFSET).toFixed(1) + " mm";
-        els.thetas.textContent = s.theta1.toFixed(2) + "° / " + s.theta2.toFixed(2) + "°";
-      } else { els.poseRel.textContent = currentPairs ? "(no FK solution)" : "–"; els.posePlate.textContent = "–"; els.thetas.textContent = "–"; }
+        const m = currentSolution.m3;
+        els.poseRel.textContent = (m[0] - CAD_HOME[0]).toFixed(1) + ", " + (m[1] - CAD_HOME[1]).toFixed(1) + " mm · tilt " + tilt.toFixed(1) + "°";
+      } else els.poseRel.textContent = currentPairs ? "(no FK solution)" : "–";
     }
 
     // pointer -> analysis frame
@@ -535,12 +570,12 @@
     svg.addEventListener("pointerdown", (ev) => {
       if (ev.button !== 0) return;
       svg.setPointerCapture(ev.pointerId); dragging = true;
-      const p = pointerToWorld(ev); refreshTarget(p[0] - reference.x, p[1] - reference.y);
+      const p = pointerToWorld(ev); refreshTarget(p[0] - CAD_HOME[0], p[1] - CAD_HOME[1]);
       if (els.liveDrag.checked && transport) { liveDirty = true; if (!liveTimer) liveTimer = setInterval(() => { if (liveDirty && targetOk) { liveDirty = false; sendMove(); } }, 250); }
     });
     svg.addEventListener("pointermove", (ev) => {
       if (!dragging) return;
-      const p = pointerToWorld(ev); refreshTarget(p[0] - reference.x, p[1] - reference.y); liveDirty = true;
+      const p = pointerToWorld(ev); refreshTarget(p[0] - CAD_HOME[0], p[1] - CAD_HOME[1]); liveDirty = true;
     });
     const endDrag = (ev) => {
       if (!dragging) return; dragging = false;
@@ -597,6 +632,9 @@
         s.motors.push(m);
       }
       if (v2) s.can = { state: r.u8(), tec: r.u16(), rec: r.u16(), busErrors: r.u32(), busOffCount: r.u32(), signalErrors: r.u32(), ackErrors: r.u32() };
+      // protocol v3: output torque sensor block after the CAN block, u8 ok + f32 Nm per motor (0x27BD)
+      for (const m of s.motors) m.sensor = null;
+      if (v2 && (p.length - r.i) >= n * 5) for (const m of s.motors) { const ok = r.u8() !== 0, nm = r.f32(); m.sensor = ok ? nm : null; }
       return s;
     }
 
@@ -608,7 +646,8 @@
     }
     function sendMove() {
       const rpm = Number(els.rpmInput.value) || 0;
-      send(T.MOVE_TO, enc.f32s(target.x, target.y, rpm));
+      const d = toDevice(target.x, target.y);
+      send(T.MOVE_TO, enc.f32s(d[0], d[1], rpm));
     }
     async function checkModulePresent() {
       if (!transport) return;
@@ -632,19 +671,19 @@
       try {
         if (f.type === T.TELEMETRY || f.type === T.STATE) onState(decodeState(f.payload), f.type === T.TELEMETRY);
         else if (f.type === T.INFO) onInfo(decodeInfo(f.payload));
-        else if (f.type === T.MOVED) { const r = new Reader(f.payload); const x = r.f32(), y = r.f32(), pairs = [r.f32(), r.f32(), r.f32()];
+        else if (f.type === T.MOVED) { const r = new Reader(f.payload); const [x, y] = fromDevice(r.f32(), r.f32()), pairs = [r.f32(), r.f32(), r.f32()];
           logLine("ok", "moving to x_rel " + x.toFixed(1) + ", y_rel " + y.toFixed(1) + " -> pairs " + pairs.map(v => v.toFixed(2)).join(" / ") + "°"); }
         else if (f.type === T.OK) { const r = new Reader(f.payload); const req = r.u8(), value = r.u32();
           logLine("ok", (REQ_NAME[req] || ("0x" + req.toString(16))) + " ok" + (req === T.SET_STREAMING ? " (period " + value + " ms)" : req === T.SET_TORQUE_LIMIT ? " (" + (torqueNm() ? pmToNm(value).toFixed(2) + " Nm = " : "") + value + " ‰ of rated on every motor)" : ""));
           if (req === T.SET_TORQUE_LIMIT) { torqueLimit = value; renderTorque(); } }
         else if (f.type === T.ERROR) { const r = new Reader(f.payload); const req = r.u8(), code = r.u32(); logLine("err", (REQ_NAME[req] || ("0x" + req.toString(16))) + " error " + code + ": " + r.rest()); }
-        else if (f.type === T.IK_RESULT) { const r = new Reader(f.payload); const x = r.f32(), y = r.f32(), reach = r.u8(), ok = r.u8(); logLine("sys", "device IK (" + x.toFixed(1) + ", " + y.toFixed(1) + "): " + (reach ? (ok ? "reachable, within limits" : "reachable, outside limits") : "unreachable")); }
+        else if (f.type === T.IK_RESULT) { const r = new Reader(f.payload); const [x, y] = fromDevice(r.f32(), r.f32()), reach = r.u8(), ok = r.u8(); logLine("sys", "device IK (" + x.toFixed(1) + ", " + y.toFixed(1) + "): " + (reach ? (ok ? "reachable, within limits" : "reachable, outside limits") : "unreachable")); }
       } catch (e) { logLine("err", "malformed frame type 0x" + f.type.toString(16) + ": " + (e.message || e)); }
     }
     function onInfo(info) {
       els.devName.textContent = info.project; els.devFw.textContent = info.fw; els.devBuild.textContent = info.build; els.devIdf.textContent = info.idf;
       geometry = info.geometry; reference = info.reference;
-      if (info.pairs.length) { limits = { min: info.pairs[0].min, max: info.pairs[0].max }; motorsMeta = info.pairs; }
+      if (info.pairs.length) { pairLimits = info.pairs.map(p => ({ min: p.min, max: p.max })); motorsMeta = info.pairs; }
       els.rpmInput.value = info.moveRpm; els.rpmInput.max = info.maxRpm;
       if (info.torqueLimit !== undefined) {
         torqueLimit = info.torqueLimit; torqueCeiling = info.torqueCeiling; ratedTorqueMnm = info.ratedTorqueMnm || 0;
@@ -654,9 +693,9 @@
         els.torqueInput.max = torqueNm() ? Number(pmToNm(torqueCeiling).toFixed(2)) : torqueCeiling;
       } else { torqueLimit = null; torqueCeiling = null; ratedTorqueMnm = 0; }
       renderTorque();
-      if (info.version < PROTOCOL_VERSION) logLine("warn", "device protocol v" + info.version + " is older than this console (v" + PROTOCOL_VERSION + "): torque limit, torque / velocity and CAN status are not available");
-      logLine("sys", "info: " + info.project + " " + info.fw + " · protocol v" + info.version + " · reference (" + reference.x + ", " + reference.y + ") · limits [" + limits.min + ", " + limits.max + "]°");
-      drawStatic(); renderPairs(); refreshTarget(target.x, target.y); refreshCurrent();
+      if (info.version < PROTOCOL_VERSION) logLine("warn", "device protocol v" + info.version + " is older than this console (v" + PROTOCOL_VERSION + "): newer readouts (torque sensor, torque limit, CAN status) may show –");
+      logLine("sys", "info: " + info.project + " " + info.fw + " · protocol v" + info.version + " · reference (" + reference.x + ", " + reference.y + ") · pair limits " + pairLimits.map(l => "[" + l.min + ", " + l.max + "]").join(" ") + "°");
+      drawStatic(); renderPairs(); renderTorques(deviceState ? deviceState.motors : null); refreshTarget(target.x, target.y); refreshCurrent();
     }
     function onState(s, isTelemetry) {
       deviceState = s; lastTelemetry = performance.now();
@@ -666,20 +705,29 @@
       if (s.flags & FLAG.TARGET_VALID) { /* keep the user's target; show the device's in the log only on change */ }
       // DS402 statusword bit 10 = target reached (profile position): clear while a move is in progress
       const moving = s.motors.some(m => m.ok && (m.statusword & 0x0400) === 0 && (m.statusword & 0x0004) !== 0);
-      els.motion.className = moving ? "good" : ""; els.motion.textContent = (moving ? "moving" : "idle") + (s.flags & FLAG.CAN_OK ? "" : " · CAN DOWN") + (s.flags & FLAG.CAN_BUS_OFF ? " · CAN BUS OFF" : "") + (s.flags & FLAG.MOTORS_OK ? "" : " · motor status missing");
-      renderPairs(); renderMotors(s.motors); renderCan(s);
+      els.motion.className = moving ? "good" : "muted"; els.motion.textContent = (moving ? "moving" : "idle") + (s.flags & FLAG.CAN_OK ? "" : " · CAN DOWN") + (s.flags & FLAG.CAN_BUS_OFF ? " · CAN BUS OFF" : "") + (s.flags & FLAG.MOTORS_OK ? "" : " · motor status missing");
+      renderPairs(); renderMotors(s.motors); renderTorques(s.motors); renderCan(s); onMeasureState(s); renderBrakes(s);
       // DS402 statusword bit 3 = Fault: offer the reset while any motor reports one
       const anyFault = s.motors.some(m => m.ok && (m.statusword & 0x0008) !== 0);
       els.resetFaultBtn.disabled = !transport || !anyFault; els.resetFaultBtn.className = anyFault ? "danger" : "";
       if (!isTelemetry) logLine("sys", "state: pairs " + s.pairs.map(v => v.toFixed(2)).join(" / ") + "° · uptime " + (s.uptime / 1000).toFixed(0) + " s");
     }
+    // The rows are built once per connection / pair layout; telemetry only refreshes the angle readouts, so an
+    // angle being typed into a pair's box is not wiped by the next telemetry frame.
+    let pairsKey = null, pairValueEls = [];
     function renderPairs() {
+      const key = (transport ? "on" : "off") + "|" + JSON.stringify(motorsMeta) + "|" + JSON.stringify(pairLimits);
+      if (key === pairsKey && pairValueEls.length === PAIR_NAMES.length) {
+        PAIR_NAMES.forEach((_, i) => { pairValueEls[i].textContent = currentPairs ? currentPairs[i].toFixed(2) + "°" : "–"; });
+        return;
+      }
+      pairsKey = key; pairValueEls = [];
       els.pairs.innerHTML = "";
       PAIR_NAMES.forEach((name, i) => {
         const meta = motorsMeta[i];
         const n = document.createElement("div"); n.className = "name"; n.textContent = name + (meta ? " (" + meta.primary + "/" + meta.secondary + ")" : ""); els.pairs.appendChild(n);
-        const v = document.createElement("div"); v.textContent = currentPairs ? currentPairs[i].toFixed(2) + "°" : "–"; els.pairs.appendChild(v);
-        const inp = document.createElement("input"); inp.type = "number"; inp.step = "1"; inp.value = "0"; inp.placeholder = "deg"; inp.style.width = "80px"; inp.min = limits.min; inp.max = limits.max;
+        const v = document.createElement("div"); v.className = "val"; v.textContent = currentPairs ? currentPairs[i].toFixed(2) + "°" : "–"; els.pairs.appendChild(v); pairValueEls.push(v);
+        const inp = document.createElement("input"); inp.type = "number"; inp.step = "1"; inp.value = "0"; inp.placeholder = "deg"; inp.style.width = "80px"; inp.min = pairLimits[i].min; inp.max = pairLimits[i].max;
         inp.title = "Pair position in degrees for Set (CLI: set " + name + " <deg>)"; els.pairs.appendChild(inp);
         const setBtn = document.createElement("button"); setBtn.textContent = "Set " + name; setBtn.disabled = !transport;
         setBtn.title = "Drive this pair alone to the angle on the left, no IK (CLI: set " + name + " <deg>) - e.g. to bring the linkage to the calibration pose before Zero";
@@ -709,24 +757,59 @@
     }
     function renderMotors(motors) {
       els.motors.innerHTML = "";
-      document.getElementById("torqueCol").textContent = torqueNm() ? "torque Nm" : "torque ‰";
       for (const m of motors) {
         const tr = document.createElement("tr");
-        const pair = motorsMeta.find(p => p.primary === m.id || p.secondary === m.id);
         const faulted = m.ok && (m.statusword & 0x0008) !== 0;
-        const cells = [m.id, pair ? pair.name : "–", m.ok ? "✓" : "✗", m.ok ? ds402StateName(m.statusword) : "–",
-                       m.ok ? "0x" + m.statusword.toString(16).padStart(4, "0") : "–",
-                       m.ok ? (m.errorCode ? "0x" + m.errorCode.toString(16).padStart(4, "0") : "none") : "–", m.tracked.toFixed(2),
-                       m.torque === null ? "–" : (torqueNm() ? pmToNm(m.torque).toFixed(2) : String(m.torque)), m.velocity === null ? "–" : m.velocity.toFixed(1)];
-        cells.forEach((c, i) => { const td = document.createElement("td"); td.textContent = c; if ((i === 2 && !m.ok) || (i === 3 && faulted)) td.className = "bad";
-          if (i === 7 && torqueLimit && m.torque !== null && Math.abs(m.torque) >= 0.9 * torqueLimit) td.className = "warn"; tr.appendChild(td); });
+        const cells = [m.id, m.ok ? ds402StateName(m.statusword) : "no reply",
+                       m.ok ? (m.errorCode ? "0x" + m.errorCode.toString(16).padStart(4, "0") : "–") : "–",
+                       m.tracked.toFixed(2), m.velocity === null ? "–" : m.velocity.toFixed(1)];
+        cells.forEach((c, i) => { const td = document.createElement("td"); td.textContent = c;
+          if (i === 1 && (!m.ok || faulted)) td.className = "bad"; if (i === 2 && m.errorCode) td.className = "bad"; tr.appendChild(td); });
+        if (m.ok) tr.title = "statusword 0x" + m.statusword.toString(16).padStart(4, "0");
         els.motors.appendChild(tr);
       }
     }
+    // Per-motor torque readouts, grouped by pair: motor side (0x6077, ‰ of rated -> Nm) and output sensor (0x27BD, Nm).
+    // "axis" = primary - secondary: the two motors of a pair face each other, so a shared push reads with opposite signs.
+    const DEFAULT_PAIRS = [{ name: "left", primary: 102, secondary: 101 }, { name: "right", primary: 104, secondary: 103 }, { name: "seat", primary: 106, secondary: 105 }];
+    let torqueEls = null, torqueKey = null;
+    function renderTorques(motors) {
+      const meta = motorsMeta.length ? motorsMeta : DEFAULT_PAIRS, key = JSON.stringify(meta);
+      if (key !== torqueKey) {
+        torqueKey = key; torqueEls = {}; els.torques.innerHTML = "";
+        for (const p of meta) {
+          const box = document.createElement("div"); box.className = "tpair";
+          box.innerHTML = '<div class="pname"></div><div class="tgrid"><span></span><span class="h">motor</span><span class="h">sensor</span></div>';
+          box.querySelector(".pname").textContent = p.name + " pair";
+          const grid = box.querySelector(".tgrid"), add = (cls, txt) => { const e = document.createElement("span"); e.className = cls; e.textContent = txt; grid.appendChild(e); return e; };
+          for (const id of [p.primary, p.secondary].sort((a, b) => a - b)) {
+            add("id", String(id)); torqueEls[id] = { motor: add("v", "–"), sensor: add("v", "–") };
+          }
+          add("axis", "axis"); torqueEls["axis" + p.name] = { motor: add("axis v", "–"), sensor: add("axis v", "–") };
+          els.torques.appendChild(box);
+        }
+      }
+      const byId = (id) => motors ? motors.find(m => m.id === id) : null;
+      const motorNm = (m) => !m || m.torque === null ? null : (torqueNm() ? pmToNm(m.torque) : m.torque);
+      const sensorNm = (m) => !m || m.sensor === null || m.sensor === undefined ? null : m.sensor;
+      const fmt = (v) => v === null ? "–" : (torqueNm() ? v.toFixed(2) : String(Math.round(v)) + " ‰");
+      for (const p of meta) {
+        const a = byId(p.primary), b = byId(p.secondary);
+        for (const m of [a, b]) if (m && torqueEls[m.id]) {
+          torqueEls[m.id].motor.textContent = fmt(motorNm(m));
+          torqueEls[m.id].motor.className = "v" + (torqueLimit && m.torque !== null && Math.abs(m.torque) >= 0.9 * torqueLimit ? " warn" : "");
+          torqueEls[m.id].sensor.textContent = sensorNm(m) === null ? "–" : sensorNm(m).toFixed(2);
+        }
+        const ax = torqueEls["axis" + p.name], ma = motorNm(a), mb = motorNm(b), sa = sensorNm(a), sb = sensorNm(b);
+        ax.motor.textContent = ma === null || mb === null ? "–" : fmt(ma - mb);
+        ax.sensor.textContent = sa === null || sb === null ? "–" : (sa - sb).toFixed(2);
+      }
+    }
     function renderTorque() {
-      if (torqueLimit === null) els.torqueNow.textContent = "device: – (protocol v1: no torque limit)";
-      else if (torqueNm()) els.torqueNow.textContent = "device: " + pmToNm(torqueLimit).toFixed(2) + " Nm (" + torqueLimit + " ‰ of the rated " + (ratedTorqueMnm / 1000).toFixed(2) + " Nm; ceiling " + pmToNm(torqueCeiling).toFixed(2) + " Nm)";
-      else els.torqueNow.textContent = "device: " + torqueLimit + " ‰ of rated (ceiling " + torqueCeiling + " ‰; the rated torque is not known yet, so no Nm)";
+      if (torqueLimit === null) els.torqueNow.textContent = "limit –";
+      else if (torqueNm()) els.torqueNow.textContent = "limit " + pmToNm(torqueLimit).toFixed(2) + " Nm (" + torqueLimit + " ‰)";
+      else els.torqueNow.textContent = "limit " + torqueLimit + " ‰";
+      els.torqueNow.title = torqueCeiling === null ? "" : "Max torque 0x6072 on every motor; ceiling " + (torqueNm() ? pmToNm(torqueCeiling).toFixed(2) + " Nm" : torqueCeiling + " ‰");
       els.torqueBtn.disabled = !transport || torqueLimit === null;
     }
     function renderCan(s) {
@@ -746,6 +829,96 @@
       els.telemAge.textContent = age > 3 ? "telemetry stale (" + (isFinite(age) ? age.toFixed(0) + " s" : "none yet") + ")" : "live";
       els.telemAge.style.color = age > 3 ? "var(--warn)" : "var(--ok)";
     }, 500);
+
+    // ======================= Measure mode =======================
+    // Drives off, brakes holding, every drive in the chosen mode; the firmware keeps polling the
+    // output torque sensors (0x27BD) with the telemetry. The trend plots each axis's sensor sum.
+    let measuring = false, measureBusy = false;
+    const TREND_S = 30, trend = []; // { t, axes: [left, right, seat] | null per axis, pose, tilt }
+    const captures = [];
+    function axisSums(motors) {
+      const meta = motorsMeta.length ? motorsMeta : DEFAULT_PAIRS;
+      return meta.map(p => { const a = motors.find(m => m.id === p.primary), b = motors.find(m => m.id === p.secondary);
+        return a && b && a.sensor != null && b.sensor != null ? a.sensor - b.sensor : null; });
+    }
+    function onMeasureState(s) {
+      const on = !!(s.flags & FLAG.MEASURING);
+      if (on !== measuring) logLine(on ? "warn" : "ok", on ? "measure mode ON: drives off, brakes holding" : "measure mode off: drives enabled");
+      measuring = on; renderMeasure();
+      const now = performance.now() / 1000;
+      trend.push({ t: now, axes: axisSums(s.motors), pose: currentSolution ? [currentSolution.m3[0] - CAD_HOME[0], currentSolution.m3[1] - CAD_HOME[1]] : null,
+                   tilt: currentPairs && currentSolution ? currentPairs[2] + (currentSolution.m3Angle - reference.m3) : null });
+      while (trend.length && trend[0].t < now - TREND_S) trend.shift();
+      drawTrend();
+    }
+    function renderMeasure() {
+      els.measureBtn.disabled = !transport || measureBusy;
+      els.measureBtn.textContent = measuring ? "Exit measure mode (re-enable drives)" : "Enter measure mode";
+      els.measureBtn.className = measuring ? "primary" : "";
+      els.measureMode.disabled = measuring;
+      els.measureState.className = "mpill" + (measuring ? " on" : "");
+      els.measureState.textContent = measuring ? "ON · brakes holding · moves blocked" : "off";
+      els.measurePanel.classList.toggle("on", measuring);
+      els.captureBtn.disabled = !transport || !trend.length;
+      els.copyCsvBtn.disabled = els.clearCapBtn.disabled = !captures.length;
+      for (const b of [els.moveBtn, els.homeBtn, els.tiltBtn]) if (measuring) b.disabled = true;
+    }
+    function drawTrend() {
+      const c = els.trend, dpr = window.devicePixelRatio || 1, w = c.clientWidth || 800, h = c.clientHeight || 190;
+      if (c.width !== Math.round(w * dpr)) { c.width = Math.round(w * dpr); c.height = Math.round(h * dpr); }
+      const g = c.getContext("2d"); g.setTransform(dpr, 0, 0, dpr, 0, 0); g.clearRect(0, 0, w, h);
+      const css = (v) => getComputedStyle(document.documentElement).getPropertyValue(v).trim();
+      const colors = [css("--link1"), css("--link2"), css("--link4")];
+      let max = 1; for (const p of trend) for (const v of p.axes) if (v != null) max = Math.max(max, Math.abs(v));
+      max = Math.ceil(max * 1.15);
+      const L = 44, R = 8, T = 8, B = 18, now = trend.length ? trend[trend.length - 1].t : 0;
+      const X = (t) => L + (w - L - R) * (1 - (now - t) / TREND_S), Y = (v) => T + (h - T - B) * (0.5 - v / (2 * max));
+      g.font = "11px ui-sans-serif, system-ui, sans-serif"; g.fillStyle = "#6b7885"; g.strokeStyle = "#1c242c"; g.lineWidth = 1;
+      for (const v of [-max, -max / 2, 0, max / 2, max]) { g.beginPath(); g.moveTo(L, Y(v)); g.lineTo(w - R, Y(v)); g.strokeStyle = v === 0 ? "#2f3d4a" : "#1c242c"; g.stroke();
+        g.fillText((Math.abs(v) < 10 ? v.toFixed(1) : v.toFixed(0)), 4, Y(v) + 4); }
+      for (let s = 0; s <= TREND_S; s += 10) g.fillText("-" + s + " s", X(now - s) - 14, h - 4);
+      colors.forEach((col, k) => { g.strokeStyle = col; g.lineWidth = 2; g.beginPath(); let pen = false;
+        for (const p of trend) { const v = p.axes[k]; if (v == null) { pen = false; continue; } pen ? g.lineTo(X(p.t), Y(v)) : g.moveTo(X(p.t), Y(v)); pen = true; }
+        g.stroke(); });
+      if (!trend.some(p => p.axes.some(v => v != null))) { g.fillStyle = "#6b7885"; g.fillText("no sensor readings yet (\u2013 in the torque table = the sensor did not answer)", L + 8, T + 16); }
+    }
+    function capture() {
+      const now = performance.now() / 1000, win = trend.filter(p => p.t >= now - 1.0);
+      if (!win.length) return;
+      const avg = [0, 1, 2].map(k => { const v = win.map(p => p.axes[k]).filter(x => x != null); return v.length ? v.reduce((a, b) => a + b, 0) / v.length : null; });
+      const last = win[win.length - 1];
+      const perMotor = deviceState ? deviceState.motors.map(m => [m.id, m.sensor]) : [];
+      captures.push({ n: captures.length + 1, time: new Date().toLocaleTimeString(), measuring, pose: last.pose, tilt: last.tilt, avg, perMotor, samples: win.length });
+      renderCaptures(); logLine("ok", "captured #" + captures.length + ": axes " + avg.map(v => v == null ? "–" : v.toFixed(2)).join(" / ") + " Nm (" + win.length + " samples)");
+    }
+    function renderCaptures() {
+      const body = els.captures.querySelector("tbody"); body.innerHTML = "";
+      els.captures.style.display = captures.length ? "" : "none";
+      const f = (v, d = 1) => v == null ? "–" : v.toFixed(d);
+      for (const c of captures) { const tr = document.createElement("tr");
+        [c.n + (c.measuring ? "" : "*"), f(c.pose && c.pose[0]), f(c.pose && c.pose[1]), f(c.tilt), f(c.avg[0], 2), f(c.avg[1], 2), f(c.avg[2], 2)]
+          .forEach(v => { const td = document.createElement("td"); td.textContent = v; tr.appendChild(td); }); body.appendChild(tr); }
+      renderMeasure();
+    }
+    function capturesCsv() {
+      const ids = captures.length ? captures[0].perMotor.map(p => p[0]) : [];
+      const head = ["n", "time", "measure_mode", "x_rel_mm", "y_rel_mm", "tilt_deg", "left_axis_Nm", "right_axis_Nm", "seat_axis_Nm", ...ids.map(i => "sensor_" + i + "_Nm"), "samples"];
+      const rows = captures.map(c => [c.n, c.time, c.measuring ? 1 : 0, c.pose ? c.pose[0].toFixed(2) : "", c.pose ? c.pose[1].toFixed(2) : "",
+        c.tilt == null ? "" : c.tilt.toFixed(2), ...c.avg.map(v => v == null ? "" : v.toFixed(3)),
+        ...ids.map(i => { const p = c.perMotor.find(q => q[0] === i); return p && p[1] != null ? p[1].toFixed(3) : ""; }), c.samples]);
+      return [head, ...rows].map(r => r.join(",")).join("\n");
+    }
+    els.measureBtn.addEventListener("click", () => {
+      if (!measuring && !window.confirm("Enter measure mode? Every drive is switched OFF so the brakes hold the seat. If a pair moves more than 0.5° the firmware re-enables the drives. Keep a hand near the seat the first time.")) return;
+      measureBusy = true; renderMeasure(); setTimeout(() => { measureBusy = false; renderMeasure(); }, 2500);
+      send(T.SET_MEASURE, new Uint8Array([measuring ? 0 : 1, Number(els.measureMode.value)]));
+    });
+    els.captureBtn.addEventListener("click", capture);
+    els.clearCapBtn.addEventListener("click", () => { captures.length = 0; renderCaptures(); });
+    els.copyCsvBtn.addEventListener("click", async () => {
+      try { await navigator.clipboard.writeText(capturesCsv()); logLine("ok", "copied " + captures.length + " capture(s) as CSV"); }
+      catch (e) { logLine("err", "copy failed: " + (e.message || e)); }
+    });
 
     function startStream() { send(T.SET_STREAMING, enc.streaming(true, Number(els.periodInput.value) || 200)); }
     function stopStream() { send(T.SET_STREAMING, enc.streaming(false, Number(els.periodInput.value) || 200)); }
@@ -800,13 +973,15 @@
       if (!on) { torqueLimit = null; torqueCeiling = null; ratedTorqueMnm = 0; els.torqueInput.value = ""; els.canState.textContent = "–"; els.canCounters.textContent = "–"; els.canState.className = ""; els.canCounters.className = ""; }
       renderTorque();
       renderPairs();
+      if (!on) measuring = false;
+      renderMeasure();
     }
 
     els.connectUsbBtn.addEventListener("click", () => connect("usb"));
     els.connectSerialBtn.addEventListener("click", () => connect("serial"));
     els.disconnectBtn.addEventListener("click", disconnect);
     els.moveBtn.addEventListener("click", () => { refreshTarget(Number(els.xInput.value) || 0, Number(els.yInput.value) || 0); if (targetOk) sendMove(); else logLine("warn", "not sent: " + els.targetStatus.textContent); });
-    els.homeBtn.addEventListener("click", () => { refreshTarget(0, 0); send(T.HOME, enc.f32s(Number(els.rpmInput.value) || 0)); });
+    els.homeBtn.addEventListener("click", () => { refreshTarget(0, 0); if (targetOk) sendMove(); else logLine("warn", "home not sent: " + els.targetStatus.textContent); });
     els.stopBtn.addEventListener("click", () => send(T.STOP));
     els.zeroAllBtn.addEventListener("click", () => send(T.ZERO, enc.zero(ALL_PAIRS, false)));
     els.zeroAlignAllBtn.addEventListener("click", () => { if (window.confirm("Zero-align ALL pairs? Every motor will MOVE to its encoder zero, then all pairs are zeroed. Do this at the calibration pose.")) send(T.ZERO, enc.zero(ALL_PAIRS, true)); });
@@ -823,7 +998,21 @@
       send(T.SET_TORQUE_LIMIT, enc.torqueLimit(v));
     });
     els.torqueInput.addEventListener("keydown", (ev) => { if (ev.key === "Enter") els.torqueBtn.click(); });
-    els.releaseBtn.addEventListener("click", () => { if (window.confirm("Release all motor brakes? The seat will be free to move.")) send(T.RELEASE); });
+    // Brake toggle: engaged (or any drive switched off) -> offer Release; enabled -> offer Engage
+    let brakesEngaged = false;
+    function renderBrakes(s) {
+      const driveOff = !!s && s.motors.some(m => m.ok && (m.statusword & 0x006F) !== 0x0027);
+      brakesEngaged = !!s && (!!(s.flags & FLAG.BRAKES) || !!(s.flags & FLAG.MEASURING) || driveOff);
+      els.releaseBtn.textContent = brakesEngaged ? "Release brakes" : "Engage brakes & stop";
+      els.releaseBtn.className = brakesEngaged ? "primary" : "danger";
+      if (brakesEngaged) for (const b of [els.moveBtn, els.homeBtn, els.tiltBtn]) b.disabled = true;
+      else if (transport && !measuring) { els.homeBtn.disabled = false; els.tiltBtn.disabled = false; els.moveBtn.disabled = !targetOk; }
+    }
+    els.releaseBtn.addEventListener("click", () => {
+      if (brakesEngaged) {
+        if (window.confirm("Release the brakes? The drives switch on and hold the seat where it is.")) send(T.RELEASE);
+      } else send(T.ENGAGE); // the safe direction: no confirmation
+    });
     els.resetFaultBtn.addEventListener("click", () => { logLine("tx", "reset fault on every faulted motor, then re-enable"); send(T.RESET_FAULT); });
     if (!navigator.usb) els.connectUsbBtn.disabled = true;
     if (!navigator.serial) els.connectSerialBtn.disabled = true;
@@ -832,9 +1021,10 @@
       navigator.usb.addEventListener("disconnect", (e) => { if (transport instanceof UsbTransport && e.device === transport.device) { logLine("err", "device disconnected"); onLinkLost(); } });
 
     // Offline: the drawing works as a visualizer with the documented geometry.
-    drawStatic(); renderPairs(); refreshTarget(0, 0);
-    currentPairs = [0, 0, 0]; refreshCurrent(); currentPairs = null; // show the reference pose until the device reports
-    logLine("sys", "Ready. Connect a STEM device, or drag in the drawing to explore the IK offline (reference pose shown).");
+    drawStatic(); renderPairs(); renderTorques(null); refreshTarget(0, 0); drawTrend(); renderMeasure();
+    { const h = solveIk(CAD_HOME[0], CAD_HOME[1]); currentPairs = pairsFromSolution(applyRef(h, reference)); } // show the CAD home until the device reports
+    refreshCurrent(); currentPairs = null;
+    logLine("sys", "Ready. Connect a STEM device, or drag in the drawing to explore offline (CAD home shown).");
   </script>
 </body>
 </html>

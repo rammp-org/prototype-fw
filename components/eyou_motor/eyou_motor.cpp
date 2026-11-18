@@ -2,6 +2,7 @@
 
 #include <algorithm>
 #include <cmath>
+#include <cstring>
 #include <limits>
 
 #include "freertos/task.h"
@@ -19,6 +20,8 @@ constexpr uint16_t kModesOfOperationIndex = 0x6060;
 constexpr uint16_t kModesOfOperationDisplayIndex = 0x6061;
 constexpr uint16_t kPositionActualIndex = 0x6064;
 constexpr uint16_t kTargetPositionIndex = 0x607A;
+constexpr uint16_t kTargetVelocityIndex = 0x60FF;
+constexpr uint16_t kHeartbeatConsumerIndex = 0x1016;
 constexpr uint16_t kProfileVelocityIndex = 0x6081;
 constexpr uint16_t kProfileAccelerationIndex = 0x6083;
 constexpr uint16_t kProfileDecelerationIndex = 0x6084;
@@ -28,6 +31,9 @@ constexpr uint16_t kRatedCurrentIndex = 0x6075;
 constexpr uint16_t kRatedTorqueIndex = 0x6076;
 constexpr uint16_t kTorqueActualIndex = 0x6077;
 constexpr uint16_t kCurrentActualIndex = 0x6078;
+// Force-controlled (-F) joints only: the output torque sensor, REAL (IEEE-754 float) in Nm,
+// read-only (CANopen manual v1.04+, object 0x27BD "Torque Value").
+constexpr uint16_t kSensorTorqueIndex = 0x27BD;
 constexpr uint16_t kControlwordHalt = 0x0100;
 constexpr uint16_t kControlwordShutdown = 0x0006;
 constexpr uint16_t kControlwordSwitchOn = 0x0007;
@@ -601,6 +607,30 @@ bool EyouMotor::move_absolute(float target_degrees, bool immediate) {
   return false;
 }
 
+bool EyouMotor::retarget(float target_degrees, float velocity_degrees_per_second) {
+  std::lock_guard<std::mutex> lock(transaction_mutex_);
+  const float limited_target_degrees =
+      std::clamp(target_degrees, minimum_position_degrees_, maximum_position_degrees_);
+  int32_t target_pulses = 0;
+  uint32_t velocity = 0;
+  if (!degrees_to_pulses(limited_target_degrees, target_pulses) ||
+      !degrees_to_profile_units(std::max(velocity_degrees_per_second, 0.05f), velocity)) {
+    return false;
+  }
+  const int64_t absolute_pulses =
+      static_cast<int64_t>(target_pulses) + zero_offset_pulses_.value_or(0);
+  if (absolute_pulses < std::numeric_limits<int32_t>::min() ||
+      absolute_pulses > std::numeric_limits<int32_t>::max()) {
+    return false;
+  }
+  // No enable / mode checks (the trajectory's first set-point went through
+  // move_absolute): a faulted or disabled drive does not acknowledge the
+  // set-point below, which fails this call and stops the trajectory.
+  return send_sdo_u32(kProfileVelocityIndex, velocity) &&
+         send_sdo_u32(kTargetPositionIndex, static_cast<uint32_t>(static_cast<int32_t>(absolute_pulses))) &&
+         trigger_profile_position(false, true);
+}
+
 bool EyouMotor::move_incremental(float increment_degrees, bool immediate) {
   std::lock_guard<std::mutex> lock(transaction_mutex_);
   int32_t increment_pulses = 0;
@@ -719,6 +749,74 @@ bool EyouMotor::is_faulted_unlocked(uint32_t timeout_ms) {
     return true;
   }
   return (raw_statusword & 0x0008) != 0;
+}
+
+bool EyouMotor::wait_for_mode_unlocked(int8_t mode, uint32_t timeout_ms) {
+  const TickType_t timeout_ticks = pdMS_TO_TICKS(timeout_ms);
+  const TickType_t start_tick = xTaskGetTickCount();
+  uint32_t raw_mode = 0;
+  do {
+    if (request_sdo_u32(kModesOfOperationDisplayIndex, 0x4F, raw_mode, 100) &&
+        static_cast<int8_t>(raw_mode) == mode) {
+      return true;
+    }
+    vTaskDelay(pdMS_TO_TICKS(10));
+  } while (xTaskGetTickCount() - start_tick < timeout_ticks);
+  logger_.error("Timed out switching to mode {} (display {})", static_cast<int>(mode),
+                static_cast<int>(static_cast<int8_t>(raw_mode)));
+  return false;
+}
+
+bool EyouMotor::start_velocity_mode(float acceleration_degrees_per_second_squared,
+                                    uint32_t timeout_ms) {
+  std::lock_guard<std::mutex> lock(transaction_mutex_);
+  uint32_t acceleration = 0;
+  if (!degrees_to_profile_units(acceleration_degrees_per_second_squared, acceleration)) {
+    return false;
+  }
+  // target velocity 0 BEFORE the mode change: the drive must not start moving
+  // at a stale 0x60FF the moment it enters PV
+  return send_sdo_u32(kTargetVelocityIndex, 0) &&
+         send_sdo_u32(kProfileAccelerationIndex, acceleration) &&
+         send_sdo_u32(kProfileDecelerationIndex, acceleration) &&
+         send_sdo_u8(kModesOfOperationIndex, 3) && wait_for_mode_unlocked(3, timeout_ms) &&
+         ensure_operation_enabled(timeout_ms) &&
+         send_sdo_u16(kControlwordIndex, kControlwordEnableOperation); // halt bit clear
+}
+
+bool EyouMotor::set_target_velocity(float velocity_degrees_per_second) {
+  std::lock_guard<std::mutex> lock(transaction_mutex_);
+  int32_t pulses_per_second = 0;
+  if (!degrees_to_pulses(velocity_degrees_per_second, pulses_per_second)) {
+    return false;
+  }
+  return send_sdo_u32(kTargetVelocityIndex, static_cast<uint32_t>(pulses_per_second));
+}
+
+bool EyouMotor::hold_position(uint32_t timeout_ms) {
+  std::lock_guard<std::mutex> lock(transaction_mutex_);
+  // stop commanding speed, then profile position with the set-point where the
+  // drive is: entering PP holds there (a PP move needs a new-set-point edge)
+  send_sdo_u32(kTargetVelocityIndex, 0);
+  uint32_t raw_position = 0;
+  if (!request_sdo_u32(kPositionActualIndex, 0x43, raw_position, 100) ||
+      !send_sdo_u32(kTargetPositionIndex, raw_position) ||
+      !send_sdo_u8(kModesOfOperationIndex, 1) || !wait_for_mode_unlocked(1, timeout_ms)) {
+    return false;
+  }
+  return ensure_operation_enabled(timeout_ms) &&
+         send_sdo_u16(kControlwordIndex, kControlwordEnableOperation); // halt bit clear
+}
+
+bool EyouMotor::set_heartbeat_consumer(uint8_t producer_node_id, uint16_t timeout_ms) {
+  std::lock_guard<std::mutex> lock(transaction_mutex_);
+  const uint32_t value = (static_cast<uint32_t>(producer_node_id) << 16) | timeout_ms;
+  return send_sdo_u32(kHeartbeatConsumerIndex, value, 1);
+}
+
+bool EyouMotor::set_operating_mode(int8_t mode, uint32_t timeout_ms) {
+  std::lock_guard<std::mutex> lock(transaction_mutex_);
+  return send_sdo_u8(kModesOfOperationIndex, static_cast<uint8_t>(mode), 0, timeout_ms);
 }
 
 bool EyouMotor::get_operating_mode(int8_t &mode, uint32_t timeout_ms) {
@@ -873,6 +971,22 @@ bool EyouMotor::get_torque(int16_t &torque_permille, uint32_t timeout_ms) {
     return false;
   }
   torque_permille = static_cast<int16_t>(std::clamp<int32_t>(value, INT16_MIN, INT16_MAX));
+  return true;
+}
+
+bool EyouMotor::get_sensor_torque(float &torque_nm, uint32_t timeout_ms) {
+  std::lock_guard<std::mutex> lock(transaction_mutex_);
+  uint32_t raw = 0;
+  uint8_t size = 0;
+  if (!request_sdo_expedited(kSensorTorqueIndex, 0, raw, size, timeout_ms) || size != 4) {
+    return false;
+  }
+  float value = 0.0f;
+  std::memcpy(&value, &raw, sizeof(value)); // REAL: the 4 data bytes are an IEEE-754 float
+  if (!std::isfinite(value)) {
+    return false;
+  }
+  torque_nm = value;
   return true;
 }
 

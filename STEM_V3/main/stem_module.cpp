@@ -65,6 +65,8 @@ std::vector<uint8_t> StemModule::error_for(Msg request, Result result, const std
     errc = std::errc::io_error;
     break;
   case Result::ZeroMismatch:
+  case Result::Measuring:
+  case Result::BrakesEngaged:
     errc = std::errc::operation_not_permitted;
     break;
   case Result::InvalidArgument:
@@ -92,8 +94,8 @@ std::vector<uint8_t> StemModule::build_info(Transport transport) const {
     proto::put_str(payload, to_string(static_cast<Pair>(i)));
     payload.push_back(pairs[i]->primary_id());
     payload.push_back(pairs[i]->secondary_id());
-    proto::put_f32(payload, cfg.min_deg);
-    proto::put_f32(payload, cfg.max_deg);
+    proto::put_f32(payload, cfg.min_deg[i]);
+    proto::put_f32(payload, cfg.max_deg[i]);
   }
 
   const auto &g = cfg.geometry;
@@ -159,6 +161,10 @@ std::vector<uint8_t> StemModule::build_state_frame(Msg type, const State &state,
     flags |= proto::flags::kCanOk;
   if (state.can.bus_off)
     flags |= proto::flags::kCanBusOff;
+  if (state.measuring)
+    flags |= proto::flags::kMeasuring;
+  if (state.brakes_engaged)
+    flags |= proto::flags::kBrakesEngaged;
   payload.push_back(flags);
   proto::put_f32(payload, state.target_x);
   proto::put_f32(payload, state.target_y);
@@ -186,6 +192,11 @@ std::vector<uint8_t> StemModule::build_state_frame(Msg type, const State &state,
   proto::put_u32(payload, state.can.bus_off_count);
   proto::put_u32(payload, state.can.signal_errors);
   proto::put_u32(payload, state.can.ack_errors);
+  // v3 torque sensor block (after the CAN block, so a v2 host is unaffected)
+  for (const auto &motor : state.motors) {
+    payload.push_back(motor.sensor_ok ? 1 : 0);
+    proto::put_f32(payload, motor.sensor_torque_nm);
+  }
   return proto::build(type, payload);
 }
 
@@ -300,6 +311,26 @@ void StemModule::handle_frame(const espp::stream_frame::Frame &frame, Transport 
 
   case Msg::Release:
     reply_result(controller.release_brakes() ? Result::Ok : Result::ActuatorFailed, "release");
+    break;
+
+  case Msg::SetMeasure: {
+    const auto enable = proto::get_u8_at(payload, 0);
+    const auto mode = payload.size() >= 2 ? proto::get_u8_at(payload, 1) : std::optional<uint8_t>{13};
+    if ((payload.size() != 1 && payload.size() != 2) || !enable || !mode) {
+      bad_args("SET_MEASURE needs u8 enable, optional u8 drive mode (13 or 1)");
+      break;
+    }
+    const Result result = controller.set_measure_mode(*enable != 0, static_cast<int8_t>(*mode));
+    if (result == Result::Ok)
+      send(proto::make_ok(request, *enable ? *mode : 0));
+    else
+      send(error_for(request, result,
+                     *enable ? "measure mode refused (see the device log)" : "measure mode exit"));
+    break;
+  }
+
+  case Msg::Engage:
+    reply_result(controller.engage_brakes() ? Result::Ok : Result::ActuatorFailed, "engage brakes");
     break;
 
   case Msg::ResetFault:

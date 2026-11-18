@@ -148,6 +148,36 @@ bool PairedEyouActuator::set_position(float position_degrees, bool immediate) {
   return true;
 }
 
+bool PairedEyouActuator::retarget(float position_degrees, float velocity_degrees_per_second) {
+  const bool primary_ok = primary_.retarget(position_degrees, velocity_degrees_per_second);
+  const bool secondary_ok = secondary_.retarget(-position_degrees, velocity_degrees_per_second);
+  return primary_ok && secondary_ok;
+}
+
+bool PairedEyouActuator::start_velocity_mode(float acceleration_degrees_per_second_squared) {
+  const bool primary_ok = primary_.start_velocity_mode(acceleration_degrees_per_second_squared);
+  const bool secondary_ok = secondary_.start_velocity_mode(acceleration_degrees_per_second_squared);
+  return primary_ok && secondary_ok;
+}
+
+bool PairedEyouActuator::set_velocity(float velocity_degrees_per_second) {
+  const bool primary_ok = primary_.set_target_velocity(velocity_degrees_per_second);
+  const bool secondary_ok = secondary_.set_target_velocity(-velocity_degrees_per_second);
+  return primary_ok && secondary_ok;
+}
+
+bool PairedEyouActuator::hold_position() {
+  const bool primary_ok = primary_.hold_position();
+  const bool secondary_ok = secondary_.hold_position();
+  return primary_ok && secondary_ok;
+}
+
+bool PairedEyouActuator::set_profile_position_config(const EyouMotor::ProfilePositionConfig &config) {
+  const bool primary_ok = primary_.set_profile_position_config(config);
+  const bool secondary_ok = secondary_.set_profile_position_config(config);
+  return primary_ok && secondary_ok;
+}
+
 bool PairedEyouActuator::move_incremental(float increment_degrees, bool immediate) {
   // Read the pair, then command absolute targets: EyouMotor::move_absolute
   // clamps to the configured limits, EyouMotor::move_incremental does not.

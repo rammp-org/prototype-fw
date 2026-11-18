@@ -46,7 +46,9 @@ static constexpr uint8_t kModule = 7;
 /// the torque limit + ceiling in INFO, torque / velocity per motor and a CAN
 /// controller block appended to STATE / TELEMETRY (a v1 host that stops reading
 /// after the motor records still decodes everything it knew).
-static constexpr uint8_t kProtocolVersion = 2;
+/// v3 (2026-11): output torque sensor block (0x27BD, -F joints) appended to
+/// STATE / TELEMETRY after the CAN block (a v2 host stops before it).
+static constexpr uint8_t kProtocolVersion = 3;
 
 /// Actuator pair indices used in payloads.
 enum class Pair : uint8_t { Left = 0, Right = 1, Seat = 2 };
@@ -78,6 +80,11 @@ enum class Msg : uint8_t {
   SetTorqueLimit = 0x1B, ///< u16 permille of rated torque, every motor (<= the INFO ceiling) ->
   ResetFault = 0x1C, ///< no payload: clear the DS402 fault of every faulted motor and re-enable its
                      ///< pair -> Ok(0) | Error
+  SetMeasure = 0x1D, ///< u8 enable, u8 drive mode while measuring (13 CSF / 1 PP; optional, 13)
+                     ///< -> Ok(mode) | Error. Measure mode: drives disabled, brakes hold the
+                     ///< pose, the output torque sensors (0x27BD) read the load; moves refused.
+  Engage = 0x1E, ///< no payload: stop, drives off so the brakes hold; moves refused until Release
+                 ///< -> Ok(0) | Error
                      ///< Ok(permille) | Error
   // --- Generic replies (device -> host) --------------------------------------
   Ok = 0x81,    ///< u8 request type, u32 value
@@ -119,6 +126,9 @@ enum class Msg : uint8_t {
 //   check): u8 can state (see can_state:: below), u16 TEC, u16 REC,
 //       u32 bus errors since start, u32 bus-off count since start,
 //       u32 stuff+form+bit errors (signal integrity), u32 ack errors (nobody heard us)
+//   v3 torque sensor block, one record per motor in the same order as the motor
+//   records: u8 sensor ok, f32 output torque Nm (0x27BD; 0 when !ok - a non -F
+//   joint, or a read that failed)
 //
 // IkResult payload:
 //   f32 x_rel, f32 y_rel (echo), u8 reachable, u8 within limits
@@ -133,6 +143,8 @@ static constexpr uint8_t kMotorsOk = 1 << 3;    ///< every motor answered its st
 static constexpr uint8_t kCanOk = 1 << 4;       ///< the CAN bus started
 static constexpr uint8_t kCanBusOff = 1
                                       << 5; ///< v2: the controller left the bus (see the CAN block)
+static constexpr uint8_t kMeasuring = 1 << 6; ///< measure mode: brakes hold, sensors read
+static constexpr uint8_t kBrakesEngaged = 1 << 7; ///< Engage: drives off until Release
 } // namespace flags
 
 /// v2: the CAN controller's error state (TWAI), as the CAN block's first byte.

@@ -25,3 +25,7 @@ flags=(-std=c++20 -Wall -Wextra -I ../main)
 "$out/kinematics"
 "$CXX" "${flags[@]}" -I "$stream_frame_inc" -o "$out/protocol" protocol_host_test.cpp
 "$out/protocol"
+"$CXX" "${flags[@]}" -o "$out/operable_range" operable_range_host_test.cpp
+"$out/operable_range"
+"$CXX" "${flags[@]}" -o "$out/level_trajectory" level_trajectory_host_test.cpp ../main/ik_5bar.cpp
+"$out/level_trajectory"

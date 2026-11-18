@@ -58,6 +58,16 @@ public:
   bool get_status(Status &status, uint32_t timeout_ms = 100);
   bool set_position(float position_degrees, bool immediate = true);
   bool move_incremental(float increment_degrees, bool immediate = true);
+  // Trajectory streaming (EyouMotor::retarget on both, the secondary mirrored):
+  // new target + profile velocity, applied immediately without stopping.
+  bool retarget(float position_degrees, float velocity_degrees_per_second);
+  // Profile velocity / acceleration / deceleration on both motors (no mode change).
+  bool set_profile_position_config(const EyouMotor::ProfilePositionConfig &config);
+  // Streamed moves in profile velocity mode (EyouMotor::start_velocity_mode /
+  // set_target_velocity / hold_position on both, the secondary mirrored).
+  bool start_velocity_mode(float acceleration_degrees_per_second_squared);
+  bool set_velocity(float velocity_degrees_per_second);
+  bool hold_position();
 
   uint8_t primary_id() const { return primary_.node_id(); }
   uint8_t secondary_id() const { return secondary_.node_id(); }

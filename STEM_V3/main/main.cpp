@@ -17,6 +17,7 @@
 #include <chrono>
 #include <cmath>
 #include <condition_variable>
+#include <atomic>
 #include <deque>
 #include <functional>
 #include <memory>
@@ -106,6 +107,14 @@ constexpr size_t kMaxQueuedRxBytes = 8 * espp::stream_frame::kMaxFrameSize;
 // endpoint (tab closed / frozen): pause the stream instead of flooding a full
 // FIFO and burying the next connect's replies.
 constexpr auto kTelemetryStallTimeout = 2s;
+// CANopen heartbeat from this board (COB 0x700 + id, state 5 = operational).
+// Every actuator is a heartbeat consumer of it (0x1016): if the board stops
+// talking (crash, reset, cable) for kHeartbeatTimeoutMs the drives raise a
+// fault and stop - needed now that pose moves stream speeds (velocity mode).
+constexpr uint8_t kHeartbeatNodeId = 0x7F;
+constexpr auto kHeartbeatPeriod = 50ms;
+constexpr uint16_t kHeartbeatTimeoutMs = 300;
+std::atomic<bool> heartbeat_enabled{true}; // CLI `heartbeat 0` pauses it (watchdog test)
 
 void print_solution(std::ostream &out, const stem::IkSolution &s) {
   out << "M3=(" << s.m3[0] << ", " << s.m3[1] << ")\n"
@@ -223,6 +232,22 @@ std::unique_ptr<cli::Menu> make_cli_menu(stem::StemController &controller,
         out << "home: " << stem::StemController::to_string(controller.home(0.0f)) << "\n";
       },
       "Move to the home position (reference pose): home");
+  menu->Insert(
+      "heartbeat",
+      [](std::ostream &out, int on) {
+        heartbeat_enabled.store(on != 0);
+        out << "heartbeat " << (on ? "ON" : "PAUSED (drives should fault within 300 ms)") << "\n";
+      },
+      "Pause / resume this board's CANopen heartbeat (watchdog test): heartbeat <0|1>");
+  menu->Insert(
+      "measure",
+      [&controller](std::ostream &out, int on, int mode) {
+        out << "measure " << (on ? "on" : "off") << ": "
+            << stem::StemController::to_string(
+                   controller.set_measure_mode(on != 0, static_cast<int8_t>(mode)))
+            << "\n";
+      },
+      "Measure mode (drives off, brakes hold, torque sensors read): measure <1|0> <mode 13|1>");
   menu->Insert(
       "tilt",
       [&controller](std::ostream &out, float tilt_deg) {
@@ -392,6 +417,13 @@ std::unique_ptr<cli::Menu> make_cli_menu(stem::StemController &controller,
                                             : "Failed to release some brakes.\n");
       },
       "Release brakes for all actuator pairs: release");
+  menu->Insert(
+      "engage",
+      [&controller](std::ostream &out) {
+        out << (controller.engage_brakes() ? "Brakes engaged: drives off, moves refused until release.\n"
+                                           : "Engage: a drive did not confirm (see the log).\n");
+      },
+      "Stop and engage the brakes (drives off) until release: engage");
   menu->Insert(
       "reset_fault",
       [&controller](std::ostream &out) {
@@ -598,6 +630,7 @@ extern "C" void app_main(void) {
       .can_bus = &can_bus,
       // a STOP must not queue behind a set-point nobody acknowledged
       .flush_pending_commands = [&can_bus]() { can_bus.flush_pending(); },
+      .profile = profile, // restored after every seat-level pose move
       .log_level = espp::Logger::Verbosity::INFO,
   });
 
@@ -624,6 +657,12 @@ extern "C" void app_main(void) {
                   "the rated torque was not read, Nm figures come once a motor answers",
                   kBootTorquePermille, kMaxTorquePermille);
     }
+    for (auto &actuator : actuators) {
+      if (!actuator.set_heartbeat_consumer(kHeartbeatNodeId, kHeartbeatTimeoutMs)) {
+        logger.warn("Motor {}: heartbeat watchdog not configured", actuator.node_id());
+      }
+    }
+    // enable_drive() clears a fault left by the watchdog (e.g. after a reset)
     if (!left_pair.enable_drive() || !right_pair.enable_drive() || !seat_pair.enable_drive()) {
       logger.error("Failed to enable one or more drives");
     }
@@ -643,6 +682,43 @@ extern "C" void app_main(void) {
         logger.warn("Motor {} status read failed", actuator.node_id());
       }
     }
+  }
+
+  // --------------------------------------------------------------------------
+  // Pose moves: MOVE / HOME start a seat-level trajectory; this task streams its
+  // set-points and runs the level guard (StemController::service).
+  // --------------------------------------------------------------------------
+  espp::Task heartbeat_task(
+      {.callback = [&](std::mutex &m, std::condition_variable &cv) -> bool {
+         if (heartbeat_enabled.load()) {
+           CanFrame frame{};
+           frame.id = 0x700 + kHeartbeatNodeId;
+           frame.dlc = 1;
+           frame.data[0] = 0x05; // operational
+           can_bus.send(frame, false); // never block: a full queue just skips one beat
+         }
+         std::unique_lock<std::mutex> lock(m);
+         cv.wait_for(lock, kHeartbeatPeriod);
+         return false;
+       },
+       .task_config = {.name = "can_heartbeat", .stack_size_bytes = 3072, .priority = 10}});
+  if (can_ok) {
+    heartbeat_task.start();
+    logger.info("Heartbeat {} ms as node {} (drives fault after {} ms without it)",
+                std::chrono::duration_cast<std::chrono::milliseconds>(kHeartbeatPeriod).count(),
+                kHeartbeatNodeId, kHeartbeatTimeoutMs);
+  }
+
+  espp::Task motion_task(
+      {.callback = [&](std::mutex &m, std::condition_variable &cv) -> bool {
+         controller.service();
+         std::unique_lock<std::mutex> lock(m);
+         cv.wait_for(lock, 100ms);
+         return false; // don't stop the task
+       },
+       .task_config = {.name = "stem_motion", .stack_size_bytes = 6144}});
+  if (can_ok) {
+    motion_task.start();
   }
 
   // --------------------------------------------------------------------------

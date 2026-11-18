@@ -60,6 +60,12 @@ public:
   bool move_absolute(float target_degrees, bool immediate = true);
   // Move by a relative position increment (degrees) from the current position.
   bool move_incremental(float increment_degrees, bool immediate = true);
+  // Trajectory streaming: write the profile velocity (0x6081) and a new target,
+  // and apply it immediately (the drive blends from its current motion; no
+  // stop). Clamped to the position limits like move_absolute(), but without its
+  // enable / mode / fault reads, so it costs ~5 SDOs. The drive must already be
+  // enabled in profile position mode.
+  bool retarget(float target_degrees, float velocity_degrees_per_second);
   // Drive the DS402 state machine to Operation Enabled.
   // Enable the drive (DS402 sequence to Operation Enabled, profile position
   // mode prepared first). A drive in Fault gets its fault reset on the way.
@@ -79,6 +85,23 @@ public:
   bool is_faulted(uint32_t timeout_ms = 100);
   // Read the modes-of-operation display (object 0x6061).
   bool get_operating_mode(int8_t &mode, uint32_t timeout_ms = 100);
+  // Write modes of operation (0x6060): 1 profile position, 13 CSF (force
+  // control, -F joints). No enable / verify: read get_operating_mode() back.
+  bool set_operating_mode(int8_t mode, uint32_t timeout_ms = 100);
+  // Profile velocity mode (3) for streamed moves: target velocity 0, the
+  // given acceleration / deceleration (0x6083 / 0x6084), mode 3 (verified),
+  // enabled. The drive then ramps smoothly to every set_target_velocity().
+  bool start_velocity_mode(float acceleration_degrees_per_second_squared,
+                           uint32_t timeout_ms = 1000);
+  // Target velocity (0x60FF), deg/s at the output, signed. Mode 3 only.
+  bool set_target_velocity(float velocity_degrees_per_second);
+  // Back to profile position holding where the drive is: velocity 0, target
+  // position = actual, mode 1 (verified), enabled, halt bit clear.
+  bool hold_position(uint32_t timeout_ms = 1000);
+  // Heartbeat consumer (0x1016:01): the drive watches `producer_node_id`'s
+  // heartbeat (COB 0x700 + id) and raises a fault when none arrives within
+  // timeout_ms. 0 ms disables it. Monitoring starts at the first heartbeat.
+  bool set_heartbeat_consumer(uint8_t producer_node_id, uint16_t timeout_ms);
   // Persist the current object dictionary (profile velocity/accel/decel, mode, etc.) to
   // non-volatile memory via CiA 301 object 0x1010 (signature "save"). Sub-index 3 covers the
   // DS402 application objects (0x6000-0x9FFF); sub-index 1 saves everything. Optional and
@@ -94,6 +117,11 @@ public:
   // rated torque / current (see get_rated_torque / get_rated_current).
   bool get_torque(int16_t &torque_permille, uint32_t timeout_ms = 100);
   bool get_current(int16_t &current_permille, uint32_t timeout_ms = 100);
+  // Output torque SENSOR (object 0x27BD, Nm, float), on force-controlled (-F)
+  // joints only. Unlike get_torque() (0x6077, derived from motor current, so it
+  // includes the gear friction), this is measured at the output flange.
+  // Returns false if the drive has no such object (non -F joint) or does not answer.
+  bool get_sensor_torque(float &torque_nm, uint32_t timeout_ms = 100);
   // Max torque (0x6072): the drive clamps its torque demand to this, in
   // per-thousand of the rated torque (1000 = rated). Applies to every mode, so a
   // profile position move cannot push harder than this.
@@ -161,6 +189,7 @@ private:
   bool reset_communication_and_wait_for_bootup(uint32_t timeout_ms);
   bool ensure_operation_enabled(uint32_t timeout_ms);
   bool ensure_profile_position_mode(uint32_t timeout_ms);
+  bool wait_for_mode_unlocked(int8_t mode, uint32_t timeout_ms);
   // Same check as is_faulted(), but assumes transaction_mutex_ is already held.
   bool is_faulted_unlocked(uint32_t timeout_ms);
   bool reset_fault_unlocked(uint32_t timeout_ms);

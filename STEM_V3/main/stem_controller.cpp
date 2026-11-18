@@ -3,6 +3,9 @@
 #include <algorithm>
 #include <cmath>
 
+#include "freertos/FreeRTOS.h"
+#include "freertos/task.h"
+
 namespace stem {
 
 const char *to_string(Pair pair) {
@@ -47,6 +50,10 @@ const char *StemController::to_string(Result result) {
     return "invalid argument";
   case Result::ZeroMismatch:
     return "pair zero mismatch (re-zero required)";
+  case Result::Measuring:
+    return "measure mode is on (exit it first)";
+  case Result::BrakesEngaged:
+    return "the brakes are engaged (release them first)";
   }
   return "?";
 }
@@ -55,7 +62,7 @@ StemController::StemController(const Config &config)
     : espp::BaseComponent("StemController", config.log_level)
     , config_(config) {
   for (uint8_t i = 0; i < kPairCount; ++i) {
-    actuator(static_cast<Pair>(i)).set_position_limits(config_.min_deg, config_.max_deg);
+    actuator(static_cast<Pair>(i)).set_position_limits(config_.min_deg[i], config_.max_deg[i]);
   }
 }
 
@@ -95,6 +102,12 @@ StemController::Result StemController::set_seat_tilt(float tilt_deg, float rpm) 
     return Result::InvalidArgument;
   }
   std::lock_guard<std::mutex> lock(mutex_);
+  if (measuring_) {
+    return Result::Measuring;
+  }
+  if (brakes_engaged_) {
+    return Result::BrakesEngaged;
+  }
   if (zero_mismatch_[static_cast<uint8_t>(Pair::Seat)]) {
     logger_.error("seat tilt rejected: seat pair zero mismatch");
     return Result::ZeroMismatch;
@@ -102,6 +115,17 @@ StemController::Result StemController::set_seat_tilt(float tilt_deg, float rpm) 
   // New seat angle: the IK level angle of the current target plus the tilt, or
   // -- with no target -- the tracked seat angle shifted by the tilt change.
   const float previous_tilt = seat_tilt_deg_.load();
+  if (run_) {
+    if (!config_.operable.tilt_contains(tilt_deg)) {
+      return Result::OutOfLimits;
+    }
+    seat_tilt_deg_.store(tilt_deg);
+    const Result replanned = start_move_unlocked(target_x_, target_y_, run_->speed_deg_s);
+    if (replanned != Result::Ok) {
+      seat_tilt_deg_.store(previous_tilt);
+    }
+    return replanned;
+  }
   float seat_deg = 0.0f;
   if (target_valid_) {
     IkSolution solution{};
@@ -120,9 +144,15 @@ StemController::Result StemController::set_seat_tilt(float tilt_deg, float rpm) 
     }
     seat_deg = seat_position[0] - previous_tilt + tilt_deg;
   }
-  if (seat_deg < config_.min_deg || seat_deg > config_.max_deg) {
+  constexpr auto kSeat = static_cast<uint8_t>(Pair::Seat);
+  if (!config_.operable.tilt_contains(tilt_deg)) {
+    logger_.warn("seat tilt {:.1f} deg outside the operable range [{}, {}] deg from level",
+                 tilt_deg, config_.operable.tilt_min_deg, config_.operable.tilt_max_deg);
+    return Result::OutOfLimits;
+  }
+  if (seat_deg < config_.min_deg[kSeat] || seat_deg > config_.max_deg[kSeat]) {
     logger_.warn("seat tilt {:.1f} deg would put the seat at {:.1f} deg, outside [{}, {}]",
-                 tilt_deg, seat_deg, config_.min_deg, config_.max_deg);
+                 tilt_deg, seat_deg, config_.min_deg[kSeat], config_.max_deg[kSeat]);
     return Result::OutOfLimits;
   }
   (void)rpm; // EyouMotor moves at its pre-configured profile velocity, not a per-call speed.
@@ -146,38 +176,14 @@ bool StemController::solve(float x_rel, float y_rel, PoseCommand &out) const {
   out.y_rel = y_rel;
   out.solution = solution;
   out.pair_deg = pose_to_pair_deg(solution);
-  out.within_limits = std::all_of(out.pair_deg.begin(), out.pair_deg.end(), [&](float deg) {
-    return deg >= config_.min_deg && deg <= config_.max_deg;
-  });
+  bool in_pair_limits = true;
+  for (size_t i = 0; i < kPairCount; ++i) {
+    in_pair_limits = in_pair_limits && out.pair_deg[i] >= config_.min_deg[i] &&
+                     out.pair_deg[i] <= config_.max_deg[i];
+  }
+  out.within_limits =
+      in_pair_limits && config_.operable.contains(out.pair_deg, seat_tilt_deg_.load());
   return true;
-}
-
-StemController::Result StemController::command_pose(const PoseCommand &pose, float rpm) {
-  (void)rpm; // EyouMotor moves at its pre-configured profile velocity, not a per-call speed.
-  bool all_ok = true;
-  for (uint8_t i = 0; i < kPairCount; ++i) {
-    const auto pair = static_cast<Pair>(i);
-    if (!actuator(pair).set_position(pose.pair_deg[i])) {
-      logger_.error("{} pair rejected position {:.2f} deg", stem::to_string(pair),
-                    pose.pair_deg[i]);
-      all_ok = false;
-      break; // no further pair: a partial pose would twist the linkage
-    }
-  }
-  logger_.info("move x={:.1f} y={:.1f} -> left={:.2f} right={:.2f} seat={:.2f} deg{}", pose.x_rel,
-               pose.y_rel, pose.pair_deg[0], pose.pair_deg[1], pose.pair_deg[2],
-               all_ok ? "" : " (PARTIAL FAILURE)");
-  if (!all_ok) {
-    // The pairs no longer agree with any single target: halt the pairs that
-    // were already commanded (the safe policy for a broken pose).
-    stop_unlocked();
-    target_valid_ = false;
-    return Result::ActuatorFailed;
-  }
-  target_valid_ = true;
-  target_x_ = pose.x_rel;
-  target_y_ = pose.y_rel;
-  return Result::Ok;
 }
 
 StemController::Result StemController::move_to(float x_rel, float y_rel, float rpm,
@@ -189,6 +195,12 @@ StemController::Result StemController::move_to(float x_rel, float y_rel, float r
   // tilt, and set_seat_tilt() (which takes this mutex) must not change it
   // between the solve and the command.
   std::lock_guard<std::mutex> lock(mutex_);
+  if (measuring_) {
+    return Result::Measuring;
+  }
+  if (brakes_engaged_) {
+    return Result::BrakesEngaged;
+  }
   PoseCommand pose{};
   if (!solve(x_rel, y_rel, pose)) {
     logger_.warn("move x={:.1f} y={:.1f}: unreachable", x_rel, y_rel);
@@ -198,16 +210,265 @@ StemController::Result StemController::move_to(float x_rel, float y_rel, float r
     *out = pose;
   }
   if (!pose.within_limits) {
-    logger_.warn("move x={:.1f} y={:.1f}: pair angles ({:.1f}, {:.1f}, {:.1f}) outside [{}, {}]",
+    logger_.warn("move x={:.1f} y={:.1f}: pair angles ({:.1f}, {:.1f}, {:.1f}) outside the "
+                 "operable range (enc101 {:.1f}, enc103 {:.1f})",
                  x_rel, y_rel, pose.pair_deg[0], pose.pair_deg[1], pose.pair_deg[2],
-                 config_.min_deg, config_.max_deg);
+                 -pose.pair_deg[0], -pose.pair_deg[1]);
     return Result::OutOfLimits;
   }
   if (any_zero_mismatch_unlocked()) {
     logger_.error("move x={:.1f} y={:.1f} rejected: pair zero mismatch", x_rel, y_rel);
     return Result::ZeroMismatch;
   }
-  return command_pose(pose, rpm);
+  const float speed = std::min(effective_rpm(rpm, config_.default_move_rpm) * 6.0f,
+                               config_.max_move_speed_deg_s);
+  return start_move_unlocked(x_rel, y_rel, speed);
+}
+
+bool StemController::moving() const {
+  std::lock_guard<std::mutex> lock(mutex_);
+  return run_.has_value();
+}
+
+float StemController::tilt_of(const LevelTrajectory::Pairs &pairs) const {
+  IkSolution fk{};
+  if (!solve_fk_reference(-pairs[0], -pairs[1], config_.reference, fk, config_.geometry)) {
+    return NAN;
+  }
+  return pairs[2] + fk.m3_angle_deg; // inverse of pose_to_pair_deg's seat
+}
+
+void StemController::restore_profile_unlocked() {
+  for (uint8_t i = 0; i < kPairCount; ++i) {
+    actuator(static_cast<Pair>(i)).set_profile_position_config(config_.profile);
+  }
+}
+
+StemController::Result StemController::start_move_unlocked(float x_rel, float y_rel,
+                                                           float speed_deg_s) {
+  // From where the running move is (a re-plan keeps its speed), else from the
+  // measured pairs.
+  LevelTrajectory::Pairs start{};
+  float v0 = 0.0f;
+  if (run_) {
+    start = run_->plan.at(run_->t);
+    v0 = run_->rate * run_->plan.speed_at(run_->t);
+  } else {
+    for (uint8_t i = 0; i < kPairCount; ++i) {
+      std::array<float, 2> position{};
+      if (!actuator(static_cast<Pair>(i)).get_position(position, 100)) {
+        logger_.error("move rejected: could not read the {} pair position",
+                      stem::to_string(static_cast<Pair>(i)));
+        return Result::ActuatorFailed;
+      }
+      start[i] = position[0];
+    }
+  }
+  LevelTrajectoryLimits limits{};
+  limits.speed_deg_s = speed_deg_s;
+  limits.accel_deg_s2 = config_.move_accel_deg_s2;
+  LevelTrajectory plan;
+  const auto planned = plan.plan(start, x_rel, y_rel, seat_tilt_deg_.load(), config_.reference,
+                                 config_.geometry, config_.operable, config_.min_deg,
+                                 config_.max_deg, limits, v0);
+  switch (planned) {
+  case LevelTrajectory::Result::Ok:
+    break;
+  case LevelTrajectory::Result::StartUnknown:
+    logger_.error("move rejected: the measured pairs ({:.1f}, {:.1f}) do not match a linkage pose",
+                  start[0], start[1]);
+    return Result::Unreachable;
+  case LevelTrajectory::Result::Unreachable:
+    logger_.warn("move x={:.1f} y={:.1f}: the straight path is unreachable at ({:.1f}, {:.1f})",
+                 x_rel, y_rel, plan.fail_x, plan.fail_y);
+    return Result::Unreachable;
+  case LevelTrajectory::Result::OutOfLimits:
+    logger_.warn("move x={:.1f} y={:.1f}: the straight path leaves the operable range at "
+                 "({:.1f}, {:.1f}); go around it in two moves",
+                 x_rel, y_rel, plan.fail_x, plan.fail_y);
+    return Result::OutOfLimits;
+  }
+  const auto now = Clock::now();
+  if (!run_) {
+    // Profile velocity mode for the move: service() streams each pair's speed
+    // (the plan's speed plus a position correction); the drives ramp smoothly
+    // between speeds with kVelocityAccel. Target velocity starts at 0.
+    for (uint8_t i = 0; i < kPairCount; ++i) {
+      auto &pair = actuator(static_cast<Pair>(i));
+      if (!pair.start_velocity_mode(kVelocityAccel)) {
+        logger_.error("move rejected: the {} pair did not enter velocity mode",
+                      stem::to_string(static_cast<Pair>(i)));
+        run_.emplace(); // so stop_unlocked() returns every pair to a position hold
+        stop_unlocked();
+        return Result::ActuatorFailed;
+      }
+    }
+  }
+  run_.emplace();
+  run_->plan = std::move(plan);
+  run_->speed_deg_s = speed_deg_s;
+  run_->last = now;
+  run_->stalled_since = now;
+  target_valid_ = true;
+  target_x_ = x_rel;
+  target_y_ = y_rel;
+  const auto &end = run_->plan.end();
+  logger_.info("level move x={:.1f} y={:.1f} -> left={:.2f} right={:.2f} seat={:.2f} deg, "
+               "{:.1f} s at {:.1f} deg/s",
+               x_rel, y_rel, end[0], end[1], end[2], run_->plan.duration(), speed_deg_s);
+  return Result::Ok;
+}
+
+void StemController::service() {
+  std::lock_guard<std::mutex> lock(mutex_);
+  if (!run_) {
+    return;
+  }
+  auto &r = *run_;
+  const auto now = Clock::now();
+  const float dt = std::clamp(std::chrono::duration<float>(now - r.last).count(), 0.0f, 0.5f);
+  r.last = now;
+
+  LevelTrajectory::Pairs measured{};
+  bool read_ok = true;
+  for (uint8_t i = 0; i < kPairCount && read_ok; ++i) {
+    std::array<float, 2> position{};
+    read_ok = actuator(static_cast<Pair>(i)).get_position(position, 50);
+    measured[i] = position[0];
+  }
+  if (!read_ok) {
+    if (++r.read_failures >= 3) {
+      logger_.error("level move STOPPED: position reads failed");
+      stop_unlocked();
+    }
+    return;
+  }
+  r.read_failures = 0;
+
+  // Level guard: the measured seat tilt against the plan's at this time. Lag
+  // along the path does not count (the plan is level everywhere); a seat pair
+  // that falls behind the others does.
+  const auto planned = r.plan.at(r.t);
+  const float deviation = tilt_of(measured) - tilt_of(planned);
+  float lag = 0.0f;
+  for (size_t i = 0; i < kPairCount; ++i) {
+    lag = std::max(lag, std::fabs(measured[i] - planned[i]));
+  }
+  const float lag_limit = 2.0f + 0.5f * r.speed_deg_s;
+  if (!std::isfinite(deviation) || std::fabs(deviation) > config_.level_abort_deg) {
+    logger_.error("level move STOPPED: seat {:.1f} deg off level (limit {:.1f})", deviation,
+                  config_.level_abort_deg);
+    stop_unlocked();
+    return;
+  }
+  // Slow the whole path instead of pausing: the plan's clock runs at `rate`
+  // (0..1), so every pair slows together along the same level path. Full speed
+  // while the seat is within half of level_hold_deg (and no pair lags), zero at
+  // level_hold_deg; the rate itself changes at most kRateSlew per second, so
+  // the drives decelerate and re-accelerate smoothly.
+  constexpr float kRateSlew = 1.5f;
+  const float hold = config_.level_hold_deg;
+  const float level_rate = std::clamp((hold - std::fabs(deviation)) / (0.5f * hold), 0.0f, 1.0f);
+  const float lag_rate = std::clamp((lag_limit - lag) / (0.5f * lag_limit), 0.0f, 1.0f);
+  const float wanted = std::min(level_rate, lag_rate);
+  r.rate += std::clamp(wanted - r.rate, -kRateSlew * dt, kRateSlew * dt);
+  if (!r.slowed && r.rate < 0.5f) {
+    r.slowed = true;
+    logger_.warn("level move slowing: seat {:.2f} deg off level, max lag {:.1f} deg", deviation, lag);
+  } else if (r.slowed && r.rate > 0.95f) {
+    r.slowed = false;
+    logger_.info("level move back to full speed");
+  }
+  if (r.rate > 0.05f) {
+    r.stalled_since = now;
+  } else if (now - r.stalled_since > std::chrono::milliseconds(config_.hold_timeout_ms)) {
+    logger_.error("level move STOPPED: no progress for {} ms (seat {:.2f} deg off level, lag "
+                  "{:.1f} deg) - a pair stalled? (torque limit)",
+                  config_.hold_timeout_ms, deviation, lag);
+    stop_unlocked();
+    return;
+  }
+
+  // hard backstop: a pair beyond its position limits (velocity mode has no
+  // drive-side target to stop at)
+  for (size_t i = 0; i < kPairCount; ++i) {
+    if (measured[i] < config_.min_deg[i] - 1.0f || measured[i] > config_.max_deg[i] + 1.0f) {
+      logger_.error("level move STOPPED: the {} pair is at {:.1f} deg, outside [{}, {}]",
+                    stem::to_string(static_cast<Pair>(i)), measured[i], config_.min_deg[i],
+                    config_.max_deg[i]);
+      stop_unlocked();
+      return;
+    }
+  }
+
+  r.t += dt * r.rate;
+  const float duration = r.plan.duration();
+  const auto &end = r.plan.end();
+  if (r.t >= duration) {
+    float remaining = 0.0f;
+    for (size_t i = 0; i < kPairCount; ++i) {
+      remaining = std::max(remaining, std::fabs(measured[i] - end[i]));
+    }
+    if (!r.at_end) {
+      r.at_end = true;
+      r.end_since = now;
+    }
+    if (r.settling) {
+      // speeds were zeroed last tick: the drives have ramped down. Switch to
+      // profile position holding exactly where each pair stopped - no final
+      // correction move (that was the "click"): the pull below already brought
+      // every pair within kEndTolerance of the target.
+      if (now - r.settle_since < std::chrono::milliseconds(150)) {
+        return;
+      }
+      run_.reset();
+      bool ok = true;
+      for (uint8_t i = 0; i < kPairCount; ++i) {
+        ok = actuator(static_cast<Pair>(i)).hold_position() && ok;
+      }
+      restore_profile_unlocked();
+      logger_.info("level move done ({:.2f} deg from the target){}", remaining,
+                   ok ? "" : " - a pair did not take the final hold, check");
+      return;
+    }
+    constexpr float kEndTolerance = 0.1f;
+    if (remaining < kEndTolerance || now - r.end_since > std::chrono::milliseconds(2500)) {
+      if (remaining >= kEndTolerance) {
+        logger_.warn("level move: {:.2f} deg from the target after the settle time", remaining);
+      }
+      for (uint8_t i = 0; i < kPairCount; ++i) {
+        actuator(static_cast<Pair>(i)).set_velocity(0.0f);
+      }
+      r.settling = true;
+      r.settle_since = now;
+      return;
+    }
+  }
+  // Velocity command per pair: the plan's speed at (now + the command's
+  // latency), scaled by the slow-down rate, plus a proportional pull toward the
+  // plan's position. Both come from the same level path, so the seat stays level
+  // while every pair tracks it.
+  constexpr float kLatency = 0.05f;
+  constexpr float kPositionGain = 2.0f; // 1/s: a 1 deg lag adds 2 deg/s
+  constexpr float kProbe = 0.05f;
+  const auto p0 = r.plan.at(r.t + kLatency * r.rate), p1 = r.plan.at(r.t + (kLatency + kProbe) * r.rate);
+  const float v_max = 1.5f * r.speed_deg_s + 5.0f;
+  std::array<float, kPairCount> velocity{};
+  for (size_t i = 0; i < kPairCount; ++i) {
+    const float feed = r.rate > 1e-3f ? (p1[i] - p0[i]) / kProbe : 0.0f; // already scaled by rate
+    const float target = r.at_end ? end[i] : planned[i];
+    velocity[i] = std::clamp(feed + kPositionGain * (target - measured[i]), -v_max, v_max);
+  }
+  // seat first: of the three, it is the one that keeps the seat level
+  constexpr Pair order[] = {Pair::Seat, Pair::Left, Pair::Right};
+  for (const Pair pair : order) {
+    const auto i = static_cast<uint8_t>(pair);
+    if (!actuator(pair).set_velocity(velocity[i])) {
+      logger_.error("level move STOPPED: the {} pair did not take its speed", stem::to_string(pair));
+      stop_unlocked();
+      return;
+    }
+  }
 }
 
 StemController::Result StemController::home(float rpm, PoseCommand *out) {
@@ -219,9 +480,18 @@ StemController::Result StemController::set_pair(Pair pair, float degrees, float 
     return Result::InvalidArgument;
   }
   std::lock_guard<std::mutex> lock(mutex_);
+  if (measuring_) {
+    return Result::Measuring;
+  }
+  if (brakes_engaged_) {
+    return Result::BrakesEngaged;
+  }
   if (zero_mismatch_[static_cast<uint8_t>(pair)]) {
     logger_.error("set {} rejected: pair zero mismatch", stem::to_string(pair));
     return Result::ZeroMismatch;
+  }
+  if (run_) {
+    stop_unlocked(); // a lone pair inside a level move would tilt the seat
   }
   (void)rpm; // EyouMotor moves at its pre-configured profile velocity, not a per-call speed.
   const bool ok = actuator(pair).set_position(degrees);
@@ -237,6 +507,15 @@ bool StemController::stop() {
 }
 
 bool StemController::stop_unlocked() {
+  const bool had_run = run_.has_value();
+  run_.reset(); // service() stops streaming speeds
+  if (had_run) {
+    // velocity mode: zero every target speed first (releasing the halt below
+    // would otherwise resume the last one)
+    for (uint8_t i = 0; i < kPairCount; ++i) {
+      actuator(static_cast<Pair>(i)).set_velocity(0.0f);
+    }
+  }
   // A set-point nobody acknowledged, stuck in the TWAI queue, would delay the
   // halt frames behind it: drop it first (CanBus::flush_pending, see Config).
   if (config_.flush_pending_commands) {
@@ -258,6 +537,13 @@ bool StemController::stop_unlocked() {
     logger_.error("STOP: {} pair did not confirm the halt, drive {}", names[i],
                   disabled ? "disabled (coasting)" : "NOT disabled either");
     all_ok = false;
+  }
+  if (had_run) {
+    // back to profile position, holding where each pair stopped
+    for (uint8_t i = 0; i < kPairCount; ++i) {
+      all_ok = actuator(static_cast<Pair>(i)).hold_position() && all_ok;
+    }
+    restore_profile_unlocked();
   }
   logger_.warn("STOP: {}", all_ok ? "every pair halted and holding" : "see the errors above");
   // the move this interrupted never reached its target: a later seat tilt must
@@ -312,6 +598,39 @@ StemController::Result StemController::set_torque_limit(uint16_t torque_permille
   }
   std::lock_guard<std::mutex> lock(mutex_);
   ensure_rated_torque_unlocked();
+  // Raising the limit after the linkage was forced off its set-point (a pair
+  // stalled at the low limit) would let every drive close that error at once,
+  // at the new limit and with no ramp. So first re-aim each drive where it is
+  // (no jump), raise the limit, then go back to the last pose target with a
+  // normal seat-level move.
+  bool return_to_target = false;
+  const bool raising = torque_permille > torque_limit_permille_.load();
+  if (raising && !run_ && !measuring_ && !brakes_engaged_) {
+    float deviation = 0.0f;
+    bool read_ok = true;
+    PoseCommand pose{};
+    const bool have_target = target_valid_ && solve(target_x_, target_y_, pose);
+    for (uint8_t i = 0; i < kPairCount && read_ok; ++i) {
+      std::array<float, 2> position{};
+      read_ok = actuator(static_cast<Pair>(i)).get_position(position, 100);
+      if (read_ok && have_target) {
+        deviation = std::max(deviation, std::fabs(position[0] - pose.pair_deg[i]));
+      }
+    }
+    if (read_ok && (!have_target || deviation > 0.3f)) {
+      for (uint8_t i = 0; i < kPairCount; ++i) {
+        actuator(static_cast<Pair>(i)).hold_position();
+      }
+      return_to_target = have_target;
+      if (have_target) {
+        logger_.info("torque limit raised: drives re-aimed where they are ({:.2f} deg off the "
+                     "target)",
+                     deviation);
+      } else {
+        logger_.info("torque limit raised: drives re-aimed where they are (no pose target)");
+      }
+    }
+  }
   bool ok = true;
   for (uint8_t i = 0; i < kPairCount; ++i) {
     if (!actuator(static_cast<Pair>(i)).set_max_torque(torque_permille)) {
@@ -328,22 +647,156 @@ StemController::Result StemController::set_torque_limit(uint16_t torque_permille
     logger_.info("torque limit {} permille of rated on every motor: {}", torque_permille,
                  ok ? "ok" : "FAILED on some");
   }
+  if (ok && return_to_target && !any_zero_mismatch_unlocked()) {
+    const float speed = std::min(config_.default_move_rpm * 6.0f, config_.max_move_speed_deg_s);
+    if (start_move_unlocked(target_x_, target_y_, speed) == Result::Ok) {
+      logger_.info("returning to the target x={:.1f} y={:.1f} with a level move", target_x_,
+                   target_y_);
+    }
+  }
   return ok ? Result::Ok : Result::ActuatorFailed;
 }
 
 bool StemController::release_brakes() {
+  if (measuring_) {
+    const bool ok = set_measure_mode(false) == Result::Ok; // re-enables, in mode 1
+    if (ok) {
+      brakes_engaged_.store(false);
+    }
+    return ok;
+  }
   std::lock_guard<std::mutex> lock(mutex_);
-  // EyouMotor has no separate brake relay; enabling the drive is the operative
-  // equivalent (the pair can move again after a stop()/disable_drive()).
+  // EyouMotor has no separate brake relay: enabling the drives releases the
+  // brakes, and the drives then HOLD the pose (target = where each one is).
   const bool right_ok = config_.right.enable_drive();
   const bool left_ok = config_.left.enable_drive();
   const bool seat_ok = config_.seat.enable_drive();
-  logger_.info("drives enabled: right={} left={} seat={}", right_ok, left_ok, seat_ok);
-  return right_ok && left_ok && seat_ok;
+  const bool ok = right_ok && left_ok && seat_ok;
+  if (ok) {
+    brakes_engaged_.store(false);
+  }
+  logger_.info("brakes released (drives enabled, holding): right={} left={} seat={}", right_ok,
+               left_ok, seat_ok);
+  return ok;
+}
+
+bool StemController::engage_brakes() {
+  std::lock_guard<std::mutex> lock(mutex_);
+  if (run_) {
+    stop_unlocked(); // decelerate first, then switch off
+  }
+  if (measuring_) {
+    for (auto &motor : config_.motors) {
+      motor.set_operating_mode(1); // drives stay off; mode 1 for the next release
+    }
+    measuring_.store(false);
+  }
+  bool ok = true;
+  for (uint8_t i = 0; i < kPairCount; ++i) {
+    ok = actuator(static_cast<Pair>(i)).disable_drive() && ok;
+  }
+  brakes_engaged_.store(true);
+  target_valid_ = false;
+  logger_.warn("brakes ENGAGED: drives off{} - moves are refused until the brakes are released",
+               ok ? "" : " (a drive did not confirm, check the motor table)");
+  return ok;
+}
+
+StemController::Result StemController::set_measure_mode(bool on, int8_t drive_mode) {
+  std::lock_guard<std::mutex> lock(mutex_);
+  if (on == measuring_.load()) {
+    return Result::Ok;
+  }
+  auto read_pairs = [this](std::array<float, kPairCount> &out) {
+    for (uint8_t i = 0; i < kPairCount; ++i) {
+      std::array<float, 2> position{};
+      if (!actuator(static_cast<Pair>(i)).get_position(position, 50)) {
+        return false;
+      }
+      out[i] = position[0];
+    }
+    return true;
+  };
+  auto enable_all = [this]() {
+    bool ok = true;
+    for (auto &motor : config_.motors) {
+      ok = motor.set_operating_mode(1) && ok; // enable_drive() verifies mode 1 too
+    }
+    for (uint8_t i = 0; i < kPairCount; ++i) {
+      ok = actuator(static_cast<Pair>(i)).enable_drive() && ok; // holds where it is
+    }
+    return ok;
+  };
+
+  if (!on) {
+    const bool ok = enable_all();
+    measuring_.store(false);
+    if (ok) {
+      brakes_engaged_.store(false);
+    }
+    target_valid_ = false;
+    logger_.info("measure mode OFF: drives in profile position, enabled: {}", ok ? "ok" : "FAILED");
+    return ok ? Result::Ok : Result::ActuatorFailed;
+  }
+
+  if (drive_mode != 13 && drive_mode != 1) {
+    return Result::InvalidArgument;
+  }
+  if (run_) {
+    stop_unlocked();
+  }
+  std::array<float, kPairCount> before{};
+  if (!read_pairs(before)) {
+    logger_.error("measure mode refused: could not read the pair positions");
+    return Result::ActuatorFailed;
+  }
+  // Drives off: the brakes engage and hold the pose.
+  for (uint8_t i = 0; i < kPairCount; ++i) {
+    actuator(static_cast<Pair>(i)).disable_drive();
+  }
+  // Watch for 0.5 s: a pair that moves is not held by its brake -> re-enable.
+  for (int k = 0; k < 10; ++k) {
+    vTaskDelay(pdMS_TO_TICKS(50));
+    std::array<float, kPairCount> now{};
+    if (!read_pairs(now)) {
+      continue;
+    }
+    for (uint8_t i = 0; i < kPairCount; ++i) {
+      if (std::fabs(now[i] - before[i]) > 0.5f) {
+        enable_all();
+        logger_.error("measure mode ABORTED: the {} pair moved {:.2f} deg with the drives off "
+                      "(brake not holding?) - drives re-enabled",
+                      stem::to_string(static_cast<Pair>(i)), now[i] - before[i]);
+        return Result::ActuatorFailed;
+      }
+    }
+  }
+  // Mode while measuring (still disabled: nothing is commanded).
+  bool ok = true;
+  for (auto &motor : config_.motors) {
+    int8_t mode = 0;
+    const bool set_ok = motor.set_operating_mode(drive_mode);
+    const bool read_ok = motor.get_operating_mode(mode);
+    logger_.info("measure: motor {} mode {} -> reads back {}", motor.node_id(), drive_mode,
+                 read_ok ? static_cast<int>(mode) : -1);
+    ok = ok && set_ok;
+  }
+  {
+    std::lock_guard<std::mutex> telemetry_lock(telemetry_mutex_);
+    sensor_skip_.fill(0); // read every sensor from the first poll on
+  }
+  target_valid_ = false;
+  measuring_.store(true);
+  logger_.warn("measure mode ON: drives off, brakes holding, drive mode {}{}", drive_mode,
+               ok ? "" : " (some mode writes failed)");
+  return Result::Ok;
 }
 
 bool StemController::reset_fault() {
   std::lock_guard<std::mutex> lock(mutex_);
+  if (run_) {
+    stop_unlocked();
+  }
   bool ok = true;
   size_t faulted = 0;
   for (uint8_t i = 0; i < kPairCount; ++i) {
@@ -370,6 +823,13 @@ bool StemController::reset_fault() {
 
 bool StemController::zero(std::optional<Pair> pair, bool align) {
   std::lock_guard<std::mutex> lock(mutex_);
+  if (measuring_) {
+    logger_.warn("zero refused: measure mode is on");
+    return false;
+  }
+  if (run_) {
+    stop_unlocked();
+  }
   // EyouMotor::zero() always reads the absolute CANopen encoder, so there is no
   // separate alignment maneuver; `align` is kept only for CLI/protocol compatibility.
   (void)align;
@@ -412,6 +872,9 @@ bool StemController::read_zero(std::array<std::array<int32_t, 2>, kPairCount> &z
 
 bool StemController::load_zero() {
   std::lock_guard<std::mutex> lock(mutex_);
+  if (run_) {
+    stop_unlocked();
+  }
   bool ok = true;
   for (uint8_t i = 0; i < kPairCount; ++i) {
     ok = actuator(static_cast<Pair>(i)).load_zero() && ok;
@@ -454,12 +917,19 @@ bool StemController::any_zero_mismatch_unlocked() const {
 }
 
 State StemController::snapshot(bool read_motors) {
-  std::lock_guard<std::mutex> lock(mutex_);
+  // Only the controller's own fields are read under mutex_: the CAN reads below
+  // take each motor's transaction lock alone, so a pose move's service() ticks
+  // (velocity mode: a late speed update is a longer run at the last speed) are
+  // never queued behind a whole telemetry poll.
   State state{};
-  state.can_ok = config_.can_ok;
-  state.target_valid = target_valid_;
-  state.target_x = target_x_;
-  state.target_y = target_y_;
+  {
+    std::lock_guard<std::mutex> lock(mutex_);
+    state.can_ok = config_.can_ok;
+    state.target_valid = target_valid_;
+    state.target_x = target_x_;
+    state.target_y = target_y_;
+  }
+  std::lock_guard<std::mutex> telemetry_lock(telemetry_mutex_); // sensor_skip_, one poll at a time
   bool all_pairs_read = true;
   for (uint8_t i = 0; i < kPairCount; ++i) {
     std::array<float, 2> position{};
@@ -499,6 +969,19 @@ State StemController::snapshot(bool read_motors) {
       if (!motor.get_velocity(telemetry.velocity_deg_s, 50)) {
         telemetry.velocity_deg_s = 0.0f;
       }
+      // output torque sensor (-F joints): measured at the flange, so unlike
+      // 0x6077 it does not include the gear friction
+      telemetry.sensor_ok = false;
+      if (sensor_skip_[i] > 0) {
+        --sensor_skip_[i];
+      } else if (motor.get_sensor_torque(telemetry.sensor_torque_nm, 50)) {
+        telemetry.sensor_ok = true;
+      } else {
+        sensor_skip_[i] = kSensorRetryPolls;
+      }
+      if (!telemetry.sensor_ok) {
+        telemetry.sensor_torque_nm = 0.0f;
+      }
       telemetry.tracked_deg = position_degrees;
       telemetry.ok = position_ok && statusword_ok && error_code_ok;
       state.motors_ok = state.motors_ok && telemetry.ok;
@@ -509,6 +992,8 @@ State StemController::snapshot(bool read_motors) {
     ensure_rated_torque_unlocked(); // a motor that was off at boot may answer now
   }
   state.rated_torque_mnm = rated_torque_mnm_.load();
+  state.measuring = measuring_.load();
+  state.brakes_engaged = brakes_engaged_.load();
   if (config_.can_bus != nullptr && config_.can_ok) {
     const auto s = config_.can_bus->get_status();
     state.can.started = true;

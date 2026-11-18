@@ -8,6 +8,7 @@
 
 #include <array>
 #include <atomic>
+#include <chrono>
 #include <cstdint>
 #include <functional>
 #include <mutex>
@@ -19,6 +20,8 @@
 #include "can_bus.hpp"
 #include "eyou_motor.hpp"
 #include "ik_5bar.hpp"
+#include "level_trajectory.hpp"
+#include "operable_range.hpp"
 #include "paired_eyou_actuator.hpp"
 
 namespace stem {
@@ -38,6 +41,8 @@ struct MotorTelemetry {
   uint16_t error_code{0};
   float tracked_deg{0.0f};    ///< actual position read over CANopen (object 0x6064)
   int16_t torque_permille{0}; ///< actual torque (0x6077), per-thousand of rated
+  bool sensor_ok{false};      ///< the output torque sensor (0x27BD) answered this poll
+  float sensor_torque_nm{0.0f}; ///< output torque sensor (0x27BD, -F joints), Nm at the flange
   float velocity_deg_s{0.0f}; ///< actual velocity (0x606C)
 };
 
@@ -75,6 +80,8 @@ struct State {
   bool motors_ok{false};
   uint16_t torque_limit_permille{0}; ///< the limit last written to every motor
   uint32_t rated_torque_mnm{0};      ///< 0x6076 of the first motor that answered (0: unknown)
+  bool measuring{false};             ///< measure mode (drives off, brakes hold, sensors read)
+  bool brakes_engaged{false};        ///< engage_brakes(): drives off, nothing moves until released
   CanTelemetry can{};
 };
 
@@ -95,13 +102,19 @@ public:
     PairedEyouActuator &seat;
     std::span<EyouMotor> motors; ///< every motor, for telemetry (ids reported as-is)
     bool can_ok{true};           ///< whether the CAN bus came up (reported in State)
-    float min_deg{-60.0f};       ///< pair position limits (applied to every pair)
-    float max_deg{60.0f};
+    /// Per-pair hard position limits (primary motor, Pair order), written to the
+    /// drives as their position clamp: the bounding box of the operable range
+    /// plus ~5 deg (left = -enc101 in [6, 90], right = -enc103 in [-47, 12], seat
+    /// = level +/- tilt over the whole range). Set pair moves are clamped to these.
+    std::array<float, kPairCount> min_deg{-95.0f, -17.0f, -55.0f};
+    std::array<float, kPairCount> max_deg{-1.0f, 52.0f, 155.0f};
+    /// Pose moves (MOVE / HOME / tilt) must also land inside the operable range
+    /// from the v3.1 reach study (operable_range.hpp).
+    OperableRange operable{};
     float mirror_tolerance_deg{1.0f}; ///< max |primary + secondary| for a pair to be usable
-    // NOTE: EyouMotor moves at a pre-configured profile velocity (see
-    // EyouMotor::configure_profile_position), not a per-call speed, so these are
-    // kept only so the wire protocol / CLI keep the same rpm parameter shape;
-    // they no longer affect motion.
+    // Pose moves (MOVE / HOME) run as seat-level trajectories at the requested
+    // rpm (pair output; 1 rpm = 6 deg/s on the fastest pair). Set pair moves still
+    // use the drive profile below.
     float default_move_rpm{2.0f}; ///< MOVE / HOME speed when the caller passes 0
     float default_set_rpm{5.0f};  ///< SET pair speed when the caller passes 0
     float max_rpm{10.0f};         ///< requested speeds are clamped to (0, max_rpm]
@@ -118,6 +131,20 @@ public:
     /// queue in front of the stop (nobody acknowledged it) would otherwise
     /// delay the stop until the driver gave up; CanBus::flush_pending() drops it.
     std::function<void()> flush_pending_commands{nullptr};
+    /// The drive profile outside pose moves (Set pair, seat tilt, STOP), as main
+    /// writes it at boot; restored when a pose move ends.
+    EyouMotor::ProfilePositionConfig profile{60.0f, 20.0f, 20.0f};
+    /// Pose moves: acceleration of the fastest pair along the path (deg/s^2).
+    float move_accel_deg_s2{20.0f};
+    /// Pose moves: speed cap of the fastest pair (deg/s), whatever rpm asks for.
+    float max_move_speed_deg_s{18.0f};
+    /// Seat-level guard during a pose move: the whole move slows as the
+    /// measured seat drifts off the plan (full speed within level_hold_deg / 2,
+    /// stopped at level_hold_deg, all pairs together), STOPs beyond
+    /// level_abort_deg, or after hold_timeout_ms without progress.
+    float level_hold_deg{1.0f};
+    float level_abort_deg{4.0f};
+    uint32_t hold_timeout_ms{3000};
     espp::Logger::Verbosity log_level{espp::Logger::Verbosity::INFO};
   };
 
@@ -127,7 +154,9 @@ public:
     OutOfLimits,
     ActuatorFailed,
     InvalidArgument,
-    ZeroMismatch
+    ZeroMismatch,
+    Measuring,    ///< refused: measure mode is on (exit it first)
+    BrakesEngaged ///< refused: the brakes are engaged (release them first)
   };
   static const char *to_string(Result result);
 
@@ -143,7 +172,16 @@ public:
   /// Move the end effector. Unlike the raw actuator API this REJECTS targets
   /// whose pair angles fall outside the limits instead of silently clamping
   /// them (a clamped pose is not the pose that was asked for).
+  /// Starts a seat-level trajectory (level_trajectory.hpp) and returns; the
+  /// move runs in service(). A new move while one runs re-plans from where the
+  /// running one is, at its speed (live drag).
   Result move_to(float x_rel, float y_rel, float rpm, PoseCommand *out = nullptr);
+  /// Advance the running pose move: call every ~100 ms from a task. Streams
+  /// each pair's next set-point, holds the path while the seat is off level
+  /// or a pair lags, stops on the level guard, and ends the move.
+  void service();
+  /// A pose move is running.
+  bool moving() const;
   Result home(float rpm, PoseCommand *out = nullptr);
 
   /// Drive one pair to an absolute position (clamped by the pair itself).
@@ -163,6 +201,20 @@ public:
   /// own weight (found on the single-actuator stand - the drive has a halt).
   bool stop();
   bool release_brakes();
+  /// The opposite of release_brakes(): stop any move, leave measure mode, and
+  /// switch every drive off so the brakes hold. Moves, pair sets and tilt are
+  /// refused (Result::BrakesEngaged) until release_brakes().
+  bool engage_brakes();
+  bool brakes_engaged() const { return brakes_engaged_.load(); }
+  /// Measure mode, for reading the output torque sensors under load: stop,
+  /// disable every drive so the brakes hold the pose (aborted, drives
+  /// re-enabled, if any pair moves more than 0.5 deg - a brake that does not
+  /// hold), then put every drive in `drive_mode` (13 CSF by default: 0x27BD may
+  /// only update with the torque loop selected). Moves, pair sets, tilt and
+  /// zero are refused while on. Off: mode 1 again and the drives re-enabled
+  /// holding where they are (no jump).
+  Result set_measure_mode(bool on, int8_t drive_mode = 13);
+  bool measuring() const { return measuring_.load(); }
   /// Clear the DS402 Fault on every motor that reports one (controlword fault
   /// reset) and bring its pair back to Operation Enabled. A fault that comes
   /// straight back (its cause still present - an overload, a limit) leaves the
@@ -201,16 +253,34 @@ public:
   State snapshot(bool read_motors);
 
 private:
-  // stop() with mutex_ already held (command_pose's halt on a partial pose).
+  // stop() with mutex_ already held (pose-move aborts, commands that interrupt a move).
   bool stop_unlocked();
   PairedEyouActuator &actuator(Pair pair);
   const PairedEyouActuator &actuator(Pair pair) const;
   float effective_rpm(float rpm, float fallback) const;
-  Result command_pose(const PoseCommand &pose, float rpm);
   // Map an IK solution (angles relative to the reference) to the sign
   // convention the pairs are commanded in (seat tilt included).
   std::array<float, kPairCount> pose_to_pair_deg(const IkSolution &solution) const;
   bool check_pair_unlocked(Pair pair);
+  // Seat-level pose moves (mutex_ held).
+  using Clock = std::chrono::steady_clock;
+  struct Run {
+    LevelTrajectory plan;
+    float speed_deg_s{0.0f};
+    float t{0.0f}; ///< plan time (s): advances with real time, frozen on hold
+    Clock::time_point last{}, stalled_since{}, end_since{};
+    float rate{1.0f}; ///< plan clock rate (0..1), lowered while the seat drifts
+    bool slowed{false};
+    bool at_end{false};
+    bool settling{false}; ///< end reached, speeds zeroed: the next tick switches to the hold
+    Clock::time_point settle_since{};
+    uint8_t read_failures{0};
+  };
+  Result start_move_unlocked(float x_rel, float y_rel, float speed_deg_s);
+  static constexpr float kVelocityAccel = 200.0f; ///< drive ramp between streamed speeds, deg/s^2
+  void restore_profile_unlocked();
+  // seat tilt from level of a pair triple; NAN when the cranks have no FK
+  float tilt_of(const LevelTrajectory::Pairs &pairs) const;
   bool any_zero_mismatch_unlocked() const;
 
   Config config_;
@@ -218,10 +288,19 @@ private:
   std::array<bool, kPairCount> zero_mismatch_{};
   std::atomic<uint16_t> torque_limit_permille_{0}; // atomic: read by the lock-free torque_limit()
   std::atomic<uint32_t> rated_torque_mnm_{0};      // atomic: read by the lock-free getters
+  // Output torque sensor polling (0x27BD): a motor whose read fails (a non -F
+  // joint aborts the SDO) is retried only every kSensorRetryPolls snapshots, so it
+  // neither floods the log nor slows telemetry. telemetry_mutex_ held.
+  static constexpr uint8_t kSensorRetryPolls = 25;
+  std::array<uint8_t, kMotorCount> sensor_skip_{};
+  std::mutex telemetry_mutex_; // snapshot(): sensor_skip_ and one poll at a time
   // Read the rated torque once, from the first motor that answers (mutex_ held).
   void ensure_rated_torque_unlocked();
   std::atomic<float> seat_tilt_deg_{0.0f}; // atomic: read by the lock-free solve()
   bool target_valid_{false};
+  std::optional<Run> run_;
+  std::atomic<bool> measuring_{false};
+  std::atomic<bool> brakes_engaged_{false};
   float target_x_{0.0f};
   float target_y_{0.0f};
 };
