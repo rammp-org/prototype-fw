@@ -262,6 +262,8 @@ private:
   // convention the pairs are commanded in (seat tilt included).
   std::array<float, kPairCount> pose_to_pair_deg(const IkSolution &solution) const;
   bool check_pair_unlocked(Pair pair);
+  // Re-check every flagged pair; true if any mismatch remains (mutex_ held).
+  bool recheck_mismatch_unlocked();
   // Seat-level pose moves (mutex_ held).
   using Clock = std::chrono::steady_clock;
   struct Run {
@@ -278,6 +280,7 @@ private:
   };
   Result start_move_unlocked(float x_rel, float y_rel, float speed_deg_s);
   static constexpr float kVelocityAccel = 200.0f; ///< drive ramp between streamed speeds, deg/s^2
+  static constexpr float kStopDecel = 120.0f;     ///< STOP / engage deceleration, deg/s^2
   void restore_profile_unlocked();
   // seat tilt from level of a pair triple; NAN when the cranks have no FK
   float tilt_of(const LevelTrajectory::Pairs &pairs) const;

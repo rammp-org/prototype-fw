@@ -690,7 +690,11 @@ extern "C" void app_main(void) {
   // --------------------------------------------------------------------------
   espp::Task heartbeat_task(
       {.callback = [&](std::mutex &m, std::condition_variable &cv) -> bool {
-         if (heartbeat_enabled.load()) {
+         // Only while the bus is healthy: with the drives unpowered nothing ACKs,
+         // and stacking heartbeats on an unacknowledged bus kept the TX queue
+         // full (no SDO got through until a reset). Resumes by itself.
+         const auto bus = can_bus.get_status();
+         if (heartbeat_enabled.load() && !bus.bus_off && bus.tx_error_count < 96) {
            CanFrame frame{};
            frame.id = 0x700 + kHeartbeatNodeId;
            frame.dlc = 1;

@@ -91,19 +91,41 @@ int main() {
             LevelTrajectory::Result::Ok && std::fabs(t.speed_at(0.0f) - 8.0f) < 1e-3f, "re-plan keeps the initial speed");
   check(walk(t, 0.0f).max_speed < lim.speed_deg_s * 1.03f, "re-plan stays under the limit");
 
+  // the move that failed on the rig (straight line crosses the lower-left edge):
+  // now routed around it, level, every point inside the operable range
+  {
+    LevelTrajectory::Pairs a{};
+    check(pairs_at(155.5f, 201.6f, 0.0f, a), "IK of the rig start");
+    const auto r = t.plan(a, 44.2f - ref.x, 159.4f - ref.y, 0.0f, ref, geo, range, lo, hi, lim);
+    std::printf("rig move (155.5, 201.6) -> (44.2, 159.4): %s, %zu corners, %.2f s\n",
+                r == LevelTrajectory::Result::Ok ? (t.routed() ? "routed" : "straight") : "REJECTED",
+                t.route_corners().size(), t.duration());
+    for (const auto &c : t.route_corners()) std::printf("   corner (%.1f, %.1f)\n", c.x + ref.x, c.y + ref.y);
+    check(r == LevelTrajectory::Result::Ok && t.routed(), "the rig move is routed around the edge");
+    const Walk wr = walk(t, 0.0f);
+    check(wr.worst_tilt < 0.05f && wr.max_speed < lim.speed_deg_s * 1.03f, "routed move level and within speed");
+    bool all_inside = true;
+    for (float time = 0; time <= t.duration(); time += 0.01f) all_inside = all_inside && range.contains(t.at(time), 0.0f);
+    check(all_inside, "every point of the routed move is inside the operable range");
+    LevelTrajectory s2;
+    check(s2.plan(a, 44.2f - ref.x, 159.4f - ref.y, 0.0f, ref, geo, range, lo, hi, lim, 0.0f, false) ==
+              LevelTrajectory::Result::OutOfLimits, "without routing the same move is refused (as before)");
+  }
+
   // random moves inside the range: level everywhere when planned
   std::mt19937 rng(7);
   std::uniform_real_distribution<float> X(-34.0f, 266.0f), Y(150.0f, 568.0f);
-  int planned = 0, rejected = 0; float worst = 0;
-  for (int i = 0; i < 300; ++i) {
+  int planned = 0, rejected = 0, routed = 0; float worst = 0;
+  for (int i = 0; i < 1000; ++i) {
     LevelTrajectory::Pairs a{}, b{};
     const float x0 = X(rng), y0 = Y(rng), x1 = X(rng), y1 = Y(rng);
     if (!pairs_at(x0, y0, 0.0f, a) || !pairs_at(x1, y1, 0.0f, b)) continue;
     if (!range.contains(a, 0.0f) || !range.contains(b, 0.0f)) continue;
     if (t.plan(a, x1 - ref.x, y1 - ref.y, 0.0f, ref, geo, range, lo, hi, lim) != LevelTrajectory::Result::Ok) { ++rejected; continue; }
-    ++planned; worst = std::max(worst, walk(t, 0.0f).worst_tilt);
+    ++planned; routed += t.routed(); worst = std::max(worst, walk(t, 0.0f).worst_tilt);
+    for (float time = 0; time <= t.duration(); time += 0.02f) if (!range.contains(t.at(time), 0.0f)) { check(false, "random routed point outside"); break; }
   }
-  std::printf("random moves: %d planned, %d rejected (path leaves the range), worst tilt %.3f deg\n", planned, rejected, worst);
+  std::printf("random moves: %d planned (%d routed around an edge), %d rejected, worst tilt %.3f deg\n", planned, routed, rejected, worst);
   check(planned > 50 && worst < 0.05f, "random in-range moves stay level");
 
   if (failures == 0) std::printf("level_trajectory: all checks passed\n");

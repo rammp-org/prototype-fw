@@ -108,7 +108,7 @@ StemController::Result StemController::set_seat_tilt(float tilt_deg, float rpm) 
   if (brakes_engaged_) {
     return Result::BrakesEngaged;
   }
-  if (zero_mismatch_[static_cast<uint8_t>(Pair::Seat)]) {
+  if (zero_mismatch_[static_cast<uint8_t>(Pair::Seat)] && !check_pair_unlocked(Pair::Seat)) {
     logger_.error("seat tilt rejected: seat pair zero mismatch");
     return Result::ZeroMismatch;
   }
@@ -216,7 +216,7 @@ StemController::Result StemController::move_to(float x_rel, float y_rel, float r
                  -pose.pair_deg[0], -pose.pair_deg[1]);
     return Result::OutOfLimits;
   }
-  if (any_zero_mismatch_unlocked()) {
+  if (any_zero_mismatch_unlocked() && recheck_mismatch_unlocked()) {
     logger_.error("move x={:.1f} y={:.1f} rejected: pair zero mismatch", x_rel, y_rel);
     return Result::ZeroMismatch;
   }
@@ -283,8 +283,8 @@ StemController::Result StemController::start_move_unlocked(float x_rel, float y_
                  x_rel, y_rel, plan.fail_x, plan.fail_y);
     return Result::Unreachable;
   case LevelTrajectory::Result::OutOfLimits:
-    logger_.warn("move x={:.1f} y={:.1f}: the straight path leaves the operable range at "
-                 "({:.1f}, {:.1f}); go around it in two moves",
+    logger_.warn("move x={:.1f} y={:.1f}: no path inside the operable range (the straight line "
+                 "leaves it at ({:.1f}, {:.1f}) and no route around the edge was found)",
                  x_rel, y_rel, plan.fail_x, plan.fail_y);
     return Result::OutOfLimits;
   }
@@ -314,8 +314,12 @@ StemController::Result StemController::start_move_unlocked(float x_rel, float y_
   target_y_ = y_rel;
   const auto &end = run_->plan.end();
   logger_.info("level move x={:.1f} y={:.1f} -> left={:.2f} right={:.2f} seat={:.2f} deg, "
-               "{:.1f} s at {:.1f} deg/s",
-               x_rel, y_rel, end[0], end[1], end[2], run_->plan.duration(), speed_deg_s);
+               "{:.1f} s at {:.1f} deg/s{}",
+               x_rel, y_rel, end[0], end[1], end[2], run_->plan.duration(), speed_deg_s,
+               run_->plan.routed() ? ", routed around the operable range's edge" : "");
+  for (const auto &corner : run_->plan.route_corners()) {
+    logger_.info("  via ({:.1f}, {:.1f})", corner.x, corner.y);
+  }
   return Result::Ok;
 }
 
@@ -486,7 +490,7 @@ StemController::Result StemController::set_pair(Pair pair, float degrees, float 
   if (brakes_engaged_) {
     return Result::BrakesEngaged;
   }
-  if (zero_mismatch_[static_cast<uint8_t>(pair)]) {
+  if (zero_mismatch_[static_cast<uint8_t>(pair)] && !check_pair_unlocked(pair)) {
     logger_.error("set {} rejected: pair zero mismatch", stem::to_string(pair));
     return Result::ZeroMismatch;
   }
@@ -521,6 +525,12 @@ bool StemController::stop_unlocked() {
   if (config_.flush_pending_commands) {
     config_.flush_pending_commands();
   }
+  // Every drive starts decelerating NOW, at the stop deceleration: halting the
+  // motors one by one (each waited until at rest) let the other motors - even
+  // a pair's own partner on the same shaft - keep driving for seconds.
+  for (auto &motor : config_.motors) {
+    motor.request_halt(kStopDecel);
+  }
   // Halt: the drives decelerate with the profile deceleration and HOLD, still
   // enabled (EyouMotor::halt raises the controlword's halt bit, waits for rest,
   // and makes the reached position the set-point). A pair whose halt was not
@@ -543,8 +553,8 @@ bool StemController::stop_unlocked() {
     for (uint8_t i = 0; i < kPairCount; ++i) {
       all_ok = actuator(static_cast<Pair>(i)).hold_position() && all_ok;
     }
-    restore_profile_unlocked();
   }
+  restore_profile_unlocked(); // the stop deceleration / streaming profile -> the normal one
   logger_.warn("STOP: {}", all_ok ? "every pair halted and holding" : "see the errors above");
   // the move this interrupted never reached its target: a later seat tilt must
   // offset the MEASURED seat angle (the Eyou branch of set_seat_tilt), not the
@@ -674,6 +684,7 @@ bool StemController::release_brakes() {
   const bool ok = right_ok && left_ok && seat_ok;
   if (ok) {
     brakes_engaged_.store(false);
+    recheck_mismatch_unlocked(); // a boot with the drives unpowered left a stale flag
   }
   logger_.info("brakes released (drives enabled, holding): right={} left={} seat={}", right_ok,
                left_ok, seat_ok);
@@ -682,8 +693,8 @@ bool StemController::release_brakes() {
 
 bool StemController::engage_brakes() {
   std::lock_guard<std::mutex> lock(mutex_);
-  if (run_) {
-    stop_unlocked(); // decelerate first, then switch off
+  if (!measuring_) {
+    stop_unlocked(); // decelerate to rest first (any move), then switch off
   }
   if (measuring_) {
     for (auto &motor : config_.motors) {
@@ -910,6 +921,16 @@ bool StemController::check_pair_unlocked(Pair pair) {
                   stem::to_string(pair));
   }
   return ok;
+}
+
+bool StemController::recheck_mismatch_unlocked() {
+  for (uint8_t i = 0; i < kPairCount; ++i) {
+    if (zero_mismatch_[i] && check_pair_unlocked(static_cast<Pair>(i))) {
+      logger_.info("{} pair zero mismatch cleared on re-check (drives answering now)",
+                   stem::to_string(static_cast<Pair>(i)));
+    }
+  }
+  return any_zero_mismatch_unlocked();
 }
 
 bool StemController::any_zero_mismatch_unlocked() const {

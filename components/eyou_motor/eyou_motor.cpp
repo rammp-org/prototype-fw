@@ -1080,6 +1080,15 @@ bool EyouMotor::set_profile_position_config(const ProfilePositionConfig &config,
   return true;
 }
 
+bool EyouMotor::request_halt(float deceleration_degrees_per_second_squared) {
+  std::lock_guard<std::mutex> lock(transaction_mutex_);
+  uint32_t deceleration = 0;
+  if (degrees_to_profile_units(deceleration_degrees_per_second_squared, deceleration)) {
+    send_sdo_u32(kProfileDecelerationIndex, deceleration);
+  }
+  return send_sdo_u16(kControlwordIndex, kControlwordEnableOperation | kControlwordHalt);
+}
+
 bool EyouMotor::halt(uint32_t timeout_ms) {
   std::lock_guard<std::mutex> lock(transaction_mutex_);
   // halt bit set, operation stays enabled: the drive decelerates

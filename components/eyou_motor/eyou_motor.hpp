@@ -143,6 +143,10 @@ public:
   // then make the position reached the new set-point and release the halt bit,
   // so the move does not resume. The drive stays enabled.
   bool halt(uint32_t timeout_ms = 2000);
+  // Only the first half of halt(): the stopping deceleration (0x6084) and the
+  // halt bit, no waiting - so a STOP can start every drive decelerating at
+  // once before waiting on any of them.
+  bool request_halt(float deceleration_degrees_per_second_squared);
 
   // --- which node this object talks to ---
   // Talk to another CANopen node id from now on (the receivers move with it;
