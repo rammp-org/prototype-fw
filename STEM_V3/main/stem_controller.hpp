@@ -26,7 +26,7 @@
 
 namespace stem {
 
-enum class Pair : uint8_t { Left = 0, Right = 1, Seat = 2 };
+enum class Pair : uint8_t { M1_Seat = 0, M2_Seat = 1, M3_Seat = 2 };
 inline constexpr size_t kPairCount = 3;
 inline constexpr size_t kMotorCount = 6;
 
@@ -97,14 +97,14 @@ struct PoseCommand {
 class StemController : public espp::BaseComponent {
 public:
   struct Config {
-    PairedEyouActuator &left;
-    PairedEyouActuator &right;
-    PairedEyouActuator &seat;
+    PairedEyouActuator &m1_seat; ///< base motor M1 (motors 102 primary / 101)
+    PairedEyouActuator &m2_seat; ///< base motor M2 (104 / 103)
+    PairedEyouActuator &m3_seat; ///< seat tilt M3 (106 / 105)
     std::span<EyouMotor> motors; ///< every motor, for telemetry (ids reported as-is)
     bool can_ok{true};           ///< whether the CAN bus came up (reported in State)
     /// Per-pair hard position limits (primary motor, Pair order), written to the
     /// drives as their position clamp: the bounding box of the operable range
-    /// plus ~5 deg (left = -enc101 in [6, 90], right = -enc103 in [-47, 12], seat
+    /// plus ~5 deg (M1_Seat = -enc101 in [6, 90], M2_Seat = -enc103 in [-47, 12], M3_Seat
     /// = level +/- tilt over the whole range). Set pair moves are clamped to these.
     std::array<float, kPairCount> min_deg{-95.0f, -17.0f, -55.0f};
     std::array<float, kPairCount> max_deg{-1.0f, 52.0f, 155.0f};

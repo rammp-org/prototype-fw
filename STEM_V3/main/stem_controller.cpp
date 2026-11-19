@@ -1,6 +1,8 @@
 #include "stem_controller.hpp"
 
 #include <algorithm>
+#include <cctype>
+#include <string>
 #include <cmath>
 
 #include "freertos/FreeRTOS.h"
@@ -10,23 +12,28 @@ namespace stem {
 
 const char *to_string(Pair pair) {
   switch (pair) {
-  case Pair::Left:
-    return "left";
-  case Pair::Right:
-    return "right";
-  case Pair::Seat:
-    return "seat";
+  case Pair::M1_Seat:
+    return "M1_Seat";
+  case Pair::M2_Seat:
+    return "M2_Seat";
+  case Pair::M3_Seat:
+    return "M3_Seat";
   }
   return "?";
 }
 
 std::optional<Pair> pair_from_name(std::string_view name) {
-  if (name == "left")
-    return Pair::Left;
-  if (name == "right")
-    return Pair::Right;
-  if (name == "seat")
-    return Pair::Seat;
+  // M1_Seat / M2_Seat / M3_Seat, any case; "m1" / "m2" / "m3" for short
+  std::string lower(name);
+  for (auto &c : lower) {
+    c = static_cast<char>(std::tolower(static_cast<unsigned char>(c)));
+  }
+  if (lower == "m1_seat" || lower == "m1")
+    return Pair::M1_Seat;
+  if (lower == "m2_seat" || lower == "m2")
+    return Pair::M2_Seat;
+  if (lower == "m3_seat" || lower == "m3")
+    return Pair::M3_Seat;
   return std::nullopt;
 }
 
@@ -68,14 +75,14 @@ StemController::StemController(const Config &config)
 
 PairedEyouActuator &StemController::actuator(Pair pair) {
   switch (pair) {
-  case Pair::Left:
-    return config_.left;
-  case Pair::Right:
-    return config_.right;
-  case Pair::Seat:
-    return config_.seat;
+  case Pair::M1_Seat:
+    return config_.m1_seat;
+  case Pair::M2_Seat:
+    return config_.m2_seat;
+  case Pair::M3_Seat:
+    return config_.m3_seat;
   }
-  return config_.left;
+  return config_.m1_seat;
 }
 
 const PairedEyouActuator &StemController::actuator(Pair pair) const {
@@ -108,7 +115,7 @@ StemController::Result StemController::set_seat_tilt(float tilt_deg, float rpm) 
   if (brakes_engaged_) {
     return Result::BrakesEngaged;
   }
-  if (zero_mismatch_[static_cast<uint8_t>(Pair::Seat)] && !check_pair_unlocked(Pair::Seat)) {
+  if (zero_mismatch_[static_cast<uint8_t>(Pair::M3_Seat)] && !check_pair_unlocked(Pair::M3_Seat)) {
     logger_.error("seat tilt rejected: seat pair zero mismatch");
     return Result::ZeroMismatch;
   }
@@ -136,7 +143,7 @@ StemController::Result StemController::set_seat_tilt(float tilt_deg, float rpm) 
     seat_deg = -solution.m3_angle_deg + tilt_deg;
   } else {
     std::array<float, 2> seat_position{};
-    if (!config_.seat.get_position(seat_position)) {
+    if (!config_.m3_seat.get_position(seat_position)) {
       // without the live seat angle the tilt change has no base: a failed
       // read must not turn a small adjustment into a move to `tilt_deg`
       logger_.error("seat tilt rejected: could not read the seat pair position");
@@ -144,7 +151,7 @@ StemController::Result StemController::set_seat_tilt(float tilt_deg, float rpm) 
     }
     seat_deg = seat_position[0] - previous_tilt + tilt_deg;
   }
-  constexpr auto kSeat = static_cast<uint8_t>(Pair::Seat);
+  constexpr auto kSeat = static_cast<uint8_t>(Pair::M3_Seat);
   if (!config_.operable.tilt_contains(tilt_deg)) {
     logger_.warn("seat tilt {:.1f} deg outside the operable range [{}, {}] deg from level",
                  tilt_deg, config_.operable.tilt_min_deg, config_.operable.tilt_max_deg);
@@ -156,7 +163,7 @@ StemController::Result StemController::set_seat_tilt(float tilt_deg, float rpm) 
     return Result::OutOfLimits;
   }
   (void)rpm; // EyouMotor moves at its pre-configured profile velocity, not a per-call speed.
-  if (!config_.seat.set_position(seat_deg)) {
+  if (!config_.m3_seat.set_position(seat_deg)) {
     return Result::ActuatorFailed;
   }
   seat_tilt_deg_.store(tilt_deg);
@@ -313,7 +320,7 @@ StemController::Result StemController::start_move_unlocked(float x_rel, float y_
   target_x_ = x_rel;
   target_y_ = y_rel;
   const auto &end = run_->plan.end();
-  logger_.info("level move x={:.1f} y={:.1f} -> left={:.2f} right={:.2f} seat={:.2f} deg, "
+  logger_.info("level move x={:.1f} y={:.1f} -> M1_Seat={:.2f} M2_Seat={:.2f} M3_Seat={:.2f} deg, "
                "{:.1f} s at {:.1f} deg/s{}",
                x_rel, y_rel, end[0], end[1], end[2], run_->plan.duration(), speed_deg_s,
                run_->plan.routed() ? ", routed around the operable range's edge" : "");
@@ -464,7 +471,7 @@ void StemController::service() {
     velocity[i] = std::clamp(feed + kPositionGain * (target - measured[i]), -v_max, v_max);
   }
   // seat first: of the three, it is the one that keeps the seat level
-  constexpr Pair order[] = {Pair::Seat, Pair::Left, Pair::Right};
+  constexpr Pair order[] = {Pair::M3_Seat, Pair::M1_Seat, Pair::M2_Seat};
   for (const Pair pair : order) {
     const auto i = static_cast<uint8_t>(pair);
     if (!actuator(pair).set_velocity(velocity[i])) {
@@ -536,8 +543,8 @@ bool StemController::stop_unlocked() {
   // and makes the reached position the set-point). A pair whose halt was not
   // confirmed is disabled instead: coasting beats a pair that may still be
   // moving towards a target the others abandoned.
-  PairedEyouActuator *pairs[] = {&config_.right, &config_.left, &config_.seat};
-  const char *names[] = {"right", "left", "seat"};
+  PairedEyouActuator *pairs[] = {&config_.m2_seat, &config_.m1_seat, &config_.m3_seat};
+  const char *names[] = {"M2_Seat", "M1_Seat", "M3_Seat"};
   bool all_ok = true;
   for (size_t i = 0; i < 3; ++i) {
     if (pairs[i]->halt()) {
@@ -678,16 +685,16 @@ bool StemController::release_brakes() {
   std::lock_guard<std::mutex> lock(mutex_);
   // EyouMotor has no separate brake relay: enabling the drives releases the
   // brakes, and the drives then HOLD the pose (target = where each one is).
-  const bool right_ok = config_.right.enable_drive();
-  const bool left_ok = config_.left.enable_drive();
-  const bool seat_ok = config_.seat.enable_drive();
-  const bool ok = right_ok && left_ok && seat_ok;
+  const bool m2_ok = config_.m2_seat.enable_drive();
+  const bool m1_ok = config_.m1_seat.enable_drive();
+  const bool m3_ok = config_.m3_seat.enable_drive();
+  const bool ok = m1_ok && m2_ok && m3_ok;
   if (ok) {
     brakes_engaged_.store(false);
     recheck_mismatch_unlocked(); // a boot with the drives unpowered left a stale flag
   }
-  logger_.info("brakes released (drives enabled, holding): right={} left={} seat={}", right_ok,
-               left_ok, seat_ok);
+  logger_.info("brakes released (drives enabled, holding): M1_Seat={} M2_Seat={} M3_Seat={}",
+               m1_ok, m2_ok, m3_ok);
   return ok;
 }
 
@@ -964,8 +971,8 @@ State StemController::snapshot(bool read_motors) {
   // Measured pair positions -> crank angles (inverse of pose_to_pair_deg) -> pose;
   // only when every read succeeded (a zeroed entry would draw a false pose)
   IkSolution fk{};
-  if (all_pairs_read && solve_fk_reference(-state.pair_deg[static_cast<uint8_t>(Pair::Left)],
-                                           -state.pair_deg[static_cast<uint8_t>(Pair::Right)],
+  if (all_pairs_read && solve_fk_reference(-state.pair_deg[static_cast<uint8_t>(Pair::M1_Seat)],
+                                           -state.pair_deg[static_cast<uint8_t>(Pair::M2_Seat)],
                                            config_.reference, fk, config_.geometry)) {
     state.pose_valid = true;
     state.pose_x = fk.m3[0] - config_.reference.x;

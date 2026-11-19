@@ -48,7 +48,7 @@
     .torques { display: grid; grid-template-columns: repeat(3, 1fr); gap: 10px; }
     @media (max-width: 640px) { .torques { grid-template-columns: 1fr; } }
     .tpair { border: 1px solid var(--line); border-radius: 8px; padding: 8px 10px; background: var(--panel2); }
-    .tpair .pname { font-size: 12px; color: var(--muted); text-transform: uppercase; letter-spacing: .06em; margin-bottom: 4px; }
+    .tpair .pname { font-size: 12px; color: var(--muted); letter-spacing: .04em; margin-bottom: 4px; }
     .tgrid { display: grid; grid-template-columns: auto 1fr 1fr; gap: 2px 10px; font-variant-numeric: tabular-nums; align-items: baseline; }
     .tgrid .h { font-size: 11px; color: var(--muted); text-align: right; }
     .tgrid .id { font-weight: 650; }
@@ -70,7 +70,7 @@
     td.bad { color: var(--err); } td.warn { color: var(--warn); }
     .pairs { display: grid; grid-template-columns: auto auto auto auto auto auto; gap: 6px 10px; align-items: center;
       justify-content: center; font-variant-numeric: tabular-nums; }
-    .pairs .name { font-weight: 600; text-transform: capitalize; }
+    .pairs .name { font-weight: 600; }
     .pairs .val { min-width: 70px; text-align: right; }
     #unsupported { display: none; background: #3a1d1d; border: 1px solid var(--err); border-radius: 8px;
       padding: 12px 16px; margin: 0 18px; }
@@ -132,16 +132,28 @@
         <span id="measureState" class="mpill">off</span>
       </div>
       <canvas id="trend" width="800" height="190"></canvas>
-      <div class="tlegend"><span><i style="background:var(--link1)"></i>left axis</span><span><i style="background:var(--link2)"></i>right axis</span><span><i style="background:var(--link4)"></i>seat axis</span><span>sensor Nm (primary − secondary), last 30 s</span></div>
+      <div class="tlegend"><span><i style="background:var(--link1)"></i>M1_Seat axis</span><span><i style="background:var(--link2)"></i>M2_Seat axis</span><span><i style="background:var(--link4)"></i>M3_Seat axis</span><span>sensor Nm (primary − secondary), last 30 s</span></div>
       <div class="row" style="margin-top:10px">
         <button id="captureBtn" disabled>Capture (1 s average)</button>
         <button id="copyCsvBtn" disabled>Copy CSV</button>
         <button id="clearCapBtn" disabled>Clear</button>
       </div>
       <table id="captures" style="margin-top:8px; display:none">
-        <thead><tr><th>#</th><th>x_rel</th><th>y_rel</th><th>tilt °</th><th>left Nm</th><th>right Nm</th><th>seat Nm</th></tr></thead>
+        <thead><tr><th>#</th><th>x_rel</th><th>y_rel</th><th>tilt °</th><th>M1_Seat Nm</th><th>M2_Seat Nm</th><th>M3_Seat Nm</th></tr></thead>
         <tbody></tbody>
       </table>
+    </div>
+
+    <div class="panel" id="tourPanel">
+      <h2>Data tour <span class="muted" style="text-transform:none;letter-spacing:0">— home → full up → full fwd → full rear → full down → home, logging every telemetry frame</span></h2>
+      <div class="row">
+        <button id="tourBtn" class="primary" disabled>Run tour</button>
+        <label class="inline">dwell s <input id="tourDwell" type="number" min="0" max="30" step="1" value="4" style="width:70px" /></label>
+        <label class="inline">log every ms <input id="tourPeriod" type="number" min="50" max="1000" step="50" value="100" style="width:80px" /></label>
+        <button id="tourExportBtn" disabled>Export CSV</button>
+        <span id="tourStatus" class="muted">idle</span>
+      </div>
+      <div id="tourStops" class="muted" style="text-align:center; font-size:12px; margin-top:6px"></div>
     </div>
 
     <div class="panel">
@@ -216,14 +228,14 @@
     const FLAG = { STREAMING: 1, TARGET_VALID: 2, POSE_VALID: 4, MOTORS_OK: 8, CAN_OK: 16, CAN_BUS_OFF: 32, MEASURING: 64, BRAKES: 128 };
     // v2 CAN block: the controller's TWAI error state (stem_protocol.hpp can_state::)
     const CAN_STATE = { 0: "not started", 1: "error active", 2: "error warning", 3: "error passive", 4: "BUS OFF", 255: "?" };
-    const PAIR_NAMES = ["left", "right", "seat"], ALL_PAIRS = 0xFF;
+    const PAIR_NAMES = ["M1_Seat", "M2_Seat", "M3_Seat"], ALL_PAIRS = 0xFF;
     const DISCOVERY_TIMEOUT_MS = 800;
 
     const els = {};
     for (const id of ["status","connectUsbBtn","connectSerialBtn","disconnectBtn","anyDevice","unsupported","canvas",
       "poseRel","targetStatus","motion","torques","log","xInput","yInput","rpmInput","moveBtn",
       "homeBtn","stopBtn","moveOnRelease","liveDrag","pairs","zeroAllBtn","zeroAlignAllBtn","releaseBtn","resetFaultBtn","tiltInput","tiltBtn","tiltNow","motors","stream","periodInput",
-      "telemAge","devName","devFw","devBuild","devIdf","devModules","torqueInput","torqueBtn","torqueNow","torqueUnit","canState","canCounters","measurePanel","measureBtn","measureMode","measureState","trend","captureBtn","copyCsvBtn","clearCapBtn","captures"]) els[id] = document.getElementById(id);
+      "telemAge","devName","devFw","devBuild","devIdf","devModules","torqueInput","torqueBtn","torqueNow","torqueUnit","canState","canCounters","tourBtn","tourDwell","tourPeriod","tourExportBtn","tourStatus","tourStops","measurePanel","measureBtn","measureMode","measureState","trend","captureBtn","copyCsvBtn","clearCapBtn","captures"]) els[id] = document.getElementById(id);
 
     function logLine(cls, text) {
       const line = document.createElement("div");
@@ -373,7 +385,7 @@
     // Per-pair hard limits (primary motor, Pair order); the device's INFO replaces these defaults.
     let pairLimits = [{ min: -95, max: -1 }, { min: -17, max: 52 }, { min: -55, max: 155 }];
     // Operable range - must match STEM_V3/main/operable_range.hpp (v3.1 reach study, Rev C):
-    // a = enc101 = -left pair, b = enc103 = -right pair (calibrated zero); seat tilt from level.
+    // a = enc101 = -M1_Seat pair, b = enc103 = -M2_Seat pair (calibrated zero); seat tilt from level.
     const OPERABLE = { aMin: 6, aMax: 90, tiltMin: -20, tiltMax: 50,
       bLo: (a) => Math.max(-47, 0.6 * a - 96), bHi: (a) => Math.min(12, 1.9 * a - 34, 70 - 1.25 * a) };
     const inOperableBase = (a, b) => a >= OPERABLE.aMin && a <= OPERABLE.aMax && b >= OPERABLE.bLo(a) && b <= OPERABLE.bHi(a);
@@ -790,7 +802,7 @@
       // DS402 statusword bit 10 = target reached (profile position): clear while a move is in progress
       const moving = s.motors.some(m => m.ok && (m.statusword & 0x0400) === 0 && (m.statusword & 0x0004) !== 0);
       els.motion.className = moving ? "good" : "muted"; els.motion.textContent = (moving ? "moving" : "idle") + (s.flags & FLAG.CAN_OK ? "" : " · CAN DOWN") + (s.flags & FLAG.CAN_BUS_OFF ? " · CAN BUS OFF" : "") + (s.flags & FLAG.MOTORS_OK ? "" : " · motor status missing");
-      renderPairs(); renderMotors(s.motors); renderTorques(s.motors); renderCan(s); onMeasureState(s); renderBrakes(s);
+      renderPairs(); renderMotors(s.motors); renderTorques(s.motors); renderCan(s); onMeasureState(s); renderBrakes(s); tourOnState(s); renderTour();
       // DS402 statusword bit 3 = Fault: offer the reset while any motor reports one
       const anyFault = s.motors.some(m => m.ok && (m.statusword & 0x0008) !== 0);
       els.resetFaultBtn.disabled = !transport || !anyFault; els.resetFaultBtn.className = anyFault ? "danger" : "";
@@ -855,7 +867,7 @@
     }
     // Per-motor torque readouts, grouped by pair: motor side (0x6077, ‰ of rated -> Nm) and output sensor (0x27BD, Nm).
     // "axis" = primary - secondary: the two motors of a pair face each other, so a shared push reads with opposite signs.
-    const DEFAULT_PAIRS = [{ name: "left", primary: 102, secondary: 101 }, { name: "right", primary: 104, secondary: 103 }, { name: "seat", primary: 106, secondary: 105 }];
+    const DEFAULT_PAIRS = [{ name: "M1_Seat", primary: 102, secondary: 101 }, { name: "M2_Seat", primary: 104, secondary: 103 }, { name: "M3_Seat", primary: 106, secondary: 105 }];
     let torqueEls = null, torqueKey = null;
     function renderTorques(motors) {
       const meta = motorsMeta.length ? motorsMeta : DEFAULT_PAIRS, key = JSON.stringify(meta);
@@ -918,7 +930,7 @@
     // Drives off, brakes holding, every drive in the chosen mode; the firmware keeps polling the
     // output torque sensors (0x27BD) with the telemetry. The trend plots each axis's sensor sum.
     let measuring = false, measureBusy = false;
-    const TREND_S = 30, trend = []; // { t, axes: [left, right, seat] | null per axis, pose, tilt }
+    const TREND_S = 30, trend = []; // { t, axes: [M1_Seat, M2_Seat, M3_Seat] | null per axis, pose, tilt }
     const captures = [];
     function axisSums(motors) {
       const meta = motorsMeta.length ? motorsMeta : DEFAULT_PAIRS;
@@ -986,7 +998,7 @@
     }
     function capturesCsv() {
       const ids = captures.length ? captures[0].perMotor.map(p => p[0]) : [];
-      const head = ["n", "time", "measure_mode", "x_rel_mm", "y_rel_mm", "tilt_deg", "left_axis_Nm", "right_axis_Nm", "seat_axis_Nm", ...ids.map(i => "sensor_" + i + "_Nm"), "samples"];
+      const head = ["n", "time", "measure_mode", "x_rel_mm", "y_rel_mm", "tilt_deg", "M1_Seat_axis_Nm", "M2_Seat_axis_Nm", "M3_Seat_axis_Nm", ...ids.map(i => "sensor_" + i + "_Nm"), "samples"];
       const rows = captures.map(c => [c.n, c.time, c.measuring ? 1 : 0, c.pose ? c.pose[0].toFixed(2) : "", c.pose ? c.pose[1].toFixed(2) : "",
         c.tilt == null ? "" : c.tilt.toFixed(2), ...c.avg.map(v => v == null ? "" : v.toFixed(3)),
         ...ids.map(i => { const p = c.perMotor.find(q => q[0] === i); return p && p[1] != null ? p[1].toFixed(3) : ""; }), c.samples]);
@@ -1003,6 +1015,109 @@
       try { await navigator.clipboard.writeText(capturesCsv()); logLine("ok", "copied " + captures.length + " capture(s) as CSV"); }
       catch (e) { logLine("err", "copy failed: " + (e.message || e)); }
     });
+
+    // ======================= Data tour =======================
+    // Moves through the extremes of the operable range (each target pulled in along the line from home until
+    // it passes the same checks as a manual target: reachable, pair limits, operable range, design travel),
+    // waits for arrival, dwells, and logs every telemetry frame: pose, pair angles, and per motor position,
+    // velocity, motor-side torque (0x6077) and output sensor torque (0x27BD). Export -> CSV for the analysis.
+    const TOUR_STOPS = [["home", 0, 0], ["full up", 0, 360], ["full fwd", 200, 0], ["full rear", -100, 0], ["full down", 0, -70], ["home", 0, 0]];
+    const tour = { running: false, rows: [], t0: 0, stop: -1, phase: "", target: null, arrivedAt: 0, phaseStart: 0, stops: [], prevPeriod: null, meta: null };
+    function tourTargetOk(x, y) {
+      const raw = solveIk(x + CAD_HOME[0], y + CAD_HOME[1]); if (!raw) return false;
+      const s = applyRef(raw, reference); return inDesignBox(s.m3) && withinLimits(pairsFromSolution(s));
+    }
+    function tourReachable(x, y) { // pull the nominal point in toward home until it is a valid target, 3 mm margin
+      if (tourTargetOk(x, y)) return [x, y];
+      let lo = 0, hi = 1; for (let k = 0; k < 30; k++) { const m = (lo + hi) / 2; tourTargetOk(x * m, y * m) ? lo = m : hi = m; }
+      const len = Math.hypot(x, y), f = Math.max(0, lo - 3 / Math.max(len, 1e-6));
+      return tourTargetOk(x * f, y * f) ? [x * f, y * f] : null;
+    }
+    function tourStatus(text, cls) { els.tourStatus.textContent = text; els.tourStatus.className = cls || "muted"; }
+    function renderTour() {
+      els.tourBtn.disabled = !transport || (!tour.running && (measuring || brakesEngaged));
+      els.tourBtn.textContent = tour.running ? "Abort tour (STOP)" : "Run tour";
+      els.tourBtn.className = tour.running ? "danger" : "primary";
+      els.tourExportBtn.disabled = tour.running || !tour.rows.length;
+    }
+    function tourGo(i) {
+      tour.stop = i;
+      if (i >= tour.stops.length) return tourEnd("done: " + tour.rows.length + " rows - Export CSV", "good");
+      const st = tour.stops[i];
+      refreshTarget(st.x, st.y);
+      if (!targetOk) return tourEnd("stopped: " + st.name + " is not a valid target", "bad");
+      tour.phase = "moving"; tour.target = st; tour.phaseStart = performance.now(); tour.arrivedAt = 0;
+      tourStatus("→ " + st.name + " (" + (i + 1) + "/" + tour.stops.length + ")", "good");
+      sendMove();
+    }
+    function tourEnd(text, cls, abort) {
+      if (abort && transport) send(T.STOP);
+      tour.running = false;
+      if (tour.prevPeriod !== null) { els.periodInput.value = tour.prevPeriod; if (transport && els.stream.checked) startStream(); tour.prevPeriod = null; }
+      tourStatus(text, cls); renderTour();
+      logLine(cls === "bad" ? "warn" : "ok", "tour " + text);
+    }
+    function tourStart() {
+      tour.stops = []; const skipped = [];
+      for (const [name, x, y] of TOUR_STOPS) { const p = tourReachable(x, y); p ? tour.stops.push({ name, x: p[0], y: p[1] }) : skipped.push(name); }
+      els.tourStops.textContent = "stops (x_rel, y_rel mm): " + tour.stops.map(s => s.name + " (" + s.x.toFixed(0) + ", " + s.y.toFixed(0) + ")").join(" → ") + (skipped.length ? " · skipped: " + skipped.join(", ") : "");
+      if (tour.stops.length < 2) return tourStatus("no reachable stops", "bad");
+      tour.rows = []; tour.t0 = performance.now(); tour.running = true;
+      tour.meta = { started: new Date().toISOString(), rpm: Number(els.rpmInput.value) || 0, dwell_s: Number(els.tourDwell.value) || 0,
+                    torque_limit_permille: torqueLimit, rated_torque_mNm: ratedTorqueMnm, firmware: els.devFw.textContent };
+      tour.prevPeriod = els.periodInput.value; els.periodInput.value = Number(els.tourPeriod.value) || 100;
+      if (els.stream.checked) startStream(); else { els.stream.checked = true; startStream(); }
+      renderTour(); tourGo(0);
+    }
+    function tourOnState(s) {
+      if (!tour.running) return;
+      if (s.flags & (FLAG.BRAKES | FLAG.MEASURING)) return tourEnd("aborted: brakes engaged / measure mode", "bad", true);
+      const now = performance.now(), st = tour.target, sol = currentSolution;
+      const pose = sol ? [sol.m3[0] - CAD_HOME[0], sol.m3[1] - CAD_HOME[1]] : [NaN, NaN];
+      const tilt = sol && currentPairs ? currentPairs[2] + (sol.m3Angle - reference.m3) : NaN;
+      const meta = motorsMeta.length ? motorsMeta : DEFAULT_PAIRS;
+      const row = { t: (now - tour.t0) / 1000, stop: st ? st.name : "", phase: tour.phase, tx: st ? st.x : NaN, ty: st ? st.y : NaN,
+                    x: pose[0], y: pose[1], tilt, pairs: s.pairs.slice(), motors: {}, axes: [] };
+      for (const m of s.motors) row.motors[m.id] = { pos: m.tracked, vel: m.velocity, mt: m.torque === null ? null : pmToNm(m.torque), sen: m.sensor ?? null, ok: m.ok, sw: m.statusword };
+      for (const p of meta) { const a = row.motors[p.primary], b = row.motors[p.secondary];
+        row.axes.push({ sen: a && b && a.sen !== null && b.sen !== null ? a.sen - b.sen : null, mt: a && b && a.mt !== null && b.mt !== null ? a.mt - b.mt : null }); }
+      tour.rows.push(row);
+      // arrival: within 1.5 mm of the stop and every motor slower than 0.5 deg/s, for 0.5 s
+      const still = s.motors.every(m => !m.ok || m.velocity === null || Math.abs(m.velocity) < 0.5);
+      const near = st && Math.hypot(pose[0] - st.x, pose[1] - st.y) < 1.5;
+      if (tour.phase === "moving") {
+        if (near && still) { if (!tour.arrivedAt) tour.arrivedAt = now; else if (now - tour.arrivedAt > 500) { tour.phase = "dwell"; tour.phaseStart = now; tourStatus("dwell at " + st.name, "good"); } }
+        else tour.arrivedAt = 0;
+        if (now - tour.phaseStart > 40000) return tourEnd("aborted: " + st.name + " not reached in 40 s", "bad", true);
+      } else if (tour.phase === "dwell" && now - tour.phaseStart >= (Number(els.tourDwell.value) || 0) * 1000) tourGo(tour.stop + 1);
+    }
+    function tourCsv() {
+      const meta = motorsMeta.length ? motorsMeta : DEFAULT_PAIRS, ids = [101, 102, 103, 104, 105, 106];
+      const head = ["t_s", "stop", "phase", "target_x_rel_mm", "target_y_rel_mm", "x_rel_mm", "y_rel_mm", "tilt_deg", ...meta.map(p => p.name + "_deg"),
+        ...meta.flatMap(p => [p.name + "_axis_sensor_Nm", p.name + "_axis_motor_Nm"]),
+        ...ids.flatMap(i => ["m" + i + "_pos_deg", "m" + i + "_vel_deg_s", "m" + i + "_motor_Nm", "m" + i + "_sensor_Nm", "m" + i + "_statusword"])];
+      const f = (v, d) => v === null || v === undefined || Number.isNaN(v) ? "" : (typeof v === "number" ? v.toFixed(d) : v);
+      const lines = Object.entries(tour.meta || {}).map(([k, v]) => "# " + k + ": " + v);
+      lines.push("# pairs: " + meta.map(p => p.name + " = " + p.primary + " primary / " + p.secondary + " secondary (axis = primary - secondary)").join("; "));
+      lines.push("# frame: x_rel / y_rel = seat axis M3 from the CAD home, mm; motor_Nm = 0x6077 (motor side, x rated torque); sensor_Nm = 0x27BD (output)");
+      lines.push(head.join(","));
+      for (const r of tour.rows) {
+        const cols = [f(r.t, 3), r.stop, r.phase, f(r.tx, 1), f(r.ty, 1), f(r.x, 2), f(r.y, 2), f(r.tilt, 2), ...r.pairs.map(v => f(v, 3)),
+          ...r.axes.flatMap(a => [f(a.sen, 3), f(a.mt, 3)])];
+        for (const i of ids) { const m = r.motors[i] || {}; cols.push(f(m.pos, 3), f(m.vel, 2), f(m.mt, 3), f(m.sen, 3), m.sw === undefined ? "" : "0x" + m.sw.toString(16).padStart(4, "0")); }
+        lines.push(cols.join(","));
+      }
+      return lines.join("\n");
+    }
+    els.tourBtn.addEventListener("click", () => tour.running ? tourEnd("aborted by the user", "bad", true) : tourStart());
+    els.tourExportBtn.addEventListener("click", () => {
+      const blob = new Blob([tourCsv()], { type: "text/csv" }), a = document.createElement("a");
+      const d = new Date(), pad = (n) => String(n).padStart(2, "0");
+      a.href = URL.createObjectURL(blob); a.download = "stem_tour_" + d.getFullYear() + pad(d.getMonth() + 1) + pad(d.getDate()) + "_" + pad(d.getHours()) + pad(d.getMinutes()) + pad(d.getSeconds()) + ".csv";
+      document.body.appendChild(a); a.click(); a.remove(); setTimeout(() => URL.revokeObjectURL(a.href), 1000);
+      logLine("ok", "tour exported: " + tour.rows.length + " rows");
+    });
+    els.stopBtn.addEventListener("click", () => { if (tour.running) tourEnd("aborted: STOP", "bad"); });
 
     function startStream() { send(T.SET_STREAMING, enc.streaming(true, Number(els.periodInput.value) || 200)); }
     function stopStream() { send(T.SET_STREAMING, enc.streaming(false, Number(els.periodInput.value) || 200)); }
@@ -1057,8 +1172,8 @@
       if (!on) { torqueLimit = null; torqueCeiling = null; ratedTorqueMnm = 0; els.torqueInput.value = ""; els.canState.textContent = "–"; els.canCounters.textContent = "–"; els.canState.className = ""; els.canCounters.className = ""; }
       renderTorque();
       renderPairs();
-      if (!on) measuring = false;
-      renderMeasure();
+      if (!on) { measuring = false; if (tour.running) tourEnd("aborted: disconnected", "bad"); }
+      renderMeasure(); renderTour();
     }
 
     els.connectUsbBtn.addEventListener("click", () => connect("usb"));

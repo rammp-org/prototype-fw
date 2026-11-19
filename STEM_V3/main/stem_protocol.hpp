@@ -51,7 +51,7 @@ static constexpr uint8_t kModule = 7;
 static constexpr uint8_t kProtocolVersion = 3;
 
 /// Actuator pair indices used in payloads.
-enum class Pair : uint8_t { Left = 0, Right = 1, Seat = 2 };
+enum class Pair : uint8_t { M1_Seat = 0, M2_Seat = 1, M3_Seat = 2 };
 static constexpr uint8_t kPairCount = 3;
 /// Wildcard pair index accepted by ZERO.
 static constexpr uint8_t kAllPairs = 0xFF;
@@ -117,7 +117,7 @@ enum class Msg : uint8_t {
 //   u8  flags (see flags:: below)
 //   f32 target x_rel, f32 target y_rel      (last accepted MOVE/HOME; 0 if !kTargetValid)
 //   f32 pose x_rel, f32 pose y_rel          (FK of the tracked crank angles; 0 if !kPoseValid)
-//   f32 left deg, f32 right deg, f32 seat deg (tracked pair positions, primary motor)
+//   f32 M1_Seat deg, f32 M2_Seat deg, f32 M3_Seat deg (tracked pair positions, primary motor)
 //   f32 seat tilt deg                       (offset applied on top of the IK seat angle)
 //   u8  motor count; per motor: u8 id, u8 ok, u16 statusword, u16 error_code,
 //       f32 tracked position deg (read live over CANopen, object 0x6064),
@@ -132,7 +132,7 @@ enum class Msg : uint8_t {
 //
 // IkResult payload:
 //   f32 x_rel, f32 y_rel (echo), u8 reachable, u8 within limits
-//   if reachable: f32 left deg, f32 right deg, f32 seat deg,
+//   if reachable: f32 M1_Seat deg, f32 M2_Seat deg, f32 M3_Seat deg,
 //                 f32 x 10 joints J1, J2, J3, J5, M3 (absolute analysis frame)
 
 namespace flags {

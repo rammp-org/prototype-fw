@@ -37,7 +37,7 @@ struct IkReference {
 //                 at 12 o'clock): theta1 = -11.27 + enc101, theta2 = 169.18 + enc103,
 //                 seat level when enc105 = bar angle (M3->J2) + 33.76, i.e. a
 //                 plate angle (J2->M3) of 146.24 + seat pair. Verified 18 Nov 2026:
-//                 Set left -11.11 / right 25.44 put the rig on the software-zero
+//                 Set M1_Seat -11.11 / M2_Seat 25.44 put the rig on the software-zero
 //                 STEP pose (theta1 -0.75, theta2 143.67) within ~0.6 deg.
 //   (was {170, 230, -0.16, 143.74, 121.23}: an earlier eyeball zero at that pose)
 inline constexpr IkReference kFullDownReference{170.0f, 230.0f, -11.27f, 169.18f, 146.24f};

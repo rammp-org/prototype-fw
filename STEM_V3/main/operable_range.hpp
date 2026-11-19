@@ -13,7 +13,7 @@
 //
 // Encoder angles are those of the calibrated zero (see kFullDownReference):
 //   a = enc101, b = enc103 (the odd motors; enc102 = -a, enc104 = -b, enc106 = -enc105).
-// The firmware's pair angles are the PRIMARY (even) motors, so a = -left, b = -right.
+// The firmware's pair angles are the PRIMARY (even) motors, so a = -M1_Seat, b = -M2_Seat.
 //
 //   6 <= a <= 90
 //   max(-47, 0.6 a - 96) <= b <= min(12, 1.9 a - 34, 70 - 1.25 a)
@@ -59,7 +59,7 @@ struct OperableRange {
     return std::isfinite(tilt_deg) && tilt_deg >= tilt_min_deg && tilt_deg <= tilt_max_deg;
   }
 
-  /// Pair angles in Pair order (left, right, seat; primary motors 102 / 104 / 106)
+  /// Pair angles in Pair order (M1_Seat, M2_Seat, M3_Seat; primary motors 102 / 104 / 106)
   /// plus the seat tilt from level that the seat pair angle encodes.
   bool contains(const std::array<float, 3> &pair_deg, float tilt_deg) const {
     return base_contains(-pair_deg[0], -pair_deg[1]) && tilt_contains(tilt_deg);

@@ -9,7 +9,7 @@
 // angles that keeps the seat at its commanded tilt at EVERY point:
 //
 //   1. level first: if the seat is off its commanded tilt at the start, move
-//      the seat pair alone until it is (left / right hold);
+//      the seat pair alone until it is (M1_Seat / M2_Seat hold);
 //   2. then a straight line of the seat axis M3 from where it is to the target,
 //      sampled so no pair moves more than max_step_deg between samples, each
 //      sample solved with the IK (seat angle = level + tilt) and checked
@@ -37,12 +37,12 @@ struct LevelTrajectoryLimits {
   float accel_deg_s2{20.0f};   ///< fastest pair's acceleration / deceleration
   float max_step_deg{0.25f};   ///< max pair change between path samples
   float cart_step_mm{2.0f};    ///< initial M3 sampling of the straight line
-  float start_match_deg{1.5f}; ///< IK at the start vs the measured left / right
+  float start_match_deg{1.5f}; ///< IK at the start vs the measured M1_Seat / M2_Seat
 };
 
 class LevelTrajectory {
 public:
-  using Pairs = std::array<float, 3>; ///< left, right, seat (pair degrees)
+  using Pairs = std::array<float, 3>; ///< M1_Seat, M2_Seat, M3_Seat (pair degrees)
 
   enum class Result : uint8_t { Ok, StartUnknown, Unreachable, OutOfLimits };
 

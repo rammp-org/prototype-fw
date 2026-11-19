@@ -18,6 +18,9 @@
 #include <cmath>
 #include <condition_variable>
 #include <atomic>
+#include <cstdlib>
+#include <cstring>
+#include <cstdio>
 #include <deque>
 #include <functional>
 #include <memory>
@@ -179,14 +182,14 @@ std::unique_ptr<cli::Menu> make_cli_menu(stem::StemController &controller,
       [&controller](std::ostream &out, const std::string &pair_name, float degrees) {
         const auto pair = stem::pair_from_name(pair_name);
         if (!pair) {
-          out << "Unknown pair '" << pair_name << "'. Use right, left, or seat.\n";
+          out << "Unknown pair '" << pair_name << "'. Use M1_Seat, M2_Seat or M3_Seat (or m1 / m2 / m3).\n";
           return;
         }
         const auto result = controller.set_pair(*pair, degrees, 0.0f);
         out << pair_name << " -> " << degrees << " deg: " << stem::StemController::to_string(result)
             << "\n";
       },
-      "Set one pair position at the default set speed: set <right|left|seat> <degrees>");
+      "Set one pair position at the default set speed: set <M1_Seat|M2_Seat|M3_Seat> <degrees>");
   menu->Insert(
       "ik",
       [](std::ostream &out, float x, float y) {
@@ -207,8 +210,8 @@ std::unique_ptr<cli::Menu> make_cli_menu(stem::StemController &controller,
           return;
         }
         print_solution(out, pose.solution);
-        out << "pairs: left=" << pose.pair_deg[0] << " right=" << pose.pair_deg[1]
-            << " seat=" << pose.pair_deg[2] << " deg"
+        out << "pairs: M1_Seat=" << pose.pair_deg[0] << " M2_Seat=" << pose.pair_deg[1]
+            << " M3_Seat=" << pose.pair_deg[2] << " deg"
             << (pose.within_limits ? "" : " (OUTSIDE LIMITS)") << "\n";
       },
       "Solve the IK relative to the calibration reference (no motion): ik_ref <x_rel> <y_rel>");
@@ -220,8 +223,8 @@ std::unique_ptr<cli::Menu> make_cli_menu(stem::StemController &controller,
         out << "move x=" << x_rel << ", y=" << y_rel << ": "
             << stem::StemController::to_string(result);
         if (result != stem::StemController::Result::Unreachable) {
-          out << " (left=" << pose.pair_deg[0] << " right=" << pose.pair_deg[1]
-              << " seat=" << pose.pair_deg[2] << " deg)";
+          out << " (M1_Seat=" << pose.pair_deg[0] << " M2_Seat=" << pose.pair_deg[1]
+              << " M3_Seat=" << pose.pair_deg[2] << " deg)";
         }
         out << "\n";
       },
@@ -232,6 +235,64 @@ std::unique_ptr<cli::Menu> make_cli_menu(stem::StemController &controller,
         out << "home: " << stem::StemController::to_string(controller.home(0.0f)) << "\n";
       },
       "Move to the home position (reference pose): home");
+  // Diagnostics: read objects from the drives (read only - nothing moves).
+  auto print_sdo = [](std::ostream &out, EyouMotor &motor, uint16_t index, uint8_t sub,
+                      const char *label) {
+    uint32_t raw = 0;
+    uint8_t size = 0;
+    char line[160];
+    if (!motor.read_sdo(index, sub, raw, size)) {
+      std::snprintf(line, sizeof(line), "  %3d  0x%04X:%02X %-26s  no answer / aborted (code in the log)\n",
+                    static_cast<int>(motor.node_id()), static_cast<unsigned>(index),
+                    static_cast<unsigned>(sub), label);
+    } else {
+      float as_float = 0.0f;
+      std::memcpy(&as_float, &raw, sizeof(as_float));
+      const int32_t as_int = size == 1 ? static_cast<int8_t>(raw)
+                             : size == 2 ? static_cast<int16_t>(raw)
+                                         : static_cast<int32_t>(raw);
+      std::snprintf(line, sizeof(line), "  %3d  0x%04X:%02X %-26s  raw 0x%08lX (%d B)  int %ld  real %g\n",
+                    static_cast<int>(motor.node_id()), static_cast<unsigned>(index),
+                    static_cast<unsigned>(sub), label, static_cast<unsigned long>(raw),
+                    static_cast<int>(size),
+                    static_cast<long>(as_int), size == 4 ? static_cast<double>(as_float) : 0.0);
+    }
+    out << line;
+  };
+  menu->Insert(
+      "sdo_read",
+      [actuators, print_sdo](std::ostream &out, int node, const std::string &index, int sub) {
+        const auto idx = static_cast<uint16_t>(std::strtoul(index.c_str(), nullptr, 0));
+        for (auto &motor : actuators) {
+          if (node == 0 || motor.node_id() == node) {
+            print_sdo(out, motor, idx, static_cast<uint8_t>(sub), "");
+          }
+        }
+      },
+      "Read an object from a drive (0 = all six): sdo_read <node> <index, e.g. 0x27BD> <sub>");
+  menu->Insert(
+      "sensor_info",
+      [actuators, print_sdo](std::ostream &out) {
+        struct Item {
+          uint16_t index;
+          uint8_t sub;
+          const char *label;
+        };
+        constexpr Item items[] = {
+            {0x1018, 2, "product code"},          {0x1018, 3, "revision"},
+            {0x1018, 4, "serial number"},         {0x603F, 0, "error code (0x7512 = sensor)"},
+            {0x2087, 0, "rated torque (int = mNm)"}, {0x2452, 0, "torque offset (tare)"},
+            {0x2453, 0, "torque filter Hz"},      {0x27BD, 0, "torque value (int = mNm)"},
+            {0x27BC, 0, "torque reference"},   {0x6061, 0, "mode display"},
+        };
+        for (auto &motor : actuators) {
+          out << "motor " << static_cast<int>(motor.node_id()) << ":\n";
+          for (const auto &item : items) {
+            print_sdo(out, motor, item.index, item.sub, item.label);
+          }
+        }
+      },
+      "Torque-sensor diagnostics on all six drives (read only): sensor_info");
   menu->Insert(
       "heartbeat",
       [](std::ostream &out, int on) {
@@ -439,27 +500,27 @@ std::unique_ptr<cli::Menu> make_cli_menu(stem::StemController &controller,
       [&controller](std::ostream &out, const std::string &pair_name) {
         const auto pair = stem::pair_from_name(pair_name);
         if (!pair && pair_name != "all") {
-          out << "Unknown pair '" << pair_name << "'. Use right, left, seat, or all.\n";
+          out << "Unknown pair '" << pair_name << "'. Use M1_Seat, M2_Seat, M3_Seat (m1 / m2 / m3), or all.\n";
           return;
         }
         controller.zero(pair, false);
         out << pair_name << " zeroed without alignment.\n";
       },
       "Set a pair's (or all pairs') current position as zero without alignment: zero "
-      "<right|left|seat|all>");
+      "<M1_Seat|M2_Seat|M3_Seat|all>");
   menu->Insert(
       "zero_align",
       [&controller](std::ostream &out, const std::string &pair_name) {
         const auto pair = stem::pair_from_name(pair_name);
         if (!pair && pair_name != "all") {
-          out << "Unknown pair '" << pair_name << "'. Use right, left, seat, or all.\n";
+          out << "Unknown pair '" << pair_name << "'. Use M1_Seat, M2_Seat, M3_Seat (m1 / m2 / m3), or all.\n";
           return;
         }
         controller.zero(pair, true);
         out << pair_name << " zeroed after alignment.\n";
       },
       "Set a pair's (or all pairs') current position as zero after alignment: zero_align "
-      "<right|left|seat|all>");
+      "<M1_Seat|M2_Seat|M3_Seat|all>");
   menu->Insert(
       "save_zero",
       [&controller](std::ostream &out) {
@@ -476,7 +537,7 @@ std::unique_ptr<cli::Menu> make_cli_menu(stem::StemController &controller,
           return;
         }
         const auto &config = controller.config();
-        const PairedEyouActuator *pairs[] = {&config.left, &config.right, &config.seat};
+        const PairedEyouActuator *pairs[] = {&config.m1_seat, &config.m2_seat, &config.m3_seat};
         for (uint8_t i = 0; i < stem::kPairCount; ++i) {
           out << stem::to_string(static_cast<stem::Pair>(i)) << " (nodes "
               << static_cast<int>(pairs[i]->primary_id()) << ", "
@@ -605,14 +666,14 @@ extern "C" void app_main(void) {
     // Keep going: USB / OTA / core-dump access must not depend on the motors.
     logger.error("CAN bus failed to start; motor commands will fail until reboot");
   }
-  // Reversed pairs (front / back plane of each axis): 1-2 left, 3-4 right, 5-6 seat
+  // Reversed pairs (front / back plane of each axis): 101-102 M1_Seat, 103-104 M2_Seat, 105-106 M3_Seat
   // The tags are literals: the logger keeps a view of its tag, and a tag set
   // after construction would need the mutable-tag logger option (RAM).
-  PairedEyouActuator right_pair(actuators[3], actuators[2], "PairedEyouActuator-right");
-  PairedEyouActuator left_pair(actuators[1], actuators[0], "PairedEyouActuator-left");
-  PairedEyouActuator seat_pair(actuators[5], actuators[4], "PairedEyouActuator-seat");
-  logger.info("Six motor actuators (IDs 101-106) in three reversed pairs: left 102-101, right "
-              "104-103, seat 106-105");
+  PairedEyouActuator m2_seat_pair(actuators[3], actuators[2], "PairedEyouActuator-M2_Seat");
+  PairedEyouActuator m1_seat_pair(actuators[1], actuators[0], "PairedEyouActuator-M1_Seat");
+  PairedEyouActuator m3_seat_pair(actuators[5], actuators[4], "PairedEyouActuator-M3_Seat");
+  logger.info("Six motor actuators (IDs 101-106) in three reversed pairs: M1_Seat 102-101, "
+              "M2_Seat 104-103, M3_Seat 106-105");
 
   const EyouMotor::ProfilePositionConfig profile{
       .velocity_degrees_per_second = 60.0f,
@@ -621,9 +682,9 @@ extern "C" void app_main(void) {
   };
 
   stem::StemController controller({
-      .left = left_pair,
-      .right = right_pair,
-      .seat = seat_pair,
+      .m1_seat = m1_seat_pair,
+      .m2_seat = m2_seat_pair,
+      .m3_seat = m3_seat_pair,
       .motors = actuators,
       .can_ok = can_ok,
       .max_torque_permille = kMaxTorquePermille,
@@ -638,9 +699,9 @@ extern "C" void app_main(void) {
     // Mode before the controlword: a fresh Eyou drive refuses the DS402 enable
     // sequence until modes of operation is set (enable_drive() also prepares
     // it, idempotently), and the torque limit before anything can move.
-    if (!left_pair.configure_profile_position(profile) ||
-        !right_pair.configure_profile_position(profile) ||
-        !seat_pair.configure_profile_position(profile)) {
+    if (!m1_seat_pair.configure_profile_position(profile) ||
+        !m2_seat_pair.configure_profile_position(profile) ||
+        !m3_seat_pair.configure_profile_position(profile)) {
       logger.error("Failed to configure profile-position mode on one or more pairs");
     }
     if (controller.set_torque_limit(kBootTorquePermille) != stem::StemController::Result::Ok) {
@@ -663,7 +724,7 @@ extern "C" void app_main(void) {
       }
     }
     // enable_drive() clears a fault left by the watchdog (e.g. after a reset)
-    if (!left_pair.enable_drive() || !right_pair.enable_drive() || !seat_pair.enable_drive()) {
+    if (!m1_seat_pair.enable_drive() || !m2_seat_pair.enable_drive() || !m3_seat_pair.enable_drive()) {
       logger.error("Failed to enable one or more drives");
     }
     controller.zero(std::nullopt, false);

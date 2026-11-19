@@ -88,7 +88,7 @@ std::vector<uint8_t> StemModule::build_info(Transport transport) const {
   proto::put_str(payload, config_.app.idf);
 
   payload.push_back(proto::kPairCount);
-  const PairedEyouActuator *pairs[] = {&cfg.left, &cfg.right, &cfg.seat};
+  const PairedEyouActuator *pairs[] = {&cfg.m1_seat, &cfg.m2_seat, &cfg.m3_seat};
   for (uint8_t i = 0; i < proto::kPairCount; ++i) {
     payload.push_back(i);
     proto::put_str(payload, to_string(static_cast<Pair>(i)));
@@ -298,7 +298,7 @@ void StemModule::handle_frame(const espp::stream_frame::Frame &frame, Transport 
     const auto rpm = proto::get_f32_at(payload, 5);
     const auto pair = index ? pair_from_index(*index) : std::nullopt;
     if (payload.size() != 9 || !pair || !degrees || !rpm) {
-      bad_args("SET_PAIR needs u8 pair (0 left, 1 right, 2 seat), f32 degrees, f32 rpm");
+      bad_args("SET_PAIR needs u8 pair (0 M1_Seat, 1 M2_Seat, 2 M3_Seat), f32 degrees, f32 rpm");
       break;
     }
     reply_result(controller.set_pair(*pair, *degrees, *rpm), "set pair rejected");

@@ -35,7 +35,7 @@ float tilt_of(const LevelTrajectory::Pairs &p) {
   return p[2] + s.m3_angle_deg;
 }
 // walk a plan: worst tilt error after the seat first reached `tilt`, max pair speed,
-// and whether left / right stayed put until the seat was level
+// and whether M1_Seat / M2_Seat stayed put until the seat was level
 struct Walk { float worst_tilt = 0, max_speed = 0; bool level_first = true; };
 Walk walk(const LevelTrajectory &t, float tilt) {
   Walk w; const float dt = 0.002f; bool levelled = false;
@@ -67,12 +67,12 @@ int main() {
   check(w.max_speed < lim.speed_deg_s * 1.03f, "no pair faster than the speed limit");
   for (int k = 0; k < 3; ++k) check(std::fabs(t.end()[k] - goal[k]) < 1e-3f, "ends at the target's pair angles");
 
-  // start 10 deg off level: seat levels first, left / right wait
+  // start 10 deg off level: seat levels first, M1_Seat / M2_Seat wait
   auto tilted = start; tilted[2] += 10.0f;
   check(t.plan(tilted, 206.0f - ref.x, 540.0f - ref.y, 0.0f, ref, geo, range, lo, hi, lim) ==
             LevelTrajectory::Result::Ok, "tilted start plans");
   w = walk(t, 0.0f);
-  check(w.level_first, "a tilted seat is levelled before left / right move");
+  check(w.level_first, "a tilted seat is levelled before M1_Seat / M2_Seat move");
   check(w.worst_tilt < 0.05f, "and stays level after");
 
   // with a tilt: keeps the tilt

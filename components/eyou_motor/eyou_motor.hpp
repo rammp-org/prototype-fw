@@ -88,6 +88,11 @@ public:
   // Write modes of operation (0x6060): 1 profile position, 13 CSF (force
   // control, -F joints). No enable / verify: read get_operating_mode() back.
   bool set_operating_mode(int8_t mode, uint32_t timeout_ms = 100);
+  // Diagnostics: read any object (expedited SDO, up to 4 bytes). `raw` holds
+  // the little-endian bytes, `size` how many the drive sent. An abort is logged
+  // with its code.
+  bool read_sdo(uint16_t index, uint8_t subindex, uint32_t &raw, uint8_t &size,
+                uint32_t timeout_ms = 100);
   // Profile velocity mode (3) for streamed moves: target velocity 0, the
   // given acceleration / deceleration (0x6083 / 0x6084), mode 3 (verified),
   // enabled. The drive then ramps smoothly to every set_target_velocity().

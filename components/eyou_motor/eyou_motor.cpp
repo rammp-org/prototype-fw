@@ -31,8 +31,10 @@ constexpr uint16_t kRatedCurrentIndex = 0x6075;
 constexpr uint16_t kRatedTorqueIndex = 0x6076;
 constexpr uint16_t kTorqueActualIndex = 0x6077;
 constexpr uint16_t kCurrentActualIndex = 0x6078;
-// Force-controlled (-F) joints only: the output torque sensor, REAL (IEEE-754 float) in Nm,
-// read-only (CANopen manual v1.04+, object 0x27BD "Torque Value").
+// Force-controlled (-F) joints only: the output torque sensor, read-only (CANopen
+// manual v1.04+, object 0x27BD "Torque Value"). The manual lists it as a REAL in Nm,
+// but the drives (revision 0x3D) send a signed 32-bit integer in mNm - like 0x2087
+// "module rated torque", which reads 84000 for the 84 Nm PHU-25H-110-F (2026-11-19).
 constexpr uint16_t kSensorTorqueIndex = 0x27BD;
 constexpr uint16_t kControlwordHalt = 0x0100;
 constexpr uint16_t kControlwordShutdown = 0x0006;
@@ -814,6 +816,12 @@ bool EyouMotor::set_heartbeat_consumer(uint8_t producer_node_id, uint16_t timeou
   return send_sdo_u32(kHeartbeatConsumerIndex, value, 1);
 }
 
+bool EyouMotor::read_sdo(uint16_t index, uint8_t subindex, uint32_t &raw, uint8_t &size,
+                         uint32_t timeout_ms) {
+  std::lock_guard<std::mutex> lock(transaction_mutex_);
+  return request_sdo_expedited(index, subindex, raw, size, timeout_ms);
+}
+
 bool EyouMotor::set_operating_mode(int8_t mode, uint32_t timeout_ms) {
   std::lock_guard<std::mutex> lock(transaction_mutex_);
   return send_sdo_u8(kModesOfOperationIndex, static_cast<uint8_t>(mode), 0, timeout_ms);
@@ -981,12 +989,7 @@ bool EyouMotor::get_sensor_torque(float &torque_nm, uint32_t timeout_ms) {
   if (!request_sdo_expedited(kSensorTorqueIndex, 0, raw, size, timeout_ms) || size != 4) {
     return false;
   }
-  float value = 0.0f;
-  std::memcpy(&value, &raw, sizeof(value)); // REAL: the 4 data bytes are an IEEE-754 float
-  if (!std::isfinite(value)) {
-    return false;
-  }
-  torque_nm = value;
+  torque_nm = static_cast<float>(static_cast<int32_t>(raw)) * 0.001f; // DINT, mNm
   return true;
 }
 
