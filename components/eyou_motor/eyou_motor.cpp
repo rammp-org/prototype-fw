@@ -719,6 +719,17 @@ bool EyouMotor::get_position(float &position_degrees, uint32_t timeout_ms) {
   return false;
 }
 
+bool EyouMotor::get_target_position(float &target_degrees, uint32_t timeout_ms) {
+  std::lock_guard<std::mutex> lock(transaction_mutex_);
+  uint32_t raw_target = 0;
+  if (!request_sdo_u32(kTargetPositionIndex, 0x43, raw_target, timeout_ms)) {
+    return false;
+  }
+  target_degrees =
+      pulses_to_degrees(static_cast<int32_t>(raw_target) - zero_offset_pulses_.value_or(0));
+  return true;
+}
+
 bool EyouMotor::get_statusword(uint16_t &statusword, uint32_t timeout_ms) {
   std::lock_guard<std::mutex> lock(transaction_mutex_);
   uint32_t raw_statusword = 0;

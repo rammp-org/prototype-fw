@@ -4,6 +4,7 @@
 #include <cctype>
 #include <string>
 #include <cmath>
+#include <cstdio>
 
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
@@ -1035,6 +1036,292 @@ State StemController::snapshot(bool read_motors) {
     state.can.ack_errors = s.ack_errors;
   }
   return state;
+}
+
+// ======================= Pair balance (temporary bring-up tool) =======================
+
+EyouMotor *StemController::motor_by_id(uint8_t id, size_t *index) {
+  for (size_t i = 0; i < config_.motors.size() && i < kMotorCount; ++i) {
+    if (config_.motors[i].node_id() == id) {
+      if (index != nullptr) {
+        *index = i;
+      }
+      return &config_.motors[i];
+    }
+  }
+  return nullptr;
+}
+
+bool StemController::pair_of_motor(uint8_t id, Pair &pair, bool &is_secondary) const {
+  for (uint8_t i = 0; i < kPairCount; ++i) {
+    const auto &a = actuator(static_cast<Pair>(i));
+    if (a.primary_id() == id || a.secondary_id() == id) {
+      pair = static_cast<Pair>(i);
+      is_secondary = a.secondary_id() == id;
+      return true;
+    }
+  }
+  return false;
+}
+
+// Average kSamples reads of every motor's output torque sensor and position: the
+// sensors read ~0.1 Nm noise sample to sample, the steps change ~0.3-3 Nm.
+bool StemController::read_balance(std::array<float, kMotorCount> &sensor,
+                                  std::array<float, kMotorCount> &position) {
+  constexpr int kSamples = 8;
+  const size_t count = std::min(config_.motors.size(), kMotorCount);
+  sensor.fill(0.0f);
+  position.fill(0.0f);
+  for (int k = 0; k < kSamples; ++k) {
+    for (size_t i = 0; i < count; ++i) {
+      float torque = 0.0f, degrees = 0.0f;
+      if (!config_.motors[i].get_sensor_torque(torque, 50) ||
+          !config_.motors[i].get_position(degrees, 50)) {
+        logger_.error("balance: motor {} sensor / position read failed",
+                      config_.motors[i].node_id());
+        return false;
+      }
+      sensor[i] += torque / kSamples;
+      position[i] += degrees / kSamples;
+    }
+    vTaskDelay(pdMS_TO_TICKS(15));
+  }
+  return true;
+}
+
+bool StemController::wait_target_reached(EyouMotor &motor, uint32_t timeout_ms) {
+  for (uint32_t waited = 0; waited <= timeout_ms; waited += 20) {
+    uint16_t statusword = 0;
+    if (motor.get_statusword(statusword, 50) && (statusword & 0x0400) != 0) {
+      return true;
+    }
+    vTaskDelay(pdMS_TO_TICKS(20));
+  }
+  return false;
+}
+
+StemController::NudgeReport StemController::nudge(uint8_t motor_id, float step_deg,
+                                                  uint8_t flags) {
+  // Red-flag thresholds (Nm / deg). Sensor noise after averaging is ~0.05 Nm.
+  constexpr float kFightRiseNm = 0.4f;   // the pair's fight grew: wrong direction / overshoot
+  constexpr float kLoadShiftNm = 1.5f;   // the pair's load (sum) changed: something moved
+  constexpr float kOtherMotorNm = 1.5f;  // a motor outside the pair changed torque
+  constexpr float kOtherMoveDeg = 0.05f; // any motor other than the stepped one moved
+  constexpr float kMaxSensorNm = 70.0f;  // 84 Nm rated: never let a step approach it
+  constexpr uint32_t kSettleMs = 300;    // torque settle after the target is reached
+
+  std::lock_guard<std::mutex> lock(mutex_);
+  NudgeReport report{};
+  report.motor_id = motor_id;
+  report.step_deg = step_deg;
+  const size_t count = std::min(config_.motors.size(), kMotorCount);
+  for (size_t i = 0; i < count; ++i) {
+    report.ids[i] = config_.motors[i].node_id();
+  }
+  auto refuse = [&](const std::string &why) {
+    report.status = NudgeReport::Status::Refused;
+    report.message = why;
+    logger_.warn("nudge motor {} by {:.3f} deg refused: {}", motor_id, step_deg, why);
+    return report;
+  };
+
+  size_t index = 0;
+  EyouMotor *motor = motor_by_id(motor_id, &index);
+  Pair pair{};
+  bool is_secondary = false;
+  if (motor == nullptr || !pair_of_motor(motor_id, pair, is_secondary)) {
+    return refuse("unknown motor id");
+  }
+  if ((flags & kNudgeResetSession) != 0) {
+    nudge_total_deg_.fill(0.0f);
+  }
+  if ((flags & kNudgeClearRedFlag) != 0 && nudge_red_flag_) {
+    nudge_red_flag_ = false;
+    logger_.warn("nudge red flag cleared by the user");
+  }
+  report.session_deg = nudge_total_deg_[index];
+  if (nudge_red_flag_) {
+    return refuse("a red flag is latched - review it, then Clear red flag");
+  }
+  if (!std::isfinite(step_deg) || std::fabs(step_deg) > kNudgeMaxStepDeg + 1e-6f) {
+    return refuse("step must be within +/-" + std::to_string(kNudgeMaxStepDeg) + " deg");
+  }
+  if (std::fabs(nudge_total_deg_[index] + step_deg) > kNudgeMaxTotalDeg + 1e-6f) {
+    return refuse("motor's total steps would exceed " + std::to_string(kNudgeMaxTotalDeg) +
+                  " deg (zero it, or reset the session)");
+  }
+  if (run_) {
+    return refuse("a move is running");
+  }
+  if (measuring_) {
+    return refuse("measure mode is on");
+  }
+  if (brakes_engaged_) {
+    return refuse("brakes engaged - release them first (the drives must hold)");
+  }
+  for (size_t i = 0; i < count; ++i) {
+    uint16_t sw = 0;
+    const uint8_t id = config_.motors[i].node_id();
+    if (!config_.motors[i].get_statusword(sw, 50)) {
+      return refuse("motor " + std::to_string(id) + " did not answer");
+    }
+    if ((sw & 0x0008) != 0) {
+      return refuse("motor " + std::to_string(id) + " is faulted");
+    }
+    if ((sw & 0x006F) != 0x0027) {
+      return refuse("motor " + std::to_string(id) + " is not enabled (holding)");
+    }
+    if ((sw & 0x0400) == 0) {
+      return refuse("motor " + std::to_string(id) + " has not reached its target (still moving)");
+    }
+  }
+
+  if (!read_balance(report.sensor_before, report.position_before)) {
+    return refuse("a torque sensor / position read failed");
+  }
+  report.sensor_after = report.sensor_before;
+  report.position_after = report.position_before;
+  if (step_deg == 0.0f) {
+    report.status = NudgeReport::Status::Ok;
+    report.message = "measured";
+    return report;
+  }
+
+  float target = 0.0f;
+  if (!motor->get_target_position(target, 100)) {
+    return refuse("could not read the motor's target");
+  }
+  // From here on a failure undoes the step and latches the red flag.
+  auto red_flag = [&](const std::string &why) {
+    const bool undone = motor->move_absolute(target) && wait_target_reached(*motor, 1500);
+    vTaskDelay(pdMS_TO_TICKS(kSettleMs));
+    nudge_red_flag_ = true;
+    report.status = NudgeReport::Status::RedFlag;
+    report.message = why + (undone ? " - step undone" : " - UNDO FAILED, check the drives");
+    logger_.error("nudge RED FLAG, motor {} step {:+.3f} deg: {}", motor_id, step_deg,
+                  report.message);
+    for (size_t i = 0; i < count; ++i) {
+      logger_.error("  motor {}: sensor {:+7.2f} -> {:+7.2f} Nm, position {:+9.4f} -> {:+9.4f} deg",
+                    report.ids[i], report.sensor_before[i], report.sensor_after[i],
+                    report.position_before[i], report.position_after[i]);
+    }
+    return report;
+  };
+
+  if (!motor->move_absolute(target + step_deg)) {
+    return red_flag("the drive did not accept the step");
+  }
+  const bool reached = wait_target_reached(*motor, 1500);
+  vTaskDelay(pdMS_TO_TICKS(kSettleMs));
+  if (!read_balance(report.sensor_after, report.position_after)) {
+    return red_flag("a torque sensor / position read failed after the step");
+  }
+  if (!reached) {
+    return red_flag("the motor did not reach the stepped target (blocked?)");
+  }
+
+  // ---- red-flag checks ----
+  char text[160];
+  for (size_t i = 0; i < count; ++i) {
+    if (std::fabs(report.sensor_after[i]) > kMaxSensorNm) {
+      snprintf(text, sizeof(text), "motor %u output torque %.1f Nm is above %.0f Nm",
+               report.ids[i], report.sensor_after[i], kMaxSensorNm);
+      return red_flag(text);
+    }
+  }
+  for (uint8_t p = 0; p < kPairCount; ++p) {
+    const auto &a = actuator(static_cast<Pair>(p));
+    size_t ip = 0, is = 0;
+    if (motor_by_id(a.primary_id(), &ip) == nullptr || motor_by_id(a.secondary_id(), &is) == nullptr) {
+      continue;
+    }
+    // mirrored drives: the pair's load is primary - secondary, the fight is their mean
+    const float load_before = report.sensor_before[ip] - report.sensor_before[is];
+    const float load_after = report.sensor_after[ip] - report.sensor_after[is];
+    const float fight_before = 0.5f * (report.sensor_before[ip] + report.sensor_before[is]);
+    const float fight_after = 0.5f * (report.sensor_after[ip] + report.sensor_after[is]);
+    const char *name = stem::to_string(static_cast<Pair>(p));
+    if (static_cast<Pair>(p) == pair) {
+      if (std::fabs(fight_after) > std::fabs(fight_before) + kFightRiseNm) {
+        snprintf(text, sizeof(text),
+                 "%s fight grew %.2f -> %.2f Nm (wrong direction, or the step overshot zero)", name,
+                 fight_before, fight_after);
+        return red_flag(text);
+      }
+      if (std::fabs(load_after - load_before) > kLoadShiftNm) {
+        snprintf(text, sizeof(text), "%s load changed %.2f -> %.2f Nm (the linkage moved?)", name,
+                 load_before, load_after);
+        return red_flag(text);
+      }
+    } else {
+      for (const size_t i : {ip, is}) {
+        if (std::fabs(report.sensor_after[i] - report.sensor_before[i]) > kOtherMotorNm) {
+          snprintf(text, sizeof(text), "motor %u (%s, not stepped) torque changed %.2f -> %.2f Nm",
+                   report.ids[i], name, report.sensor_before[i], report.sensor_after[i]);
+          return red_flag(text);
+        }
+      }
+    }
+  }
+  for (size_t i = 0; i < count; ++i) {
+    if (i != index && std::fabs(report.position_after[i] - report.position_before[i]) > kOtherMoveDeg) {
+      snprintf(text, sizeof(text), "motor %u (not stepped) moved %.3f deg", report.ids[i],
+               report.position_after[i] - report.position_before[i]);
+      return red_flag(text);
+    }
+  }
+
+  nudge_total_deg_[index] += step_deg;
+  report.session_deg = nudge_total_deg_[index];
+  report.status = NudgeReport::Status::Ok;
+  report.message = "ok";
+  logger_.info("nudge motor {} {:+.3f} deg (total {:+.3f}): ok", motor_id, step_deg,
+               report.session_deg);
+  return report;
+}
+
+StemController::Result StemController::set_motor_zero(uint8_t motor_id, float &zero_change_deg,
+                                                      std::string &message) {
+  std::lock_guard<std::mutex> lock(mutex_);
+  zero_change_deg = 0.0f;
+  size_t index = 0;
+  EyouMotor *motor = motor_by_id(motor_id, &index);
+  Pair pair{};
+  bool is_secondary = false;
+  if (motor == nullptr || !pair_of_motor(motor_id, pair, is_secondary)) {
+    message = "unknown motor id";
+    return Result::InvalidArgument;
+  }
+  if (run_ || measuring_ || brakes_engaged_ || nudge_red_flag_) {
+    message = run_ ? "a move is running" : measuring_ ? "measure mode is on"
+              : brakes_engaged_ ? "brakes engaged" : "a nudge red flag is latched";
+    return Result::InvalidArgument;
+  }
+  const auto &a = actuator(pair);
+  EyouMotor *partner = motor_by_id(is_secondary ? a.primary_id() : a.secondary_id());
+  float partner_deg = 0.0f, own_deg = 0.0f;
+  if (partner == nullptr || !partner->get_position(partner_deg, 100) ||
+      !motor->get_position(own_deg, 100)) {
+    message = "position read failed";
+    return Result::ActuatorFailed;
+  }
+  // mirrored pair: this motor should read the negative of its partner
+  zero_change_deg = -partner_deg - own_deg;
+  if (std::fabs(zero_change_deg) > kNudgeMaxTotalDeg + 0.1f) {
+    message = "the new zero would move this motor's reading by " + std::to_string(zero_change_deg) +
+              " deg - more than the balance tool's range, refused";
+    return Result::OutOfLimits;
+  }
+  if (!motor->zero_at(-partner_deg) || !motor->save_zero() || !motor->hold_position()) {
+    message = "zero / NVS save / hold failed (see the device log)";
+    return Result::ActuatorFailed;
+  }
+  nudge_total_deg_[index] = 0.0f;
+  check_pair_unlocked(pair);
+  message = "ok";
+  logger_.warn("motor {} re-zeroed to mirror motor {}: its reading moved {:+.4f} deg (saved to NVS)",
+               motor_id, partner->node_id(), zero_change_deg);
+  return Result::Ok;
 }
 
 } // namespace stem

@@ -76,6 +76,8 @@ public:
   bool reset_fault(uint32_t timeout_ms = 1000);
   // Read the actual position (degrees), relative to the software zero if set.
   bool get_position(float &position_degrees, uint32_t timeout_ms = 100);
+  // Read the commanded profile-position target (0x607A, degrees), relative to the software zero.
+  bool get_target_position(float &target_degrees, uint32_t timeout_ms = 100);
   // Read the DS402 statusword (object 0x6041).
   bool get_statusword(uint16_t &statusword, uint32_t timeout_ms = 100);
   // Read the active error code (object 0x603F).

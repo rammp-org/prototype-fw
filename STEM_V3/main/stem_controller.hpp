@@ -14,6 +14,7 @@
 #include <mutex>
 #include <optional>
 #include <span>
+#include <string>
 #include <string_view>
 
 #include "base_component.hpp"
@@ -252,6 +253,33 @@ public:
 
   State snapshot(bool read_motors);
 
+  // ---- Pair balance (temporary bring-up tool, console "Data tour" panel) ----
+  // Step ONE motor's profile-position target by a small angle, with every other
+  // motor holding, and compare the output torque sensors before / after. Used to
+  // find the angle where a pair's two motors stop fighting each other, then
+  // set_motor_zero() re-zeroes that motor there. Red flags (the step made the
+  // pair fight harder, shifted load, or disturbed another motor) undo the step
+  // and latch: further steps are refused until cleared.
+  struct NudgeReport {
+    enum class Status : uint8_t { Ok = 0, Refused = 1, RedFlag = 2 };
+    Status status{Status::Refused};
+    uint8_t motor_id{0};
+    float step_deg{0.0f};    ///< the step requested (0 = measure only)
+    float session_deg{0.0f}; ///< this motor's accumulated steps since its last zero / reset
+    std::array<uint8_t, kMotorCount> ids{};
+    std::array<float, kMotorCount> sensor_before{}, sensor_after{};     ///< 0x27BD, Nm (averaged)
+    std::array<float, kMotorCount> position_before{}, position_after{}; ///< deg (averaged)
+    std::string message;
+  };
+  static constexpr uint8_t kNudgeClearRedFlag = 1 << 0;
+  static constexpr uint8_t kNudgeResetSession = 1 << 1;
+  static constexpr float kNudgeMaxStepDeg = 0.1f;   ///< per step
+  static constexpr float kNudgeMaxTotalDeg = 1.0f;  ///< per motor, since its last zero / reset
+  NudgeReport nudge(uint8_t motor_id, float step_deg, uint8_t flags);
+  // Re-zero one motor so it reads exactly the mirror of its pair partner (where
+  // the pair stopped fighting), save that zero to NVS, and hold there.
+  Result set_motor_zero(uint8_t motor_id, float &zero_change_deg, std::string &message);
+
 private:
   // stop() with mutex_ already held (pose-move aborts, commands that interrupt a move).
   bool stop_unlocked();
@@ -306,6 +334,13 @@ private:
   std::atomic<bool> brakes_engaged_{false};
   float target_x_{0.0f};
   float target_y_{0.0f};
+  // pair balance (mutex_ held)
+  EyouMotor *motor_by_id(uint8_t id, size_t *index = nullptr);
+  bool pair_of_motor(uint8_t id, Pair &pair, bool &is_secondary) const;
+  bool read_balance(std::array<float, kMotorCount> &sensor, std::array<float, kMotorCount> &position);
+  bool wait_target_reached(EyouMotor &motor, uint32_t timeout_ms);
+  std::array<float, kMotorCount> nudge_total_deg_{};
+  bool nudge_red_flag_{false};
 };
 
 } // namespace stem

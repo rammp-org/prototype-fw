@@ -48,7 +48,8 @@ static constexpr uint8_t kModule = 7;
 /// after the motor records still decodes everything it knew).
 /// v3 (2026-11): output torque sensor block (0x27BD, -F joints) appended to
 /// STATE / TELEMETRY after the CAN block (a v2 host stops before it).
-static constexpr uint8_t kProtocolVersion = 3;
+/// v4 (2026-11): NUDGE / SET_MOTOR_ZERO + NUDGE_RESULT (pair balance bring-up tool).
+static constexpr uint8_t kProtocolVersion = 4;
 
 /// Actuator pair indices used in payloads.
 enum class Pair : uint8_t { M1_Seat = 0, M2_Seat = 1, M3_Seat = 2 };
@@ -85,6 +86,11 @@ enum class Msg : uint8_t {
                      ///< pose, the output torque sensors (0x27BD) read the load; moves refused.
   Engage = 0x1E, ///< no payload: stop, drives off so the brakes hold; moves refused until Release
                  ///< -> Ok(0) | Error
+  // Pair balance (temporary bring-up tool, see StemController::nudge):
+  Nudge = 0x1F, ///< u8 motor id, f32 step deg (|step| <= 0.1; 0 = measure only), u8 flags
+                ///< (bit0 clear a latched red flag, bit1 reset the step totals) -> NudgeResult | Error
+  SetMotorZero = 0x20, ///< u8 motor id: re-zero it to mirror its pair partner, save to NVS
+                       ///< -> Ok(f32 bits: how far its reading moved, deg) | Error
                      ///< Ok(permille) | Error
   // --- Generic replies (device -> host) --------------------------------------
   Ok = 0x81,    ///< u8 request type, u32 value
@@ -95,6 +101,10 @@ enum class Msg : uint8_t {
   Moved = 0x92,     ///< f32 x_rel, f32 y_rel, f32 left_deg, f32 right_deg, f32 seat_deg
   IkResult = 0x93,  ///< see IkResult layout below
   Telemetry = 0x94, ///< same layout as State (periodic while streaming)
+  NudgeResult = 0x95, ///< u8 status (0 ok, 1 refused, 2 red flag - step undone), u8 motor id,
+                      ///< f32 step deg, f32 motor's step total deg, u8 motor count; per motor:
+                      ///< u8 id, f32 sensor Nm before, f32 after, f32 position deg before, f32 after;
+                      ///< then a utf8 message (rest of the payload)
 };
 
 // Info payload:

@@ -1,7 +1,9 @@
 #include "stem_module.hpp"
 
 #include <algorithm>
+#include <bit>
 #include <cmath>
+#include <string>
 #include <string_view>
 #include <system_error>
 
@@ -332,6 +334,49 @@ void StemModule::handle_frame(const espp::stream_frame::Frame &frame, Transport 
   case Msg::Engage:
     reply_result(controller.engage_brakes() ? Result::Ok : Result::ActuatorFailed, "engage brakes");
     break;
+
+  case Msg::Nudge: {
+    const auto id = proto::get_u8_at(payload, 0);
+    const auto step = proto::get_f32_at(payload, 1);
+    const auto flags = proto::get_u8_at(payload, 5);
+    if (payload.size() != 6 || !id || !step || !flags) {
+      bad_args("NUDGE needs u8 motor id, f32 step deg, u8 flags");
+      break;
+    }
+    const auto report = controller.nudge(*id, *step, *flags);
+    std::vector<uint8_t> out;
+    out.push_back(static_cast<uint8_t>(report.status));
+    out.push_back(report.motor_id);
+    proto::put_f32(out, report.step_deg);
+    proto::put_f32(out, report.session_deg);
+    out.push_back(static_cast<uint8_t>(report.ids.size()));
+    for (size_t i = 0; i < report.ids.size(); ++i) {
+      out.push_back(report.ids[i]);
+      proto::put_f32(out, report.sensor_before[i]);
+      proto::put_f32(out, report.sensor_after[i]);
+      proto::put_f32(out, report.position_before[i]);
+      proto::put_f32(out, report.position_after[i]);
+    }
+    out.insert(out.end(), report.message.begin(), report.message.end());
+    send(proto::build(Msg::NudgeResult, out));
+    break;
+  }
+
+  case Msg::SetMotorZero: {
+    const auto id = proto::get_u8_at(payload, 0);
+    if (payload.size() != 1 || !id) {
+      bad_args("SET_MOTOR_ZERO needs u8 motor id");
+      break;
+    }
+    float change = 0.0f;
+    std::string message;
+    const Result result = controller.set_motor_zero(*id, change, message);
+    if (result == Result::Ok)
+      send(proto::make_ok(request, std::bit_cast<uint32_t>(change)));
+    else
+      send(error_for(request, result, "set motor zero: " + message));
+    break;
+  }
 
   case Msg::ResetFault:
     reply_result(controller.reset_fault() ? Result::Ok : Result::ActuatorFailed,
