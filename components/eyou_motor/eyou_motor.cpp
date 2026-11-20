@@ -361,7 +361,7 @@ bool EyouMotor::reset_fault_unlocked(uint32_t timeout_ms) {
   return false;
 }
 
-bool EyouMotor::configure_profile_position(const ProfilePositionConfig &config) {
+bool EyouMotor::configure_profile_position(const ProfilePositionConfig &config, bool enable) {
   std::lock_guard<std::mutex> lock(transaction_mutex_);
   uint32_t velocity_pulses_per_second = 0;
   uint32_t acceleration_pulses_per_second_squared = 0;
@@ -384,8 +384,14 @@ bool EyouMotor::configure_profile_position(const ProfilePositionConfig &config) 
   }
 
   const std::array<uint8_t, 2> nmt_start{0x01, node_id_};
-  if (!send_raw(0x000, nmt_start) || !ensure_operation_enabled(1000) ||
-      !ensure_profile_position_mode(1000)) {
+  if (!send_raw(0x000, nmt_start)) {
+    return false;
+  }
+  if (enable) {
+    if (!ensure_operation_enabled(1000) || !ensure_profile_position_mode(1000)) {
+      return false;
+    }
+  } else if (!send_sdo_u8(kModesOfOperationIndex, 1)) { // drive stays off, brakes on
     return false;
   }
 
@@ -609,7 +615,17 @@ bool EyouMotor::move_absolute(float target_degrees, bool immediate) {
   return false;
 }
 
-bool EyouMotor::retarget(float target_degrees, float velocity_degrees_per_second) {
+bool EyouMotor::setpoint_ready(bool &ready, uint32_t timeout_ms) {
+  std::lock_guard<std::mutex> lock(transaction_mutex_);
+  uint32_t raw_statusword = 0;
+  if (!request_sdo_u32(kStatuswordIndex, 0x4B, raw_statusword, timeout_ms)) {
+    return false;
+  }
+  ready = (raw_statusword & 0x1000) == 0;
+  return true;
+}
+
+bool EyouMotor::stream_setpoint(float target_degrees, float velocity_degrees_per_second) {
   std::lock_guard<std::mutex> lock(transaction_mutex_);
   const float limited_target_degrees =
       std::clamp(target_degrees, minimum_position_degrees_, maximum_position_degrees_);
@@ -625,12 +641,27 @@ bool EyouMotor::retarget(float target_degrees, float velocity_degrees_per_second
       absolute_pulses > std::numeric_limits<int32_t>::max()) {
     return false;
   }
-  // No enable / mode checks (the trajectory's first set-point went through
-  // move_absolute): a faulted or disabled drive does not acknowledge the
-  // set-point below, which fails this call and stops the trajectory.
-  return send_sdo_u32(kProfileVelocityIndex, velocity) &&
-         send_sdo_u32(kTargetPositionIndex, static_cast<uint32_t>(static_cast<int32_t>(absolute_pulses))) &&
-         trigger_profile_position(false, true);
+  const uint16_t controlword = kControlwordEnableOperation | kControlwordImmediate;
+  if (!send_sdo_u32(kProfileVelocityIndex, velocity) ||
+      !send_sdo_u32(kTargetPositionIndex,
+                    static_cast<uint32_t>(static_cast<int32_t>(absolute_pulses))) ||
+      !send_sdo_u16(kControlwordIndex, controlword) ||
+      !send_sdo_u16(kControlwordIndex, controlword | kControlwordNewSetpoint)) {
+    return false;
+  }
+  for (int attempt = 0; attempt < 10; ++attempt) {
+    uint32_t raw_statusword = 0;
+    if (!request_sdo_u32(kStatuswordIndex, 0x4B, raw_statusword, 50)) {
+      return false;
+    }
+    if ((raw_statusword & 0x1000) != 0) {
+      return send_sdo_u16(kControlwordIndex, controlword); // release bit 4
+    }
+    vTaskDelay(pdMS_TO_TICKS(5));
+  }
+  send_sdo_u16(kControlwordIndex, controlword);
+  logger_.error("streamed set-point was not acknowledged");
+  return false;
 }
 
 bool EyouMotor::move_incremental(float increment_degrees, bool immediate) {
@@ -778,32 +809,6 @@ bool EyouMotor::wait_for_mode_unlocked(int8_t mode, uint32_t timeout_ms) {
   logger_.error("Timed out switching to mode {} (display {})", static_cast<int>(mode),
                 static_cast<int>(static_cast<int8_t>(raw_mode)));
   return false;
-}
-
-bool EyouMotor::start_velocity_mode(float acceleration_degrees_per_second_squared,
-                                    uint32_t timeout_ms) {
-  std::lock_guard<std::mutex> lock(transaction_mutex_);
-  uint32_t acceleration = 0;
-  if (!degrees_to_profile_units(acceleration_degrees_per_second_squared, acceleration)) {
-    return false;
-  }
-  // target velocity 0 BEFORE the mode change: the drive must not start moving
-  // at a stale 0x60FF the moment it enters PV
-  return send_sdo_u32(kTargetVelocityIndex, 0) &&
-         send_sdo_u32(kProfileAccelerationIndex, acceleration) &&
-         send_sdo_u32(kProfileDecelerationIndex, acceleration) &&
-         send_sdo_u8(kModesOfOperationIndex, 3) && wait_for_mode_unlocked(3, timeout_ms) &&
-         ensure_operation_enabled(timeout_ms) &&
-         send_sdo_u16(kControlwordIndex, kControlwordEnableOperation); // halt bit clear
-}
-
-bool EyouMotor::set_target_velocity(float velocity_degrees_per_second) {
-  std::lock_guard<std::mutex> lock(transaction_mutex_);
-  int32_t pulses_per_second = 0;
-  if (!degrees_to_pulses(velocity_degrees_per_second, pulses_per_second)) {
-    return false;
-  }
-  return send_sdo_u32(kTargetVelocityIndex, static_cast<uint32_t>(pulses_per_second));
 }
 
 bool EyouMotor::hold_position(uint32_t timeout_ms) {

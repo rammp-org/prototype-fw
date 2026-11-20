@@ -161,6 +161,7 @@ public:
   };
   static const char *to_string(Result result);
 
+
   explicit StemController(const Config &config);
 
   const Config &config() const { return config_; }
@@ -207,6 +208,9 @@ public:
   /// refused (Result::BrakesEngaged) until release_brakes().
   bool engage_brakes();
   bool brakes_engaged() const { return brakes_engaged_.load(); }
+  // Boot state: drives off (brakes holding), moves refused until the user
+  // releases the brakes from the console. No stop / halt (nothing is moving).
+  bool start_engaged();
   /// Measure mode, for reading the output torque sensors under load: stop,
   /// disable every drive so the brakes hold the pose (aborted, drives
   /// re-enabled, if any pair moves more than 0.5 deg - a brake that does not
@@ -298,16 +302,20 @@ private:
     LevelTrajectory plan;
     float speed_deg_s{0.0f};
     float t{0.0f}; ///< plan time (s): advances with real time, frozen on hold
-    Clock::time_point last{}, stalled_since{}, end_since{};
+    Clock::time_point last{}, stalled_since{};
     float rate{1.0f}; ///< plan clock rate (0..1), lowered while the seat drifts
     bool slowed{false};
-    bool at_end{false};
-    bool settling{false}; ///< end reached, speeds zeroed: the next tick switches to the hold
-    Clock::time_point settle_since{};
     uint8_t read_failures{0};
+    // position streaming
+    LevelTrajectory::Pairs sent{}; ///< last set-point handed to each pair
+    bool final_sent{false};
+    Clock::time_point final_since{}, busy_since{};
+    bool busy{false};
   };
+  void service_position_unlocked(Run &r, const LevelTrajectory::Pairs &measured,
+                                 Clock::time_point now, float dt);
   Result start_move_unlocked(float x_rel, float y_rel, float speed_deg_s);
-  static constexpr float kVelocityAccel = 200.0f; ///< drive ramp between streamed speeds, deg/s^2
+  static constexpr float kStreamAccel = 200.0f; ///< drive ramp while streaming set-points, deg/s^2
   static constexpr float kStopDecel = 120.0f;     ///< STOP / engage deceleration, deg/s^2
   void restore_profile_unlocked();
   // seat tilt from level of a pair triple; NAN when the cranks have no FK

@@ -39,7 +39,9 @@ public:
                 bool rtr = false) const;
 
   // Reset the CANopen node and configure it for Profile Position mode.
-  bool configure_profile_position(const ProfilePositionConfig &config);
+  // enable = false: everything but switching the drive on (the brakes stay
+  // engaged; the mode is requested, enable_drive() verifies it later).
+  bool configure_profile_position(const ProfilePositionConfig &config, bool enable = true);
   // Read back the drive's current Profile Position velocity/accel/decel (objects
   // 0x6081/0x6083/0x6084).
   bool get_profile_position_config(ProfilePositionConfig &config, uint32_t timeout_ms = 100);
@@ -60,12 +62,17 @@ public:
   bool move_absolute(float target_degrees, bool immediate = true);
   // Move by a relative position increment (degrees) from the current position.
   bool move_incremental(float increment_degrees, bool immediate = true);
-  // Trajectory streaming: write the profile velocity (0x6081) and a new target,
-  // and apply it immediately (the drive blends from its current motion; no
-  // stop). Clamped to the position limits like move_absolute(), but without its
-  // enable / mode / fault reads, so it costs ~5 SDOs. The drive must already be
-  // enabled in profile position mode.
-  bool retarget(float target_degrees, float velocity_degrees_per_second);
+  // Position streaming (profile position mode, already enabled). Each set-point
+  // replaces the running target at once (controlword bit 5, "change set
+  // immediately"); without the board a drive stops at its last set-point.
+  // (Buffered "change on set-point", bit 9, was tried: the EYOU drives do not
+  // blend set-points, so it is not offered.)
+  // True when the drive can take a new set-point (statusword bit 12, set-point
+  // acknowledge, is clear).
+  bool setpoint_ready(bool &ready, uint32_t timeout_ms = 50);
+  // Write 0x6081 + 0x607A and hand the set-point over (new set-point bit 4,
+  // wait for the acknowledge, release bit 4). Clamped to the position limits.
+  bool stream_setpoint(float target_degrees, float velocity_degrees_per_second);
   // Drive the DS402 state machine to Operation Enabled.
   // Enable the drive (DS402 sequence to Operation Enabled, profile position
   // mode prepared first). A drive in Fault gets its fault reset on the way.
@@ -95,13 +102,6 @@ public:
   // with its code.
   bool read_sdo(uint16_t index, uint8_t subindex, uint32_t &raw, uint8_t &size,
                 uint32_t timeout_ms = 100);
-  // Profile velocity mode (3) for streamed moves: target velocity 0, the
-  // given acceleration / deceleration (0x6083 / 0x6084), mode 3 (verified),
-  // enabled. The drive then ramps smoothly to every set_target_velocity().
-  bool start_velocity_mode(float acceleration_degrees_per_second_squared,
-                           uint32_t timeout_ms = 1000);
-  // Target velocity (0x60FF), deg/s at the output, signed. Mode 3 only.
-  bool set_target_velocity(float velocity_degrees_per_second);
   // Back to profile position holding where the drive is: velocity 0, target
   // position = actual, mode 1 (verified), enabled, halt bit clear.
   bool hold_position(uint32_t timeout_ms = 1000);

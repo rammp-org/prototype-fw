@@ -297,22 +297,26 @@ StemController::Result StemController::start_move_unlocked(float x_rel, float y_
     return Result::OutOfLimits;
   }
   const auto now = Clock::now();
+  // A re-plan keeps the running move's last set-points.
+  LevelTrajectory::Pairs sent = run_ ? run_->sent : start;
   if (!run_) {
-    // Profile velocity mode for the move: service() streams each pair's speed
-    // (the plan's speed plus a position correction); the drives ramp smoothly
-    // between speeds with kVelocityAccel. Target velocity starts at 0.
+    // Profile position streaming: every pair holding where it is (mode 1,
+    // enabled, target = actual), with a fast drive ramp so the drive follows the
+    // plan's own (gentle) acceleration instead of adding a lag of its own.
+    const EyouMotor::ProfilePositionConfig fast{config_.profile.velocity_degrees_per_second,
+                                                kStreamAccel, kStreamAccel};
     for (uint8_t i = 0; i < kPairCount; ++i) {
       auto &pair = actuator(static_cast<Pair>(i));
-      if (!pair.start_velocity_mode(kVelocityAccel)) {
-        logger_.error("move rejected: the {} pair did not enter velocity mode",
+      if (!pair.hold_position() || !pair.set_profile_position_config(fast)) {
+        logger_.error("move rejected: the {} pair did not take position streaming",
                       stem::to_string(static_cast<Pair>(i)));
-        run_.emplace(); // so stop_unlocked() returns every pair to a position hold
-        stop_unlocked();
+        restore_profile_unlocked();
         return Result::ActuatorFailed;
       }
     }
   }
   run_.emplace();
+  run_->sent = sent;
   run_->plan = std::move(plan);
   run_->speed_deg_s = speed_deg_s;
   run_->last = now;
@@ -401,8 +405,7 @@ void StemController::service() {
     return;
   }
 
-  // hard backstop: a pair beyond its position limits (velocity mode has no
-  // drive-side target to stop at)
+  // hard backstop: a pair beyond its position limits
   for (size_t i = 0; i < kPairCount; ++i) {
     if (measured[i] < config_.min_deg[i] - 1.0f || measured[i] > config_.max_deg[i] + 1.0f) {
       logger_.error("level move STOPPED: the {} pair is at {:.1f} deg, outside [{}, {}]",
@@ -414,72 +417,84 @@ void StemController::service() {
   }
 
   r.t += dt * r.rate;
+  service_position_unlocked(r, measured, now, dt);
+}
+
+// Position streaming: each tick hands every pair the plan's set-point kLead
+// seconds ahead of the plan clock, with a profile velocity that covers the step
+// in one tick. The drives run the level path themselves; the guards above (level,
+// stall, limits) still watch the measured pairs. A dead board leaves each drive
+// stopping at its last set-point.
+void StemController::service_position_unlocked(Run &r, const LevelTrajectory::Pairs &measured,
+                                               Clock::time_point now, float dt) {
+  constexpr float kLead = 0.2f;       // s of plan ahead of the clock
+  constexpr float kTick = 0.1f;       // nominal service period, s
+  constexpr float kMinStepDeg = 0.002f;
   const float duration = r.plan.duration();
   const auto &end = r.plan.end();
-  if (r.t >= duration) {
-    float remaining = 0.0f;
-    for (size_t i = 0; i < kPairCount; ++i) {
-      remaining = std::max(remaining, std::fabs(measured[i] - end[i]));
-    }
-    if (!r.at_end) {
-      r.at_end = true;
-      r.end_since = now;
-    }
-    if (r.settling) {
-      // speeds were zeroed last tick: the drives have ramped down. Switch to
-      // profile position holding exactly where each pair stopped - no final
-      // correction move (that was the "click"): the pull below already brought
-      // every pair within kEndTolerance of the target.
-      if (now - r.settle_since < std::chrono::milliseconds(150)) {
-        return;
-      }
+  float remaining = 0.0f;
+  for (size_t i = 0; i < kPairCount; ++i) {
+    remaining = std::max(remaining, std::fabs(measured[i] - end[i]));
+  }
+  if (r.final_sent) {
+    // the drives run to the final set-point and stop there by themselves
+    constexpr float kEndTolerance = 0.1f;
+    const bool timed_out = now - r.final_since > std::chrono::milliseconds(3000);
+    if (remaining < kEndTolerance || timed_out) {
       run_.reset();
-      bool ok = true;
-      for (uint8_t i = 0; i < kPairCount; ++i) {
-        ok = actuator(static_cast<Pair>(i)).hold_position() && ok;
-      }
       restore_profile_unlocked();
       logger_.info("level move done ({:.2f} deg from the target){}", remaining,
-                   ok ? "" : " - a pair did not take the final hold, check");
-      return;
+                   timed_out ? " - settle timed out, check" : "");
     }
-    constexpr float kEndTolerance = 0.1f;
-    if (remaining < kEndTolerance || now - r.end_since > std::chrono::milliseconds(2500)) {
-      if (remaining >= kEndTolerance) {
-        logger_.warn("level move: {:.2f} deg from the target after the settle time", remaining);
-      }
-      for (uint8_t i = 0; i < kPairCount; ++i) {
-        actuator(static_cast<Pair>(i)).set_velocity(0.0f);
-      }
-      r.settling = true;
-      r.settle_since = now;
-      return;
-    }
+    return;
   }
-  // Velocity command per pair: the plan's speed at (now + the command's
-  // latency), scaled by the slow-down rate, plus a proportional pull toward the
-  // plan's position. Both come from the same level path, so the seat stays level
-  // while every pair tracks it.
-  constexpr float kLatency = 0.05f;
-  constexpr float kPositionGain = 2.0f; // 1/s: a 1 deg lag adds 2 deg/s
-  constexpr float kProbe = 0.05f;
-  const auto p0 = r.plan.at(r.t + kLatency * r.rate), p1 = r.plan.at(r.t + (kLatency + kProbe) * r.rate);
-  const float v_max = 1.5f * r.speed_deg_s + 5.0f;
-  std::array<float, kPairCount> velocity{};
+  const float t_cmd = std::min(r.t + kLead * r.rate, duration);
+  const bool last = t_cmd >= duration;
+  const auto target = last ? end : r.plan.at(t_cmd);
+  float step = 0.0f;
   for (size_t i = 0; i < kPairCount; ++i) {
-    const float feed = r.rate > 1e-3f ? (p1[i] - p0[i]) / kProbe : 0.0f; // already scaled by rate
-    const float target = r.at_end ? end[i] : planned[i];
-    velocity[i] = std::clamp(feed + kPositionGain * (target - measured[i]), -v_max, v_max);
+    step = std::max(step, std::fabs(target[i] - r.sent[i]));
   }
-  // seat first: of the three, it is the one that keeps the seat level
-  constexpr Pair order[] = {Pair::M3_Seat, Pair::M1_Seat, Pair::M2_Seat};
-  for (const Pair pair : order) {
-    const auto i = static_cast<uint8_t>(pair);
-    if (!actuator(pair).set_velocity(velocity[i])) {
-      logger_.error("level move STOPPED: the {} pair did not take its speed", stem::to_string(pair));
+  if (!last && step < kMinStepDeg) {
+    return; // slowed to a stop: the drives finish their last set-point and wait
+  }
+  // send to every pair or to none (a split set-point would tilt the seat)
+  for (uint8_t i = 0; i < kPairCount; ++i) {
+    bool ready = false;
+    if (!actuator(static_cast<Pair>(i)).setpoint_ready(ready)) {
+      logger_.error("level move STOPPED: the {} pair did not answer", stem::to_string(static_cast<Pair>(i)));
       stop_unlocked();
       return;
     }
+    if (!ready) {
+      if (!r.busy) {
+        r.busy = true;
+        r.busy_since = now;
+      } else if (now - r.busy_since > std::chrono::milliseconds(1000)) {
+        logger_.error("level move STOPPED: the {} pair has not taken a set-point for 1 s",
+                      stem::to_string(static_cast<Pair>(i)));
+        stop_unlocked();
+      }
+      return; // try again next tick (the step just gets longer)
+    }
+  }
+  r.busy = false;
+  const float v_max = 1.5f * r.speed_deg_s + 5.0f;
+  const float period = std::max(dt, kTick);
+  constexpr Pair order[] = {Pair::M3_Seat, Pair::M1_Seat, Pair::M2_Seat};
+  for (const Pair pair : order) {
+    const auto i = static_cast<uint8_t>(pair);
+    const float velocity = std::clamp(std::fabs(target[i] - r.sent[i]) / period, 0.2f, v_max);
+    if (!actuator(pair).stream_setpoint(target[i], velocity)) {
+      logger_.error("level move STOPPED: the {} pair did not take its set-point", stem::to_string(pair));
+      stop_unlocked();
+      return;
+    }
+  }
+  r.sent = target;
+  if (last) {
+    r.final_sent = true;
+    r.final_since = now;
   }
 }
 
@@ -520,14 +535,7 @@ bool StemController::stop() {
 
 bool StemController::stop_unlocked() {
   const bool had_run = run_.has_value();
-  run_.reset(); // service() stops streaming speeds
-  if (had_run) {
-    // velocity mode: zero every target speed first (releasing the halt below
-    // would otherwise resume the last one)
-    for (uint8_t i = 0; i < kPairCount; ++i) {
-      actuator(static_cast<Pair>(i)).set_velocity(0.0f);
-    }
-  }
+  run_.reset(); // service() stops streaming set-points
   // A set-point nobody acknowledged, stuck in the TWAI queue, would delay the
   // halt frames behind it: drop it first (CanBus::flush_pending, see Config).
   if (config_.flush_pending_commands) {
@@ -696,6 +704,19 @@ bool StemController::release_brakes() {
   }
   logger_.info("brakes released (drives enabled, holding): M1_Seat={} M2_Seat={} M3_Seat={}",
                m1_ok, m2_ok, m3_ok);
+  return ok;
+}
+
+bool StemController::start_engaged() {
+  std::lock_guard<std::mutex> lock(mutex_);
+  bool ok = true;
+  for (uint8_t i = 0; i < kPairCount; ++i) {
+    ok = actuator(static_cast<Pair>(i)).disable_drive() && ok;
+  }
+  brakes_engaged_.store(true);
+  target_valid_ = false;
+  logger_.info("boot: brakes ENGAGED (drives off){} - release them from the console to move",
+               ok ? "" : " (a drive did not confirm, check the motor table)");
   return ok;
 }
 
@@ -948,8 +969,7 @@ bool StemController::any_zero_mismatch_unlocked() const {
 State StemController::snapshot(bool read_motors) {
   // Only the controller's own fields are read under mutex_: the CAN reads below
   // take each motor's transaction lock alone, so a pose move's service() ticks
-  // (velocity mode: a late speed update is a longer run at the last speed) are
-  // never queued behind a whole telemetry poll.
+  // are never queued behind a whole telemetry poll.
   State state{};
   {
     std::lock_guard<std::mutex> lock(mutex_);

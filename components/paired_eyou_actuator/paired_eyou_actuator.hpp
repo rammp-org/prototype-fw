@@ -25,7 +25,7 @@ public:
   PairedEyouActuator(const PairedEyouActuator &) = delete;
   PairedEyouActuator &operator=(const PairedEyouActuator &) = delete;
 
-  bool configure_profile_position(const EyouMotor::ProfilePositionConfig &config);
+  bool configure_profile_position(const EyouMotor::ProfilePositionConfig &config, bool enable = true);
   bool enable_drive(uint32_t timeout_ms = 1000);
   bool disable_drive(uint32_t timeout_ms = 1000);
   // Stop the move in progress on both motors with the profile deceleration and
@@ -58,15 +58,14 @@ public:
   bool get_status(Status &status, uint32_t timeout_ms = 100);
   bool set_position(float position_degrees, bool immediate = true);
   bool move_incremental(float increment_degrees, bool immediate = true);
-  // Trajectory streaming (EyouMotor::retarget on both, the secondary mirrored):
-  // new target + profile velocity, applied immediately without stopping.
-  bool retarget(float position_degrees, float velocity_degrees_per_second);
+  // Position streaming (EyouMotor::stream_setpoint on both, the secondary
+  // mirrored). ready = both drives can take a set-point now (send to both or
+  // neither, so the pair never splits).
+  bool setpoint_ready(bool &ready);
+  bool stream_setpoint(float position_degrees, float velocity_degrees_per_second);
   // Profile velocity / acceleration / deceleration on both motors (no mode change).
   bool set_profile_position_config(const EyouMotor::ProfilePositionConfig &config);
-  // Streamed moves in profile velocity mode (EyouMotor::start_velocity_mode /
-  // set_target_velocity / hold_position on both, the secondary mirrored).
-  bool start_velocity_mode(float acceleration_degrees_per_second_squared);
-  bool set_velocity(float velocity_degrees_per_second);
+  // Hold where each motor is (EyouMotor::hold_position on both).
   bool hold_position();
 
   uint8_t primary_id() const { return primary_.node_id(); }

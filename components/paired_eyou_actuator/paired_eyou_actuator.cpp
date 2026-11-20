@@ -9,9 +9,9 @@ PairedEyouActuator::PairedEyouActuator(EyouMotor &primary, EyouMotor &secondary,
     , secondary_(secondary) {}
 
 bool PairedEyouActuator::configure_profile_position(
-    const EyouMotor::ProfilePositionConfig &config) {
-  const bool primary_ok = primary_.configure_profile_position(config);
-  const bool secondary_ok = secondary_.configure_profile_position(config);
+    const EyouMotor::ProfilePositionConfig &config, bool enable) {
+  const bool primary_ok = primary_.configure_profile_position(config, enable);
+  const bool secondary_ok = secondary_.configure_profile_position(config, enable);
   return primary_ok && secondary_ok;
 }
 
@@ -148,21 +148,18 @@ bool PairedEyouActuator::set_position(float position_degrees, bool immediate) {
   return true;
 }
 
-bool PairedEyouActuator::retarget(float position_degrees, float velocity_degrees_per_second) {
-  const bool primary_ok = primary_.retarget(position_degrees, velocity_degrees_per_second);
-  const bool secondary_ok = secondary_.retarget(-position_degrees, velocity_degrees_per_second);
-  return primary_ok && secondary_ok;
+bool PairedEyouActuator::setpoint_ready(bool &ready) {
+  bool primary_ready = false, secondary_ready = false;
+  if (!primary_.setpoint_ready(primary_ready) || !secondary_.setpoint_ready(secondary_ready)) {
+    return false;
+  }
+  ready = primary_ready && secondary_ready;
+  return true;
 }
 
-bool PairedEyouActuator::start_velocity_mode(float acceleration_degrees_per_second_squared) {
-  const bool primary_ok = primary_.start_velocity_mode(acceleration_degrees_per_second_squared);
-  const bool secondary_ok = secondary_.start_velocity_mode(acceleration_degrees_per_second_squared);
-  return primary_ok && secondary_ok;
-}
-
-bool PairedEyouActuator::set_velocity(float velocity_degrees_per_second) {
-  const bool primary_ok = primary_.set_target_velocity(velocity_degrees_per_second);
-  const bool secondary_ok = secondary_.set_target_velocity(-velocity_degrees_per_second);
+bool PairedEyouActuator::stream_setpoint(float position_degrees, float velocity_degrees_per_second) {
+  const bool primary_ok = primary_.stream_setpoint(position_degrees, velocity_degrees_per_second);
+  const bool secondary_ok = secondary_.stream_setpoint(-position_degrees, velocity_degrees_per_second);
   return primary_ok && secondary_ok;
 }
 

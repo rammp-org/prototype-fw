@@ -51,6 +51,8 @@
 #include "stem_controller.hpp"
 #include "stem_module.hpp"
 #include "stream_frame.hpp"
+#include "freertos/FreeRTOS.h"
+#include "freertos/task.h"
 #include "task.hpp"
 #include "usb_device.hpp"
 
@@ -113,7 +115,8 @@ constexpr auto kTelemetryStallTimeout = 2s;
 // CANopen heartbeat from this board (COB 0x700 + id, state 5 = operational).
 // Every actuator is a heartbeat consumer of it (0x1016): if the board stops
 // talking (crash, reset, cable) for kHeartbeatTimeoutMs the drives raise a
-// fault and stop - needed now that pose moves stream speeds (velocity mode).
+// fault and stop (pose moves stream position set-points; each drive would
+// otherwise finish its last one and hold). The EYOU drives ignore it (tested 2026-11-20).
 constexpr uint8_t kHeartbeatNodeId = 0x7F;
 constexpr auto kHeartbeatPeriod = 50ms;
 constexpr uint16_t kHeartbeatTimeoutMs = 300;
@@ -300,6 +303,34 @@ std::unique_ptr<cli::Menu> make_cli_menu(stem::StemController &controller,
         out << "heartbeat " << (on ? "ON" : "PAUSED (drives should fault within 300 ms)") << "\n";
       },
       "Pause / resume this board's CANopen heartbeat (watchdog test): heartbeat <0|1>");
+  menu->Insert(
+      "save_params",
+      [actuators, &controller](std::ostream &out) {
+        // 0x1010:01 "save" = every drive parameter to the drive's own EEPROM (~3 s each,
+        // never power off meanwhile). Brakes must be engaged so nothing can move.
+        if (!controller.brakes_engaged()) {
+          out << "refused: engage the brakes first (console: Engage brakes & stop)\n";
+          return;
+        }
+        for (auto &motor : actuators) {
+          out << "  " << int(motor.node_id()) << ": saving..." << std::flush;
+          if (!motor.save_parameters(1, 1000)) {
+            out << " FAILED (write refused, see the log)\n";
+            continue;
+          }
+          uint32_t raw = 0;
+          uint8_t size = 0;
+          bool done = false;
+          for (int waited = 0; waited < 6000 && !done; waited += 250) {
+            vTaskDelay(pdMS_TO_TICKS(250));
+            done = motor.read_sdo(0x1010, 1, raw, size, 200) && raw == 2;
+          }
+          out << (done ? " saved\n" : " NOT confirmed (0x1010:01 never read 2)\n");
+        }
+        out << "done. Power-cycle the drives, then repeat the heartbeat test.\n";
+      },
+      "Save every drive parameter to the drives' EEPROM (brakes engaged; ~3 s per drive): "
+      "save_params");
   menu->Insert(
       "measure",
       [&controller](std::ostream &out, int on, int mode) {
@@ -699,9 +730,11 @@ extern "C" void app_main(void) {
     // Mode before the controlword: a fresh Eyou drive refuses the DS402 enable
     // sequence until modes of operation is set (enable_drive() also prepares
     // it, idempotently), and the torque limit before anything can move.
-    if (!m1_seat_pair.configure_profile_position(profile) ||
-        !m2_seat_pair.configure_profile_position(profile) ||
-        !m3_seat_pair.configure_profile_position(profile)) {
+    // enable = false: the drives stay OFF (brakes engaged) through boot; only
+    // the console's "Release brakes" switches them on.
+    if (!m1_seat_pair.configure_profile_position(profile, false) ||
+        !m2_seat_pair.configure_profile_position(profile, false) ||
+        !m3_seat_pair.configure_profile_position(profile, false)) {
       logger.error("Failed to configure profile-position mode on one or more pairs");
     }
     if (controller.set_torque_limit(kBootTorquePermille) != stem::StemController::Result::Ok) {
@@ -723,10 +756,10 @@ extern "C" void app_main(void) {
         logger.warn("Motor {}: heartbeat watchdog not configured", actuator.node_id());
       }
     }
-    // enable_drive() clears a fault left by the watchdog (e.g. after a reset)
-    if (!m1_seat_pair.enable_drive() || !m2_seat_pair.enable_drive() || !m3_seat_pair.enable_drive()) {
-      logger.error("Failed to enable one or more drives");
-    }
+    // Boot with the brakes ENGAGED: only the user releases them (console
+    // "Release brakes"). Releasing enables the drives, which also clears any
+    // fault left by the watchdog.
+    controller.start_engaged();
     controller.zero(std::nullopt, false);
     if (!controller.load_zero()) {
       logger.warn("Failed to load zero for one or more pairs, please load zero manually");
