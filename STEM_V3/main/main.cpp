@@ -809,7 +809,38 @@ extern "C" void app_main(void) {
 
   espp::Task motion_task(
       {.callback = [&](std::mutex &m, std::condition_variable &cv) -> bool {
+         // TEMP(tick-timing): measure how long service() takes and the real
+         // tick period during pose moves, logged once a second. Remove after the
+         // 20 Hz streaming decision (search "TEMP(tick-timing)").
+         static auto tt_last_start = std::chrono::steady_clock::now();
+         static auto tt_last_log = tt_last_start;
+         static float tt_sum_ms = 0, tt_max_ms = 0, tt_period_sum_ms = 0, tt_period_max_ms = 0;
+         static int tt_n = 0;
+         const auto tt_start = std::chrono::steady_clock::now();
+         const bool tt_moving = controller.moving();
          controller.service();
+         if (tt_moving) {
+           using ms = std::chrono::duration<float, std::milli>;
+           const float busy = ms(std::chrono::steady_clock::now() - tt_start).count();
+           const float period = ms(tt_start - tt_last_start).count();
+           tt_sum_ms += busy;
+           tt_max_ms = std::max(tt_max_ms, busy);
+           tt_period_sum_ms += period;
+           tt_period_max_ms = std::max(tt_period_max_ms, period);
+           if (++tt_n > 0 && tt_start - tt_last_log >= 1s) {
+             logger.info("TEMP tick: service avg {:.1f} max {:.1f} ms | period avg {:.1f} max {:.1f} ms ({} ticks)",
+                         tt_sum_ms / tt_n, tt_max_ms, tt_period_sum_ms / tt_n, tt_period_max_ms, tt_n);
+             tt_sum_ms = tt_max_ms = tt_period_sum_ms = tt_period_max_ms = 0;
+             tt_n = 0;
+             tt_last_log = tt_start;
+           }
+         } else {
+           tt_n = 0;
+           tt_sum_ms = tt_max_ms = tt_period_sum_ms = tt_period_max_ms = 0;
+           tt_last_log = tt_start;
+         }
+         tt_last_start = tt_start;
+         // END TEMP(tick-timing)
          std::unique_lock<std::mutex> lock(m);
          cv.wait_for(lock, 100ms);
          return false; // don't stop the task
